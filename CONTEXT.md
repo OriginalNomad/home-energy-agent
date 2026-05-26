@@ -8,7 +8,7 @@
 
 A Home Assistant-based battery optimisation system for a single residential site in Glebe, Sydney. It controls a Tesla Powerwall 2 using price forecasts (Amber Electric dynamic tariff) and solar forecasts (Solcast) to minimise electricity bills and avoid network demand charges.
 
-This is also the personal testbed for **Sol** — a multi-tenant battery optimisation product being built at `/Users/simonmonk/Simon Projects/Home Energy Console/`. The rules and architecture here will eventually be replaced by Sol's MPC solver.
+This is also the personal testbed for **Sol** — a multi-tenant battery optimisation product being built in `app/`. The rules and architecture here will eventually be replaced by Sol's MPC solver.
 
 ---
 
