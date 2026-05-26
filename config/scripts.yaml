@@ -1,0 +1,52 @@
+log_battery_decision:
+  alias: "Log Battery Decision"
+  description: >
+    Called by charging automations to record decision context to InfluxDB.
+    Fields: automation_name, action_taken, reserve_set.
+    SoC, price, solar remaining and grid target are read live at call time.
+  fields:
+    automation_name:
+      description: "Automation that fired"
+      example: "morning_charge_trigger"
+    action_taken:
+      description: "Human-readable description of the action"
+      example: "reserve set to 61% (grid charge target)"
+    reserve_set:
+      description: "Backup reserve percent that was set"
+      example: 61
+  sequence:
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.battery_decision_automation
+      data:
+        value: "{{ automation_name }}"
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.battery_decision_action
+      data:
+        value: "{{ action_taken }}"
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.battery_decision_soc
+      data:
+        value: "{{ states('sensor.tessie_powerwall_charge') | float(0) | round(1) }}"
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.battery_decision_price
+      data:
+        value: "{{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}"
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.battery_decision_solar_remaining
+      data:
+        value: "{{ states('sensor.solcast_pv_forecast_forecast_remaining_today') | float(0) | round(2) }}"
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.battery_decision_grid_target
+      data:
+        value: "{{ states('sensor.battery_grid_charge_target') | int }}"
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.battery_decision_reserve_set
+      data:
+        value: "{{ reserve_set | int }}"

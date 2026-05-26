@@ -1,0 +1,55 @@
+# Home Assistant generated files
+config/.storage/
+config/home-assistant_v2.db
+config/home-assistant_v2.db-shm
+config/home-assistant_v2.db-wal
+config/deps/
+config/tts/
+config/.cloud/
+config/backups/
+config/__pycache__/
+config/*.log
+config/*.log.*
+config/OZW_Log.txt
+config/.HA_VERSION
+config/.cache/
+config/.ha_run.lock
+
+# Third-party integrations and generated assets (too large / not source)
+config/custom_components/
+config/solcast_solar/
+config/www/
+config/image/
+
+# Secrets — move API keys here eventually
+config/secrets.yaml
+
+# OS
+.DS_Store
+
+# Agent
+agent/Claude AI - API details
+agent/.env
+
+# App (Next.js)
+app/node_modules
+app/.pnp
+app/.pnp.*
+app/.yarn/*
+!app/.yarn/patches
+!app/.yarn/plugins
+!app/.yarn/releases
+!app/.yarn/versions
+app/coverage
+app/.next/
+app/out/
+app/build
+app/*.pem
+app/npm-debug.log*
+app/yarn-debug.log*
+app/yarn-error.log*
+app/.pnpm-debug.log*
+app/.env*
+app/.vercel
+app/*.tsbuildinfo
+app/next-env.d.ts
