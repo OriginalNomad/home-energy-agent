@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+/* ─── Sol Design Tokens (Superhuman-inspired) ─────────────────────────────── */
+:root {
+  /* Brand */
+  --color-primary:            #1b1938;
+  --color-primary-deep:       #0e0c1f;
+  --color-on-primary:         #ffffff;
+
+  /* Accent */
+  --color-violet-soft:        #c9b4fa;
+  --color-teal-deep:          #0e3030;
+  --color-teal-mid:           #155555;
+
+  /* Canvas */
+  --color-canvas:             #ffffff;
+  --color-canvas-soft:        #fafaf8;
+
+  /* Ink */
+  --color-ink:                #292827;
+  --color-ink-mute:           #73706d;
+  --color-ink-faint:          #9a9794;
+  --color-on-dark-mute:       #bcbac9;
+  --color-on-dark-faint:      #5a5772;
+
+  /* Borders */
+  --color-hairline:           #e8e4dd;
+  --color-hairline-dark:      #3f3a52;
+
+  /* Radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+}
+
+/* ─── Base ────────────────────────────────────────────────────────────────── */
+html { font-feature-settings: "cv02", "cv03", "cv04", "cv11"; }
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* CTA pulse */
+@keyframes cta-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(21, 85, 85, 0.5); }
+  60%       { box-shadow: 0 0 0 10px rgba(21, 85, 85, 0); }
+}
+.btn-cta-pulse { animation: cta-pulse 2.2s ease-out infinite; }
+
+/* Inter variable-weight helpers */
+.weight-460 { font-variation-settings: "wght" 460; }
+.weight-540 { font-variation-settings: "wght" 540; }
+.weight-600 { font-variation-settings: "wght" 600; }
+.weight-700 { font-variation-settings: "wght" 700; }

@@ -1,0 +1,250 @@
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Exclude chatty sensors from recorder and logbook
+# Polestar timestamp sensors update every minute and flood Activity log
+recorder:
+  exclude:
+    entities:
+      - sensor.polestar_7853_estimated_fully_charged_time
+      - sensor.polestar_7853_estimated_charging_time_to_target_distance
+      - sensor.polestar_7853_last_updated_battery_data
+      - sensor.polestar_7853_last_updated_health_data
+      - sensor.polestar_7853_last_updated_odometer_data
+
+logbook:
+  exclude:
+    entities:
+      - sensor.polestar_7853_estimated_fully_charged_time
+      - sensor.polestar_7853_estimated_charging_time_to_target_distance
+      - sensor.polestar_7853_last_updated_battery_data
+      - sensor.polestar_7853_last_updated_health_data
+      - sensor.polestar_7853_last_updated_odometer_data
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+input_text:
+  battery_decision_automation:
+    name: "Battery Decision — Automation"
+    max: 100
+  battery_decision_action:
+    name: "Battery Decision — Action"
+    max: 255
+
+input_number:
+  battery_decision_soc:
+    name: "Battery Decision — SoC"
+    min: 0
+    max: 100
+    unit_of_measurement: "%"
+  battery_decision_price:
+    name: "Battery Decision — Price"
+    min: -100
+    max: 500
+    unit_of_measurement: "¢/kWh"
+  battery_decision_solar_remaining:
+    name: "Battery Decision — Solar Remaining"
+    min: 0
+    max: 30
+    unit_of_measurement: "kWh"
+  battery_decision_grid_target:
+    name: "Battery Decision — Grid Target"
+    min: 0
+    max: 100
+    unit_of_measurement: "%"
+  battery_decision_reserve_set:
+    name: "Battery Decision — Reserve Set"
+    min: 0
+    max: 100
+    unit_of_measurement: "%"
+
+sensor:
+  - platform: statistics
+    name: "Home Load 30min Average"
+    entity_id: sensor.tesla_powerwall_2_load_power
+    state_characteristic: mean
+    max_age:
+      minutes: 30
+
+template:
+  - sensor:
+      - name: "Solar Power W"
+        unit_of_measurement: "W"
+        device_class: power
+        state: "{{ (states('sensor.tesla_powerwall_2_solar_power') | float(0) * 1000) | round(0) }}"
+      - name: "Battery Power W"
+        unit_of_measurement: "W"
+        device_class: power
+        state: "{{ (states('sensor.tesla_powerwall_2_battery_power') | float(0) * 1000) | round(0) }}"
+      - name: "Grid Power W"
+        unit_of_measurement: "W"
+        device_class: power
+        state: "{{ (states('sensor.tesla_powerwall_2_site_power') | float(0) * 1000) | round(0) }}"
+      - name: "Home Power W"
+        unit_of_measurement: "W"
+        device_class: power
+        state: "{{ (states('sensor.tesla_powerwall_2_load_power') | float(0) * 1000) | round(0) }}"
+
+      - name: "Powerwall Mode"
+        icon: mdi:battery-charging-medium
+        state: >
+          {{ state_attr('sensor.tessie_powerwall_info', 'default_real_mode') | default('unknown') }}
+        availability: >
+          {{ states('sensor.tessie_powerwall_info') not in ['unavailable', 'unknown'] }}
+
+      - name: "Powerwall Backup Reserve"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        icon: mdi:battery-lock
+        state: >
+          {{ state_attr('sensor.tessie_powerwall_info', 'backup_reserve_percent') | int(0) }}
+        availability: >
+          {{ states('sensor.tessie_powerwall_info') not in ['unavailable', 'unknown'] }}
+
+      - name: "Amber Cheapest Charge Window"
+        icon: mdi:clock-outline
+        state: >
+          {% set forecasts = state_attr('sensor.1a_wigram_road_glebe_general_forecast', 'forecasts') %}
+          {% if forecasts %}
+            {% set now_iso = now().isoformat()[:19] %}
+            {% set cheap = forecasts | selectattr('nem_date', 'gt', now_iso) | selectattr('per_kwh', 'lt', 0.12) | list %}
+            {% if cheap %}
+              {% set start = cheap | map(attribute='nem_date') | min %}
+              {% set end = cheap | map(attribute='nem_date') | max %}
+              {% set start_date = start[:10] %}
+              {% if start_date == now().date().isoformat() %}Today
+              {% elif start_date == (now().date() + timedelta(days=1)).isoformat() %}Tomorrow
+              {% else %}{{ start[8:10] }}/{{ start[5:7] }}
+              {% endif %} {{ start[11:16] }} – {{ end[11:16] }} ({{ cheap | length }} intervals)
+            {% else %}
+              No cheap window found
+            {% endif %}
+          {% else %}
+            Unavailable
+          {% endif %}
+
+      # Is current price cheaper than the average of today's 4pm-8pm evening peak?
+      # Directly answers: "is now cheaper than tonight's peak?"
+      # True  = charge now, evening will be more expensive
+      # False = evening peak is cheaper or similar, no point charging now
+      # TODO: replace with Solcast-aware MPC once Solcast integration is installed
+      - name: "Amber In Cheap Window"
+        icon: mdi:cash-clock
+        state: >
+          {% set forecasts = state_attr('sensor.1a_wigram_road_glebe_general_forecast', 'forecasts') %}
+          {% set current = states('sensor.1a_wigram_road_glebe_general_price') | float(99) %}
+          {% if forecasts and current < 99 %}
+            {% set today = now().date().isoformat() %}
+            {% set peak_start = today + 'T16:00:00' %}
+            {% set peak_end   = today + 'T20:00:00' %}
+            {% set peak = forecasts
+                | selectattr('nem_date', 'gt', peak_start)
+                | selectattr('nem_date', 'lt', peak_end)
+                | list %}
+            {% if peak | length > 1 %}
+              {% set avg_peak = (peak | map(attribute='per_kwh') | list | sum) / (peak | length) %}
+              {{ current < avg_peak }}
+            {% else %}
+              false
+            {% endif %}
+          {% else %}
+            false
+          {% endif %}
+        attributes:
+          avg_peak_4_8pm_cents: >
+            {% set forecasts = state_attr('sensor.1a_wigram_road_glebe_general_forecast', 'forecasts') %}
+            {% if forecasts %}
+              {% set today = now().date().isoformat() %}
+              {% set peak_start = today + 'T16:00:00' %}
+              {% set peak_end   = today + 'T20:00:00' %}
+              {% set peak = forecasts
+                  | selectattr('nem_date', 'gt', peak_start)
+                  | selectattr('nem_date', 'lt', peak_end)
+                  | list %}
+              {% if peak | length > 1 %}
+                {{ ((peak | map(attribute='per_kwh') | list | sum) / (peak | length) * 100) | round(1) }}
+              {% else %}
+                unknown
+              {% endif %}
+            {% else %}
+              unknown
+            {% endif %}
+          current_price_cents: >
+            {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}
+
+      # How much grid charging is needed (%) so that remaining solar covers the rest to 95%
+      # Recalculates every time SoC, Solcast, or home load changes.
+      # Clamped to 5–95%. Feeds into charging automations instead of fixed percent: 100.
+      - name: "Polestar 4 Range"
+        unit_of_measurement: "km"
+        icon: mdi:car-electric
+        state: "{{ states('sensor.polestar_7853_range') | float(0) | round(0) | int }}"
+
+      - name: "Battery Grid Charge Target"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        icon: mdi:battery-charging-outline
+        state: >
+          {% set remaining_solar = states('sensor.solcast_pv_forecast_forecast_remaining_today') | float(0) %}
+          {% set home_load_kw = states('sensor.home_load_30min_average') | float(states('sensor.tesla_powerwall_2_load_power') | float(0)) %}
+          {% set now_h = now().hour + now().minute / 60 %}
+          {% set hours_to_3pm = [15 - now_h, 0] | max %}
+          {% set home_load_estimate = home_load_kw * hours_to_3pm %}
+          {% set net_solar = [remaining_solar - home_load_estimate, 0] | max %}
+          {% set target = (95 - (net_solar / 13.5 * 100)) | round(0) | int %}
+          {{ [[target, 5] | max, 95] | min }}
+
+
+# Tessie Powerwall — polled every 2 minutes
+rest:
+  - resource: "https://api.tessie.com/api/1/energy_sites/2252120180790091/site_info"
+    headers:
+      Authorization: "Bearer BEVtCQYyFhwkEu02WK4ONIAoyiJwGP9z"
+    scan_interval: 120
+    sensor:
+      - name: "Tessie Powerwall Info"
+        value_template: "{{ value_json.response.default_real_mode }}"
+        json_attributes_path: "$.response"
+        json_attributes:
+          - backup_reserve_percent
+          - default_real_mode
+          - vpp_backup_reserve_percent
+
+  # Live status — true SoC from cloud, not floor-clipped by reserve like the local gateway
+  - resource: "https://api.tessie.com/api/1/energy_sites/2252120180790091/live_status"
+    headers:
+      Authorization: "Bearer BEVtCQYyFhwkEu02WK4ONIAoyiJwGP9z"
+    scan_interval: 120
+    sensor:
+      - name: "Tessie Powerwall Charge"
+        value_template: "{{ value_json.response.percentage_charged | round(0) | int }}"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+
+# Tessie REST commands for Powerwall control
+rest_command:
+  powerwall_set_backup_reserve:
+    url: "https://api.tessie.com/api/1/energy_sites/2252120180790091/backup"
+    method: POST
+    headers:
+      Authorization: "Bearer BEVtCQYyFhwkEu02WK4ONIAoyiJwGP9z"
+      Content-Type: "application/json"
+    payload: '{"backup_reserve_percent": {{ percent | int }}}'
+
+  powerwall_set_mode:
+    url: "https://api.tessie.com/api/1/energy_sites/2252120180790091/operation"
+    method: POST
+    headers:
+      Authorization: "Bearer BEVtCQYyFhwkEu02WK4ONIAoyiJwGP9z"
+      Content-Type: "application/json"
+    payload: '{"default_real_mode": "{{ mode }}"}'
