@@ -296,6 +296,31 @@ The `battery_grid_charge_target` sensor is computed from Solcast's remaining for
 
 In peak months, if `forecast_accuracy = unreliable` at 10am, begin grid charging immediately toward the 85% SoC target regardless of what `remaining_today` says. Don't wait for solar that isn't arriving.
 
+### Rule 12 — Weather Forecast Cross-Check (Open-Meteo)
+
+The agent calls `get_weather_forecast()` to supplement Solcast with independent weather data. This solves two problems Solcast alone can't handle:
+
+**1. Overnight pre-charging decisions (peak months):**
+At overnight cycles (10pm–6am), the agent checks tomorrow's solar outlook via Open-Meteo `radiation_wm2` (W/m²):
+
+| Radiation (8am–3pm avg) | Outlook label | Agent action (peak month) |
+|-------------------------|---------------|--------------------------|
+| > 300 W/m² | good | Trust solar — no pre-charging needed |
+| 150–300 W/m² | poor | Consider partial pre-charge to 70%+ tonight |
+| < 150 W/m² | overcast | Pre-charge to 80–90% tonight; treat tomorrow as zero-solar |
+
+In non-peak months this override doesn't apply — let economics decide.
+
+**2. Daytime temporary-vs-all-day cloud disambiguation:**
+If Solcast shows `unreliable` accuracy but Open-Meteo `radiation_wm2` for the next 2–3 hours is > 250 W/m², the cloud is likely passing — wait 30 min before charging from grid. If radiation is also < 150 W/m², it is a genuine all-day cloudy day — act on it immediately.
+
+**Radiation thresholds for this site (6.12 kWp flat roof, Glebe):**
+- > 300 W/m²: good (likely > 1.5 kW panel output)
+- 150–300 W/m²: poor (0.5–1.5 kW)
+- < 150 W/m²: overcast (< 0.5 kW, effectively no solar contribution)
+
+Tomorrow's `solar_outlook` and `avg_radiation` are captured in `decisions.jsonl` for analyst use.
+
 Also uses `forecast_next_hour` for timing: if next hour is forecast significantly higher, solar may be improving — wait 30 min before committing to grid charge. If next hour is also low, don't wait.
 
 ### Rule 10 — Price Spike Arbitrage

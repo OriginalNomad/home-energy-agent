@@ -2,6 +2,21 @@
 
 ## 2026-05-28
 
+**Open-Meteo weather forecast added to agent (`get_weather_forecast()` tool):**
+
+Adds hourly cloud cover, solar radiation (W/m²), and rain probability from Open-Meteo alongside Solcast. Free, no API key needed, covers Glebe precisely (lat=-33.88, lon=151.19). Returns solar-relevant hours (6am–7pm) for today and tomorrow, plus a `tomorrow_solar_outlook` summary (good/poor/overcast) derived from average radiation during the 8am–3pm core window.
+
+Two use cases:
+1. **Overnight pre-charging** (peak months): agent now sees tomorrow's solar quality before deciding overnight charging level — if tomorrow is overcast, pre-charge tonight rather than relying on solar that won't arrive.
+2. **Daytime cross-check**: distinguishes "temporary cloud" (Solcast unreliable but radiation > 250 W/m² — wait 30 min) from "all-day overcast" (radiation also < 150 W/m² — act immediately).
+
+First run showed agent correctly using it: cloud cover 100% but radiation improving (201→430 W/m²) → correctly diagnosed as temporary/passing cloud, not all-day overcast. Tomorrow outlook: poor (293 W/m² avg) — would trigger overnight pre-charging in June peak months.
+
+New JSONL fields: `tomorrow_solar_outlook`, `tomorrow_avg_radiation`.
+Rule 12 added to energy_rules.md.
+
+---
+
 **Structured JSON decision log added (`agent/decisions.jsonl`):**
 
 `log_decision()` now writes a newline-delimited JSON record alongside the existing plain-text log on every cycle. Each record captures the full context the agent had at decision time:
