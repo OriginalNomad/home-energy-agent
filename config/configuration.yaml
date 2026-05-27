@@ -37,8 +37,26 @@ input_text:
   battery_decision_action:
     name: "Battery Decision — Action"
     max: 255
+  weather_tomorrow_outlook:
+    name: "Weather — Tomorrow Solar Outlook"
+    max: 20
 
 input_number:
+  weather_radiation_now:
+    name: "Weather — Effective Radiation Now"
+    min: 0
+    max: 1200
+    unit_of_measurement: "W/m²"
+  weather_precip_now:
+    name: "Weather — Precipitation Now"
+    min: 0
+    max: 50
+    unit_of_measurement: "mm/h"
+  weather_tomorrow_avg_radiation:
+    name: "Weather — Tomorrow Avg Radiation"
+    min: 0
+    max: 1200
+    unit_of_measurement: "W/m²"
   battery_decision_soc:
     name: "Battery Decision — SoC"
     min: 0
