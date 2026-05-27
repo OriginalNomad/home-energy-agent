@@ -17,7 +17,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import anthropic
@@ -204,6 +204,69 @@ def get_solar_forecast() -> list[dict]:
     return result[:16]   # 8 hours
 
 
+def get_weather_forecast() -> dict:
+    """
+    Hourly cloud cover, solar radiation, and rain probability from Open-Meteo.
+    Returns solar-relevant hours (6am–7pm) for today and tomorrow.
+    No API key required.
+    """
+    now = datetime.now(SYDNEY_TZ)
+    r = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude":  -33.88,
+            "longitude": 151.19,
+            "hourly":    "cloud_cover,shortwave_radiation,precipitation_probability",
+            "timezone":  "Australia/Sydney",
+            "forecast_days": 2,
+        },
+        timeout=10,
+    )
+    r.raise_for_status()
+    data = r.json()["hourly"]
+
+    today_hours, tomorrow_hours = [], []
+    tomorrow_date = (now + timedelta(days=1)).date()
+
+    for i, time_str in enumerate(data["time"]):
+        dt   = datetime.fromisoformat(time_str).replace(tzinfo=SYDNEY_TZ)
+        hour = dt.hour
+        if dt < now or not (6 <= hour <= 19):
+            continue
+        entry = {
+            "time":              time_str,
+            "cloud_cover_pct":   data["cloud_cover"][i],
+            "radiation_wm2":     round(data["shortwave_radiation"][i]),
+            "rain_prob_pct":     data["precipitation_probability"][i],
+        }
+        if dt.date() == tomorrow_date:
+            tomorrow_hours.append(entry)
+        else:
+            today_hours.append(entry)
+
+    # Summarise tomorrow's solar quality for quick agent reasoning
+    core = [h for h in tomorrow_hours if 8 <= int(h["time"][11:13]) <= 15]
+    if core:
+        avg_rad = round(sum(h["radiation_wm2"] for h in core) / len(core))
+        if avg_rad > 300:
+            outlook = "good"
+        elif avg_rad > 150:
+            outlook = "poor"
+        else:
+            outlook = "overcast"
+    else:
+        avg_rad, outlook = None, "unknown"
+
+    result = {
+        "today_remaining":         today_hours,
+        "tomorrow":                tomorrow_hours,
+        "tomorrow_solar_outlook":  outlook,
+        "tomorrow_avg_radiation":  avg_rad,
+    }
+    _cycle_context["weather_forecast"] = result
+    return result
+
+
 def set_powerwall_reserve(percent: int) -> str:
     r = requests.post(
         f"https://api.tessie.com/api/1/energy_sites/{TESSIE_SITE_ID}/backup",
@@ -293,6 +356,8 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
         "ev_soc":               ev.get("soc_pct"),
         "ev_zappi_mode_before": ev.get("zappi_mode"),
         "price_forecast_6h":    [f["cents_kwh"] for f in forecast[:12]],
+        "tomorrow_solar_outlook":  _cycle_context.get("weather_forecast", {}).get("tomorrow_solar_outlook"),
+        "tomorrow_avg_radiation":  _cycle_context.get("weather_forecast", {}).get("tomorrow_avg_radiation"),
         "actions":              actions_taken,
         "summary":              summary,
     }
@@ -385,6 +450,18 @@ TOOLS = [
     {
         "name": "get_solar_forecast",
         "description": "Get Solcast solar generation forecast for the rest of today (30-min intervals, kW estimate). Use this to decide how much grid charge the battery needs before solar takes over.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_weather_forecast",
+        "description": (
+            "Get hourly cloud cover, solar radiation (W/m²), and rain probability from Open-Meteo "
+            "for today's remaining solar hours and all of tomorrow. "
+            "Use this to assess tomorrow's solar quality — especially at overnight cycles when deciding "
+            "whether to pre-charge tonight. Also use to cross-check Solcast accuracy: if radiation_wm2 "
+            "is high but Solcast shows unreliable, the problem may be temporary rather than all-day. "
+            "Returns a tomorrow_solar_outlook summary (good/poor/overcast) for quick reasoning."
+        ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -611,6 +688,39 @@ This is especially important in peak months: if forecast is unreliable at 10am o
 cloudy day, begin grid charging immediately toward the 85% SoC target regardless of
 what the remaining forecast says.
 
+## Weather forecast — when and how to use it
+
+`get_weather_forecast()` returns `radiation_wm2` (W/m²) and `cloud_cover_pct` for each solar hour,
+plus a `tomorrow_solar_outlook` summary (good / poor / overcast).
+
+**Interpreting radiation_wm2 for this site** (6.12 kWp flat roof, Sydney):
+| Radiation | Solar output | Label |
+|-----------|-------------|-------|
+| > 300 W/m² | > 1.5 kW | good — Solcast likely reliable |
+| 150–300 W/m² | 0.5–1.5 kW | poor — Solcast may over-estimate |
+| < 150 W/m² | < 0.5 kW | overcast — treat as zero-solar day |
+
+**When to call it:**
+- Any overnight cycle (10pm–6am): call it to check tomorrow's outlook before deciding
+  whether to pre-charge tonight.
+- Any daytime cycle where `forecast_accuracy` is poor/unreliable: call it to distinguish
+  "the whole day is cloudy" (radiation consistently low) from "temporary cloud passing through"
+  (radiation high but actual output low right now — wait 30 min before acting).
+
+**Overnight pre-charging rule (peak months only):**
+If tomorrow is a peak month day AND `tomorrow_solar_outlook` is poor or overcast:
+- The battery must reach 85%+ SoC by 2:55pm regardless — solar won't cover it
+- Pre-charge tonight if price is reasonable (< 20¢) rather than relying on a daytime window
+  that may not materialise
+- Target: 80–90% SoC by end of overnight window, so only a small top-up is needed next morning
+- Use `self_consumption` overnight (no urgency, long window); autonomous only if falling behind
+  at 5am with battery below 60%
+
+**Cross-check use (daytime):**
+If `forecast_accuracy` is unreliable but `radiation_wm2` for the next 2–3 hours is > 250,
+solar is likely improving and it may be worth waiting 30–60 min before charging from grid.
+If `radiation_wm2` is also < 150, it is a genuine all-day cloudy day — act accordingly.
+
 ## Overnight low battery logic
 In non-peak months there is NO demand window penalty, so letting the battery drain to zero
 overnight is perfectly acceptable if cheaper grid prices are coming. Do not charge just
@@ -641,6 +751,7 @@ TOOL_MAP = {
     "get_current_state":    lambda _: get_current_state(),
     "get_price_forecast":   lambda _: get_price_forecast(),
     "get_solar_forecast":   lambda _: get_solar_forecast(),
+    "get_weather_forecast": lambda _: get_weather_forecast(),
     "set_powerwall_reserve":lambda a: set_powerwall_reserve(a["percent"]),
     "set_powerwall_mode":   lambda a: set_powerwall_mode(a["mode"]),
     "set_zappi_mode":       lambda a: set_zappi_mode(a["mode"]),
