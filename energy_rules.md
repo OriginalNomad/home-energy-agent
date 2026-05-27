@@ -117,6 +117,25 @@ The cheap window condition (`amber_in_cheap_window`) gates all grid charging. At
 
 Peak months always charge regardless of price — demand window risk overrides economics.
 
+**Flat-then-spike days:**
+If the price forecast shows no window more than 3¢ cheaper than the current price before an evening spike, treat current price as the charge window — don't hold for a cheaper window that isn't coming. Check: if `min(forecast prices before spike) ≥ current price − 3¢`, charge now rather than waiting. This commonly occurs on overcast days where Solar Sponge prices are similar to morning prices (~20¢ all day) before a 3pm+ spike.
+
+**Deadline-aware charging with adaptive escalation:**
+The agent re-runs this calculation every 30-min cycle when a price spike is visible in the forecast. It starts slow (cheap) and escalates to fast only when the maths demands it.
+
+1. `kWh_needed = (target_soc − current_soc) / 100 × 13.5`
+2. `hours_to_fill_slow = kWh_needed / 1.7` (self_consumption)
+   `hours_to_fill_fast = kWh_needed / 5.0` (autonomous)
+3. `hours_to_spike` = hours until price first exceeds 30¢ in forecast
+4. Mode decisions:
+   - `hours_to_spike > hours_to_fill_slow + 1.5h` → spread logic applies, may wait for cheaper window
+   - `hours_to_spike ≤ hours_to_fill_slow + 1.5h` → start self_consumption now, no time to wait
+   - `hours_to_spike ≤ hours_to_fill_fast + 0.5h` → escalate to autonomous immediately
+
+**Escalation:** once self_consumption charging has started, the agent rechecks each cycle. If `hours_to_spike ≤ hours_to_fill_slow + 0.5h`, it switches to autonomous. Start slow and cheap; escalate automatically when the deadline demands it.
+
+*Example: 36% SoC, 85% target, spike at 3pm, now 10:30am. kWh needed = 6.6, slow needs 3.9h, fast needs 1.3h. 4.5h to spike ≤ 3.9 + 1.5 = 5.4h → start self_consumption now. At 1pm, 55% SoC, 2h to spike, slow needs 2.4h → 2h ≤ 2.4 + 0.5 → escalate to autonomous.*
+
 **Timing:**
 - Checked at **9:30 am** (initial trigger)
 - Re-checked **every 30 minutes from 9:45am to 2pm**, AND **immediately when `amber_in_cheap_window` flips to True** — charging starts the moment the cheap window opens
@@ -266,8 +285,16 @@ The Powerwall cannot distinguish EV load from home appliance load on the same ci
 - `unreliable` (actual < 30% of forecast): ignore `remaining_today` entirely; treat as zero-solar day
 - `not_applicable`: night or near-zero forecast (< 0.2 kWh) — no meaningful comparison possible
 
-**Agent response to unreliable forecast:**
-In peak months, if `forecast_accuracy = unreliable` at 10am, begin grid charging immediately toward 85% SoC target regardless of what `remaining_today` says. Don't wait for solar that isn't arriving.
+**Agent response to unreliable or poor forecast:**
+The `battery_grid_charge_target` sensor is computed from Solcast's remaining forecast. On a cloudy day it will be optimistically low (e.g. "60% is enough — solar will cover the rest") even when actual solar is delivering almost nothing. When `forecast_accuracy` is `poor` or `unreliable`, the agent ignores `grid_target_pct` entirely and substitutes a time-based charge target:
+
+| Time of day  | Substitute charge target |
+|--------------|--------------------------|
+| Before 12pm  | 85% — full day of load ahead, assume solar contributes little |
+| 12pm–2pm     | 70% — half day left |
+| After 2pm    | 50% — mostly evening load to cover |
+
+In peak months, if `forecast_accuracy = unreliable` at 10am, begin grid charging immediately toward the 85% SoC target regardless of what `remaining_today` says. Don't wait for solar that isn't arriving.
 
 Also uses `forecast_next_hour` for timing: if next hour is forecast significantly higher, solar may be improving — wait 30 min before committing to grid charge. If next hour is also low, don't wait.
 

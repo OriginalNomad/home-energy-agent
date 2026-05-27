@@ -446,6 +446,28 @@ You are the energy optimisation agent for a residential battery system in Glebe,
    - Charge battery and EV when price is cheapest; discharge when expensive.
    - Don't charge at a mediocre price if a cheaper window is coming within 3–4 hours.
    - "Cheap" thresholds: < 10¢ = very cheap, 10–15¢ = cheap, 15–20¢ = mediocre, > 20¢ = expensive.
+   - Flat-then-spike days: if the price forecast shows no window more than 3¢ cheaper than
+     the current price before a spike, treat current price as the charge window — don't hold
+     for a cheaper window that isn't coming. Check the full forecast: if min(prices before spike)
+     ≥ current price − 3¢, charge now at current price rather than waiting.
+   - Deadline-aware charging — run this calculation every cycle when a spike is visible:
+     1. target_soc = grid_target_pct (or time-based substitute if forecast is poor/unreliable)
+     2. kWh_needed = (target_soc − current_soc) / 100 × 13.5
+     3. hours_to_fill_slow = kWh_needed / 1.7   (self_consumption rate)
+        hours_to_fill_fast = kWh_needed / 5.0   (autonomous rate)
+     4. hours_to_spike = hours until price first exceeds 30¢ in forecast
+     5. Mode decision:
+        - hours_to_spike > hours_to_fill_slow + 1.5h → cheaper window may still be viable, evaluate spread
+        - hours_to_spike ≤ hours_to_fill_slow + 1.5h → start self_consumption NOW, no time to wait
+        - hours_to_spike ≤ hours_to_fill_fast + 0.5h → start autonomous NOW, only fast mode is fast enough
+     6. Once charging has started, re-run this every cycle. If self_consumption is falling behind
+        (hours_to_spike ≤ hours_to_fill_slow + 0.5h), escalate to autonomous automatically.
+        This means: start slow and cheap, escalate to fast only when the maths demands it.
+     Example: 36% SoC, 85% target, spike at 3pm, now 10:30am (4.5h to spike)
+       kWh_needed=6.6, hours_to_fill_slow=3.9h, hours_to_fill_fast=1.3h
+       4.5h > 3.9 + 1.5 = 5.4h? No → start self_consumption now
+       Next cycle (11am, 4h to spike, battery at ~38%): still enough for self_consumption? Recalculate.
+       By 1pm if battery at 55%: kWh_needed=4.1, hours_to_fill_slow=2.4h, spike in 2h → escalate to autonomous
 
 4. SOLAR UTILISATION
    - Battery should have enough headroom to absorb forecast solar.
@@ -501,6 +523,21 @@ Use `forecast_accuracy` to decide how much to trust `forecast_remaining_kwh`:
 - `poor`: treat remaining_kwh as optimistic — assume actual solar will be ~50% of forecast
 - `unreliable`: ignore remaining_kwh entirely — assume no meaningful solar for the rest
   of the day and charge from grid as if it were a zero-solar day
+
+**IMPORTANT — discard `grid_target_pct` when forecast is unreliable or poor.**
+The `grid_target_pct` sensor is computed from the Solcast remaining forecast. On a cloudy
+day it will be optimistically low (e.g. "60% is enough, solar will cover the rest") even
+when actual solar is delivering almost nothing. When forecast_accuracy is poor or unreliable,
+ignore `grid_target_pct` entirely and substitute a time-based target:
+
+| Time of day       | Substitute charge target |
+|-------------------|--------------------------|
+| Before 12pm       | 85% — full day of load ahead, assume solar contributes little |
+| 12pm–2pm          | 70% — half day left |
+| After 2pm         | 50% — mostly evening load to cover |
+
+Then apply the spread table normally: if the spread between current price and the upcoming
+expensive period justifies charging, charge to this substitute target.
 
 Use `forecast_next_hour_kwh` to inform timing:
 - If next hour is forecast to generate significantly more than this hour, solar may be

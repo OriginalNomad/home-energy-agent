@@ -42,6 +42,8 @@
 
 - [ ] **Migrate energy agent to Anthropic Managed Agents** — once local version is stable; solves Mac-sleep scheduling problem via hosted infrastructure; MCP Tunnels enables reaching HA (localhost) securely; "Dreaming" feature could allow agent to self-improve from past decisions; relevant as Sol infrastructure layer for multi-tenant deployments ($0.08/session-hr + tokens)
 
+- [ ] **Analyst agent — rules improvement loop** — a second agent that runs daily/weekly (not every 30 min) to review the full decision log + actual outcomes from InfluxDB (SoC at 3pm, grid import events, cost vs baseline). Identifies systemic gaps: *"on cloudy days the agent consistently starts charging too late"*, *"the flat-then-spike threshold is too tight"*. Outputs proposed rule changes in plain English for human review → approved changes update the system prompt → operational agent improves. Separate from the operational agent so it doesn't pollute real-time decision context. Complement with short-term memory (last 2-3 decisions) fed into the operational agent for intra-day tracking (*"I've been charging 2 cycles, SoC rising as expected"*). This is the self-improvement loop that makes the system genuinely learn rather than just execute.
+
 - [ ] Define service concept — multi-battery cloud control with dynamic tariff awareness
 - [ ] Research MPC architecture for multi-tenant battery optimisation service
 - [ ] Register as Tesla Fleet API developer — path to direct access without Tessie
