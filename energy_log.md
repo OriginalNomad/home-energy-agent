@@ -1,5 +1,30 @@
 # Energy System Control Log
 
+## 2026-05-27
+
+**Crontab fixes:**
+- Fixed broken crontab path (old: `/Users/simonmonk/homeassistant/agent/energy_agent.py`, after monorepo move)
+- Fixed unquoted path with spaces causing cron to fail silently — agent was missing cycles from ~9am until fixed (~11:30am)
+- Crontab now correctly: `ANTHROPIC_API_KEY="..." /usr/bin/python3 "/Users/simonmonk/Simon Projects/Home Energy Console/agent/energy_agent.py"`
+
+**Agent system prompt improvements (cloudy/flat-price day observations):**
+
+Three gaps identified and patched from watching the agent on a cloudy day (solar forecast unreliable, ~20¢ all day, 62¢ spike at 7pm):
+
+1. **Forecast accuracy → discard grid_target_pct**: When `forecast_accuracy` is `poor` or `unreliable`, the `battery_grid_charge_target` sensor is Solcast-derived and optimistically low. Agent now ignores it and substitutes a time-based target (85% before noon, 70% midday, 50% after 2pm).
+
+2. **Flat-then-spike rule**: If min(forecast prices before spike) ≥ current price − 3¢, treat current price as the charge window — no cheaper window is coming, don't hold.
+
+3. **Deadline-aware charging with adaptive escalation**: Agent now calculates `kWh_needed / charge_rate = hours_to_fill` and compares against `hours_to_spike` every cycle. Starts `self_consumption` when deadline demands it, escalates to `autonomous` if falling behind. Formula: must start self_consumption if `hours_to_spike ≤ hours_to_fill_slow + 1.5h`; escalate to autonomous if `hours_to_spike ≤ hours_to_fill_slow + 0.5h`.
+
+**Observed agent decision at 10:44:** Correctly identified 40¢ spread (23¢ now vs 62¢ at 7pm), poor solar, set reserve to 80%, started self_consumption charging, noted it would reassess if falling behind. First correct application of new rules.
+
+**`/morning` command updated** to include standing session instructions: update `energy_rules.md` and `energy_log.md` as changes happen, not just at session end.
+
+**`energy_rules.md` updated** to reflect all three new agent rules above.
+
+---
+
 ## 2026-05-26
 
 **Agent first full overnight run**:
