@@ -231,7 +231,9 @@ def get_weather_forecast() -> dict:
     for i, time_str in enumerate(data["time"]):
         dt   = datetime.fromisoformat(time_str).replace(tzinfo=SYDNEY_TZ)
         hour = dt.hour
-        if dt < now or not (6 <= hour <= 19):
+        # Skip hours before the current hour today; include current hour and all of tomorrow
+        too_early = dt.date() == now.date() and dt.hour < now.hour
+        if too_early or not (6 <= hour <= 19):
             continue
         raw_rad  = data["shortwave_radiation"][i]
         precip   = data["precipitation"][i]        # mm/h
@@ -271,6 +273,25 @@ def get_weather_forecast() -> dict:
         "tomorrow_avg_radiation":  avg_rad,
     }
     _cycle_context["weather_forecast"] = result
+
+    # Push current hour's values to HA helpers for dashboard visibility
+    current_hour_str = now.strftime("%Y-%m-%dT%H:00")
+    try:
+        idx      = data["time"].index(current_hour_str)
+        raw_rad  = data["shortwave_radiation"][idx]
+        precip   = data["precipitation"][idx]
+        eff_rad  = round(raw_rad * 0.25 if precip > 0.1 else raw_rad)
+        ha_service("input_number", "set_value", {
+            "entity_id": "input_number.weather_radiation_now", "value": eff_rad})
+        ha_service("input_number", "set_value", {
+            "entity_id": "input_number.weather_precip_now", "value": round(precip, 1)})
+        ha_service("input_number", "set_value", {
+            "entity_id": "input_number.weather_tomorrow_avg_radiation", "value": avg_rad or 0})
+        ha_service("input_text", "set_value", {
+            "entity_id": "input_text.weather_tomorrow_outlook", "value": outlook})
+    except Exception as exc:
+        print(f"  Warning: weather HA push failed: {exc}", file=sys.stderr)
+
     return result
 
 
