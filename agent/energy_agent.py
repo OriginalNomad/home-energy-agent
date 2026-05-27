@@ -114,6 +114,16 @@ def ha_service(domain: str, service: str, data: dict):
     )
     r.raise_for_status()
 
+def ha_set_state(entity_id: str, state: str, attributes=None):
+    """Write a value directly to the HA state machine — creates read-only sensor entities."""
+    r = requests.post(
+        f"{HA_URL}/api/states/{entity_id}",
+        headers=HA_HEADERS,
+        json={"state": state, "attributes": attributes or {}},
+        timeout=10,
+    )
+    r.raise_for_status()
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
@@ -274,21 +284,30 @@ def get_weather_forecast() -> dict:
     }
     _cycle_context["weather_forecast"] = result
 
-    # Push current hour's values to HA helpers for dashboard visibility
+    # Push current hour's values to HA as read-only sensor entities
     current_hour_str = now.strftime("%Y-%m-%dT%H:00")
     try:
-        idx      = data["time"].index(current_hour_str)
-        raw_rad  = data["shortwave_radiation"][idx]
-        precip   = data["precipitation"][idx]
-        eff_rad  = round(raw_rad * 0.25 if precip > 0.1 else raw_rad)
-        ha_service("input_number", "set_value", {
-            "entity_id": "input_number.weather_radiation_now", "value": eff_rad})
-        ha_service("input_number", "set_value", {
-            "entity_id": "input_number.weather_precip_now", "value": round(precip, 1)})
-        ha_service("input_number", "set_value", {
-            "entity_id": "input_number.weather_tomorrow_avg_radiation", "value": avg_rad or 0})
-        ha_service("input_text", "set_value", {
-            "entity_id": "input_text.weather_tomorrow_outlook", "value": outlook})
+        idx     = data["time"].index(current_hour_str)
+        raw_rad = data["shortwave_radiation"][idx]
+        precip  = data["precipitation"][idx]
+        eff_rad = round(raw_rad * 0.25 if precip > 0.1 else raw_rad)
+        ha_set_state("sensor.weather_radiation_now", str(eff_rad), {
+            "friendly_name": "Solar Radiation Now (effective)",
+            "unit_of_measurement": "W/m²",
+            "state_class": "measurement",
+            "raw_radiation_wm2": round(raw_rad),
+            "precip_mm_h": round(precip, 1),
+            "rain_adjusted": precip > 0.1,
+        })
+        ha_set_state("sensor.weather_precip_now", str(round(precip, 1)), {
+            "friendly_name": "Precipitation Now",
+            "unit_of_measurement": "mm/h",
+            "state_class": "measurement",
+        })
+        ha_set_state("sensor.weather_tomorrow_solar", outlook, {
+            "friendly_name": "Tomorrow Solar Outlook",
+            "avg_radiation_wm2": avg_rad,
+        })
     except Exception as exc:
         print(f"  Warning: weather HA push failed: {exc}", file=sys.stderr)
 
