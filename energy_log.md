@@ -1,5 +1,25 @@
 # Energy System Control Log
 
+## 2026-05-28
+
+**Structured JSON decision log added (`agent/decisions.jsonl`):**
+
+`log_decision()` now writes a newline-delimited JSON record alongside the existing plain-text log on every cycle. Each record captures the full context the agent had at decision time:
+- Battery: SoC, reserve before/after, mode before/after, grid target
+- Grid: price, cheap window flag, 6-hour price forecast array
+- Solar: current kW, forecast accuracy, remaining/this-hour/next-hour kWh
+- Time context: is_peak_month, in_demand_window, in_solar_sponge
+- EV: plugged, SoC, zappi mode before/after
+- Decision: actions list (null fields for holds), summary text
+
+`_cycle_context` dict populated by `get_current_state()` and `get_price_forecast()` as they run; read by `log_decision()` to build the record without re-querying HA. Reset at start of each `run_agent()` call.
+
+First record confirmed valid at 09:12 AEST — hold decision, battery 33%, waiting for 17¢ Solar Sponge window vs 23¢ current price.
+
+This is the foundation for Stage 2 (outcome annotation from InfluxDB) and Stage 3 (analyst agent).
+
+---
+
 ## 2026-05-27
 
 **Crontab fixes:**
