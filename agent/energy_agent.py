@@ -216,7 +216,7 @@ def get_weather_forecast() -> dict:
         params={
             "latitude":  -33.88,
             "longitude": 151.19,
-            "hourly":    "cloud_cover,shortwave_radiation,precipitation_probability",
+            "hourly":    "cloud_cover,shortwave_radiation,precipitation_probability,precipitation",
             "timezone":  "Australia/Sydney",
             "forecast_days": 2,
         },
@@ -233,10 +233,17 @@ def get_weather_forecast() -> dict:
         hour = dt.hour
         if dt < now or not (6 <= hour <= 19):
             continue
+        raw_rad  = data["shortwave_radiation"][i]
+        precip   = data["precipitation"][i]        # mm/h
+        # Rain attenuates actual surface irradiance to ~25% of model GHI.
+        # SolarEdge won't start below ~50 W/m² — so rain effectively = no solar.
+        eff_rad  = round(raw_rad * 0.25) if precip > 0.1 else round(raw_rad)
         entry = {
             "time":              time_str,
             "cloud_cover_pct":   data["cloud_cover"][i],
-            "radiation_wm2":     round(data["shortwave_radiation"][i]),
+            "radiation_wm2":     round(raw_rad),
+            "effective_radiation_wm2": eff_rad,
+            "precip_mm_h":       precip,
             "rain_prob_pct":     data["precipitation_probability"][i],
         }
         if dt.date() == tomorrow_date:
@@ -244,10 +251,10 @@ def get_weather_forecast() -> dict:
         else:
             today_hours.append(entry)
 
-    # Summarise tomorrow's solar quality for quick agent reasoning
+    # Summarise tomorrow's solar quality using effective (rain-adjusted) radiation
     core = [h for h in tomorrow_hours if 8 <= int(h["time"][11:13]) <= 15]
     if core:
-        avg_rad = round(sum(h["radiation_wm2"] for h in core) / len(core))
+        avg_rad = round(sum(h["effective_radiation_wm2"] for h in core) / len(core))
         if avg_rad > 300:
             outlook = "good"
         elif avg_rad > 150:
@@ -693,12 +700,19 @@ what the remaining forecast says.
 `get_weather_forecast()` returns `radiation_wm2` (W/m²) and `cloud_cover_pct` for each solar hour,
 plus a `tomorrow_solar_outlook` summary (good / poor / overcast).
 
-**Interpreting radiation_wm2 for this site** (6.12 kWp flat roof, Sydney):
-| Radiation | Solar output | Label |
-|-----------|-------------|-------|
+**Interpreting `effective_radiation_wm2` for this site** (6.12 kWp flat roof, Sydney):
+
+Each hour includes both `radiation_wm2` (Open-Meteo model GHI) and `effective_radiation_wm2`
+(rain-adjusted: multiplied by 0.25 when `precip_mm_h > 0.1`). Always use `effective_radiation_wm2`
+for decisions — the raw model overestimates significantly when it is actively raining, because
+rainfall attenuates irradiance and the SolarEdge inverter won't start below ~50 W/m².
+
+| Effective radiation | Solar output | Label |
+|---------------------|-------------|-------|
 | > 300 W/m² | > 1.5 kW | good — Solcast likely reliable |
 | 150–300 W/m² | 0.5–1.5 kW | poor — Solcast may over-estimate |
 | < 150 W/m² | < 0.5 kW | overcast — treat as zero-solar day |
+| < 50 W/m² | 0 kW | none — inverter won't start |
 
 **When to call it:**
 - Any overnight cycle (10pm–6am): call it to check tomorrow's outlook before deciding
@@ -717,9 +731,10 @@ If tomorrow is a peak month day AND `tomorrow_solar_outlook` is poor or overcast
   at 5am with battery below 60%
 
 **Cross-check use (daytime):**
-If `forecast_accuracy` is unreliable but `radiation_wm2` for the next 2–3 hours is > 250,
+If `forecast_accuracy` is unreliable but `effective_radiation_wm2` for the next 2–3 hours is > 250,
 solar is likely improving and it may be worth waiting 30–60 min before charging from grid.
-If `radiation_wm2` is also < 150, it is a genuine all-day cloudy day — act accordingly.
+If `effective_radiation_wm2` is also < 150 (or it is raining, `precip_mm_h > 0.1`), it is a
+genuine all-day cloudy/wet day — act accordingly, don't wait for solar.
 
 ## Overnight low battery logic
 In non-peak months there is NO demand window penalty, so letting the battery drain to zero
