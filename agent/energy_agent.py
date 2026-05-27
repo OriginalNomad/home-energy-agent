@@ -15,6 +15,7 @@ Solcast and EV sensors which vary by integration version.
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +50,12 @@ if _env_file.exists():
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # set via agent/.env
 
-LOG_FILE = Path(__file__).parent / "agent_decisions.log"
+LOG_FILE   = Path(__file__).parent / "agent_decisions.log"
+JSONL_FILE = Path(__file__).parent / "decisions.jsonl"
+
+# Populated by get_current_state() / get_price_forecast() during each cycle,
+# then read by log_decision() to write the structured JSON record.
+_cycle_context: dict = {}
 
 SYDNEY_TZ   = pytz.timezone("Australia/Sydney")
 PEAK_MONTHS = {11, 12, 1, 2, 3, 6, 7, 8}   # months with demand window
@@ -162,6 +168,7 @@ def get_current_state() -> dict:
             "soc_pct":     _safe_int(ENTITIES["ev_soc"]) if ev_plugged else None,
         },
     }
+    _cycle_context["state"] = state
     return state
 
 
@@ -176,6 +183,7 @@ def get_price_forecast() -> list[dict]:
             "cents_kwh":  round(_float(f.get("per_kwh", 0)) * 100, 1),
             "descriptor": f.get("descriptor", ""),
         })
+    _cycle_context["price_forecast"] = result
     return result
 
 
@@ -227,14 +235,69 @@ def set_zappi_mode(mode: str) -> str:
 
 
 def log_decision(summary: str, actions_taken: list[str]) -> str:
-    import re
     now     = datetime.now(SYDNEY_TZ)
     actions = ", ".join(actions_taken) if actions_taken else "hold"
     entry   = f"[{now.strftime('%Y-%m-%d %H:%M')}] {summary} | Actions: {actions}"
 
-    # Append to local log file
+    # Append to plain-text log (human-readable, committed to git)
     with LOG_FILE.open("a") as f:
         f.write(entry + "\n")
+
+    # Append structured JSON record for the analyst agent
+    state    = _cycle_context.get("state", {})
+    battery  = state.get("battery", {})
+    grid     = state.get("grid", {})
+    solar    = state.get("solar", {})
+    ev       = state.get("ev", {})
+    forecast = _cycle_context.get("price_forecast", [])
+
+    reserve_set = None
+    mode_set    = None
+    zappi_set   = None
+    for a in actions_taken:
+        m = re.search(r'set_reserve\((\d+)', a)
+        if m:
+            reserve_set = int(m.group(1))
+        if "autonomous" in a:
+            mode_set = "autonomous"
+        elif "self_consumption" in a:
+            mode_set = "self_consumption"
+        if "Eco+" in a:
+            zappi_set = "Eco+"
+        elif "Fast" in a:
+            zappi_set = "Fast"
+        elif "Off" in a:
+            zappi_set = "Off"
+
+    record = {
+        "ts":                   now.isoformat(),
+        "soc":                  battery.get("soc_pct"),
+        "reserve_before":       battery.get("reserve_pct"),
+        "mode_before":          battery.get("mode"),
+        "grid_target_pct":      battery.get("grid_target_pct"),
+        "reserve_set":          reserve_set,
+        "mode_set":             mode_set,
+        "zappi_set":            zappi_set,
+        "price_c":              grid.get("price_cents_kwh"),
+        "in_cheap_window":      grid.get("in_cheap_window"),
+        "is_peak_month":        state.get("is_peak_month"),
+        "in_demand_window":     state.get("in_demand_window"),
+        "in_solar_sponge":      state.get("in_solar_sponge"),
+        "forecast_accuracy":    solar.get("forecast_accuracy"),
+        "solar_current_kw":     solar.get("current_kw"),
+        "solar_remaining_kwh":  solar.get("forecast_remaining_kwh"),
+        "solar_this_hour_kwh":  solar.get("forecast_this_hour_kwh"),
+        "solar_next_hour_kwh":  solar.get("forecast_next_hour_kwh"),
+        "home_load_kw":         state.get("home_load_kw"),
+        "ev_plugged":           ev.get("plugged_in"),
+        "ev_soc":               ev.get("soc_pct"),
+        "ev_zappi_mode_before": ev.get("zappi_mode"),
+        "price_forecast_6h":    [f["cents_kwh"] for f in forecast[:12]],
+        "actions":              actions_taken,
+        "summary":              summary,
+    }
+    with JSONL_FILE.open("a") as f:
+        f.write(json.dumps(record) + "\n")
 
     # Overwrite the "last decision" notification — quick at-a-glance in HA
     ha_service("persistent_notification", "create", {
@@ -591,6 +654,7 @@ def run_agent(dry_run: bool = False):
     dry_run=True: reads state and prints the agent's reasoning but does NOT
     call any set_* or log_decision tools — safe for testing.
     """
+    _cycle_context.clear()
     client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     messages = [{"role": "user", "content": "Run your energy optimisation cycle now."}]
 
