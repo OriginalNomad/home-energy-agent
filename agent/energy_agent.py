@@ -53,10 +53,15 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # set via agent/.en
 LOG_FILE   = Path(__file__).parent / "agent_decisions.log"
 JSONL_FILE = Path(__file__).parent / "decisions.jsonl"
 
-# Token pricing for claude-opus-4-5 — verify at console.anthropic.com/settings/billing
+MODEL = "claude-sonnet-4-6"
+
+# Token pricing — verify at console.anthropic.com/settings/billing
 # List price (USD per 1M tokens); update if you have a volume discount.
-COST_PER_1M_INPUT  = 15.00
-COST_PER_1M_OUTPUT = 75.00
+# Cache reads are charged at 10% of the input rate.
+COST_PER_1M_INPUT        = 3.00
+COST_PER_1M_OUTPUT       = 15.00
+COST_PER_1M_CACHE_READ   = COST_PER_1M_INPUT * 0.10
+COST_PER_1M_CACHE_WRITE  = COST_PER_1M_INPUT * 1.25  # 25% premium on cache writes
 
 # Populated by get_current_state() / get_price_forecast() during each cycle,
 # then read by log_decision() to write the structured JSON record.
@@ -412,9 +417,14 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
         "tomorrow_avg_radiation":  _cycle_context.get("weather_forecast", {}).get("tomorrow_avg_radiation"),
         "input_tokens":         _cycle_context.get("input_tokens", 0),
         "output_tokens":        _cycle_context.get("output_tokens", 0),
+        "cache_read_tokens":    _cycle_context.get("cache_read_tokens", 0),
+        "cache_write_tokens":   _cycle_context.get("cache_write_tokens", 0),
         "est_cost_usd":         round(
-                                    _cycle_context.get("input_tokens", 0)  / 1_000_000 * COST_PER_1M_INPUT +
-                                    _cycle_context.get("output_tokens", 0) / 1_000_000 * COST_PER_1M_OUTPUT,
+                                    # input_tokens = non-cached only; cache tokens are tracked separately
+                                    _cycle_context.get("input_tokens", 0)       / 1_000_000 * COST_PER_1M_INPUT +
+                                    _cycle_context.get("cache_write_tokens", 0) / 1_000_000 * COST_PER_1M_CACHE_WRITE +
+                                    _cycle_context.get("cache_read_tokens", 0)  / 1_000_000 * COST_PER_1M_CACHE_READ +
+                                    _cycle_context.get("output_tokens", 0)      / 1_000_000 * COST_PER_1M_OUTPUT,
                                     5),
         "actions":              actions_taken,
         "summary":              summary,
@@ -625,6 +635,7 @@ TOOLS = [
             },
             "required": ["summary", "actions_taken"],
         },
+        "cache_control": {"type": "ephemeral"},  # cache all tool definitions up to here
     },
 ]
 
@@ -868,20 +879,26 @@ def run_agent(dry_run: bool = False):
     if dry_run:
         print("DRY RUN — no writes will be made\n")
 
+    # System prompt as a cacheable content block — static content cached across turns
+    system_prompt_block = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+
     while True:
         response = client.messages.create(
-            model="claude-opus-4-5",
+            model=MODEL,
             max_tokens=2048,
-            system=SYSTEM_PROMPT,
+            system=system_prompt_block,
             tools=TOOLS,
             messages=messages,
+            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
         )
 
         messages.append({"role": "assistant", "content": response.content})
 
-        # Accumulate token usage across all turns in this cycle
-        _cycle_context["input_tokens"]  = _cycle_context.get("input_tokens", 0)  + response.usage.input_tokens
-        _cycle_context["output_tokens"] = _cycle_context.get("output_tokens", 0) + response.usage.output_tokens
+        # Accumulate token usage — track cache hits separately for accurate cost calculation
+        _cycle_context["input_tokens"]        = _cycle_context.get("input_tokens", 0)        + response.usage.input_tokens
+        _cycle_context["output_tokens"]       = _cycle_context.get("output_tokens", 0)       + response.usage.output_tokens
+        _cycle_context["cache_read_tokens"]   = _cycle_context.get("cache_read_tokens", 0)   + getattr(response.usage, "cache_read_input_tokens", 0)
+        _cycle_context["cache_write_tokens"]  = _cycle_context.get("cache_write_tokens", 0)  + getattr(response.usage, "cache_creation_input_tokens", 0)
 
         if response.stop_reason == "end_turn":
             break
