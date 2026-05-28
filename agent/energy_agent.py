@@ -53,6 +53,11 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # set via agent/.en
 LOG_FILE   = Path(__file__).parent / "agent_decisions.log"
 JSONL_FILE = Path(__file__).parent / "decisions.jsonl"
 
+# Token pricing for claude-opus-4-5 — verify at console.anthropic.com/settings/billing
+# List price (USD per 1M tokens); update if you have a volume discount.
+COST_PER_1M_INPUT  = 15.00
+COST_PER_1M_OUTPUT = 75.00
+
 # Populated by get_current_state() / get_price_forecast() during each cycle,
 # then read by log_decision() to write the structured JSON record.
 _cycle_context: dict = {}
@@ -405,11 +410,44 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
         "price_forecast_6h":    [f["cents_kwh"] for f in forecast[:12]],
         "tomorrow_solar_outlook":  _cycle_context.get("weather_forecast", {}).get("tomorrow_solar_outlook"),
         "tomorrow_avg_radiation":  _cycle_context.get("weather_forecast", {}).get("tomorrow_avg_radiation"),
+        "input_tokens":         _cycle_context.get("input_tokens", 0),
+        "output_tokens":        _cycle_context.get("output_tokens", 0),
+        "est_cost_usd":         round(
+                                    _cycle_context.get("input_tokens", 0)  / 1_000_000 * COST_PER_1M_INPUT +
+                                    _cycle_context.get("output_tokens", 0) / 1_000_000 * COST_PER_1M_OUTPUT,
+                                    5),
         "actions":              actions_taken,
         "summary":              summary,
     }
     with JSONL_FILE.open("a") as f:
         f.write(json.dumps(record) + "\n")
+
+    # Compute today's cumulative cost from JSONL and push to HA
+    try:
+        today_str   = now.strftime("%Y-%m-%d")
+        daily_cost  = 0.0
+        daily_input = 0
+        daily_output = 0
+        if JSONL_FILE.exists():
+            for line in JSONL_FILE.read_text().splitlines():
+                try:
+                    entry = json.loads(line)
+                    if entry.get("ts", "").startswith(today_str):
+                        daily_cost   += entry.get("est_cost_usd", 0)
+                        daily_input  += entry.get("input_tokens", 0)
+                        daily_output += entry.get("output_tokens", 0)
+                except Exception:
+                    pass
+        ha_set_state("sensor.agent_daily_cost", f"{daily_cost:.4f}", {
+            "friendly_name":      "Agent — Daily API Cost",
+            "unit_of_measurement": "USD",
+            "state_class":        "total_increasing",
+            "daily_input_tokens":  daily_input,
+            "daily_output_tokens": daily_output,
+            "pricing_model":      "claude-opus-4-5 list price — verify at console.anthropic.com",
+        })
+    except Exception as exc:
+        print(f"  Warning: daily cost push failed: {exc}", file=sys.stderr)
 
     # Overwrite the "last decision" notification — quick at-a-glance in HA
     ha_service("persistent_notification", "create", {
@@ -840,6 +878,10 @@ def run_agent(dry_run: bool = False):
         )
 
         messages.append({"role": "assistant", "content": response.content})
+
+        # Accumulate token usage across all turns in this cycle
+        _cycle_context["input_tokens"]  = _cycle_context.get("input_tokens", 0)  + response.usage.input_tokens
+        _cycle_context["output_tokens"] = _cycle_context.get("output_tokens", 0) + response.usage.output_tokens
 
         if response.stop_reason == "end_turn":
             break
