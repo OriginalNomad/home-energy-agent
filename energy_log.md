@@ -2,6 +2,12 @@
 
 ## 2026-05-28
 
+**Agent bug fix — grid charging trigger mechanism:**
+
+Observed at 14:00: agent said "self_consumption at reserve 5% is correct — grid will cover 1.3 kWh" but no grid draw occurred. Root cause: agent misunderstood the control mechanism. Grid charging in self_consumption mode ONLY happens when `backup_reserve_percent > current_soc`. Reserve at 5% with battery at 62% gives Tesla no reason to touch the grid — battery charges from solar surplus only.
+
+Correct action would have been `set_reserve(80%)` to trigger the grid draw. System prompt updated with a prominent CRITICAL note and a lookup table making the trigger explicit. Tool description for `set_powerwall_mode` also corrected. Failure mode documented in energy_rules.md with the 14:00 observation as the example.
+
 **Agent model switched to `claude-sonnet-4-6` with prompt caching:**
 
 - Model: `claude-opus-4-5` → `claude-sonnet-4-6`

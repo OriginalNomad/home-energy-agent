@@ -583,8 +583,9 @@ TOOLS = [
         "name": "set_powerwall_mode",
         "description": (
             "Set Powerwall operating mode. "
-            "'self_consumption': normal ~1.7 kW grid charge rate. Use for long cheap windows (3h+) "
-            "or when the price spread doesn't justify urgency. "
+            "'self_consumption': charges from grid at ~1.7 kW ONLY when backup_reserve_percent > "
+            "current_soc. If reserve ≤ soc, battery charges from solar surplus only — no grid draw. "
+            "Use for long cheap windows (3h+) or when spread doesn't justify urgency. "
             "'autonomous': fast ~5 kW grid charge. ALWAYS pair with set_powerwall_reserve(100) — "
             "this is the export guard. A HA safety net also reverts to self_consumption within 30s "
             "if export is detected, so autonomous is safe. "
@@ -713,9 +714,22 @@ You are the energy optimisation agent for a residential battery system in Glebe,
 
 ## Operating constraints
 - Only control: backup_reserve_percent and mode (via Tessie API)
-- self_consumption mode: ~1.7 kW grid charge rate. Needs ~4–6h to charge 20%→80%.
-- autonomous mode: ~5 kW grid charge rate (fast). Always pair with reserve=100% as export guard.
-  A HA safety net also monitors for export and reverts within 30s if firmware misbehaves.
+
+**CRITICAL — how grid charging actually works:**
+Grid charging ONLY occurs when `backup_reserve_percent > current_soc`. This is the trigger.
+- If reserve = 5% and battery = 62%: NO grid draw. Battery charges from solar surplus only.
+- If reserve = 80% and battery = 62%: grid draw starts immediately at ~1.7 kW (self_consumption)
+  or ~5 kW (autonomous) until battery reaches 80%.
+
+To charge from grid: call `set_powerwall_reserve(target_pct)` where target_pct > current_soc.
+"System is in self_consumption mode" alone does NOT mean grid charging is happening — only if
+reserve was previously set above current SoC.
+
+- self_consumption mode: ~1.7 kW grid charge rate when reserve > soc. Solar surplus also charges.
+  Needs ~4–6h to charge 20%→80% from grid alone.
+- autonomous mode: ~5 kW grid charge rate when reserve > soc (fast). Always pair with reserve=100%
+  as export guard. A HA safety net also monitors for export and reverts within 30s if firmware
+  misbehaves.
 - Battery floor in non-peak months: 5%. Allow full discharge during day/evening.
 - Battery floor in peak months: set to what's needed to cover demand window, typically 20–40%.
 

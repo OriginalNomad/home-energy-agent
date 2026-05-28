@@ -375,6 +375,22 @@ When multiple rules conflict, apply in this order:
 - **Powerwall export control**: whether HA can command the Powerwall to stop exporting (for Rule 3 negative FIT) — to be tested experimentally.
 - **Rule 1 deadline**: currently 3 pm. On hot days, AC may draw 3–4 kW from 1–2 pm onwards, draining the battery before the demand window even starts. Consider whether to move the target deadline earlier on hot days — to be decided once Daikin integration is in place and we can observe actual AC load patterns.
 
+## How Grid Charging Is Triggered — Critical Mechanism
+
+**Grid charging ONLY occurs when `backup_reserve_percent > current_soc`.** This is the sole trigger.
+
+| Reserve | Battery SoC | Grid draw? |
+|---------|------------|-----------|
+| 5% | 62% | ❌ No — reserve ≤ SoC, nothing to do |
+| 80% | 62% | ✅ Yes — charges at ~1.7 kW (self_consumption) or ~5 kW (autonomous) until 80% |
+| 100% | 62% | ✅ Yes — charges hard until full |
+
+**Implication for the agent:** saying "system is in self_consumption mode" does NOT mean grid charging is happening. Without `reserve > soc`, the Powerwall charges from solar surplus only. To trigger intentional grid charging, the agent must call `set_powerwall_reserve(target_pct)` with `target_pct > current_soc`.
+
+*Observed failure mode (2026-05-28 14:00):* agent correctly reasoned that 1.3 kWh grid top-up was needed, but left reserve at 5% with battery at 62% — no grid draw occurred. Correct action: `set_reserve(80%)` to trigger the grid charge.
+
+---
+
 ## Known Limitations of the backup_reserve Control Mechanism
 
 The `backup_reserve_percent` parameter (set via Tessie API) is the only writable control available without direct Tesla Fleet API access. It is a *target*, not a charge rate command.
