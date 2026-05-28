@@ -2,6 +2,20 @@
 
 ## 2026-05-28
 
+**Agent model switched to `claude-sonnet-4-6` with prompt caching:**
+
+- Model: `claude-opus-4-5` → `claude-sonnet-4-6`
+- Prompt caching added: system prompt and tool definitions marked with `cache_control: ephemeral` — within-cycle turns 2+ served from cache at 10% of input token cost
+- Cost formula corrected: Anthropic returns `input_tokens` as non-cached only; cache tokens are billed separately
+- Pricing constants updated: $3/$15 per 1M tokens (input/output) for Sonnet; verify at console.anthropic.com
+- Result: ~25¢/cycle → ~4¢/cycle, ~$12/day → ~$2/day (6x reduction)
+- `sensor.agent_daily_cost` in HA now reflects Sonnet pricing
+
+**Claude API cost logging added (`decisions.jsonl`):**
+
+- `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `est_cost_usd` recorded per cycle
+- `sensor.agent_daily_cost` pushed to HA each cycle with running daily total and token breakdown in attributes
+
 **Open-Meteo weather forecast added to agent (`get_weather_forecast()` tool):**
 
 Adds hourly cloud cover, solar radiation (W/m²), and rain probability from Open-Meteo alongside Solcast. Free, no API key needed, covers Glebe precisely (lat=-33.88, lon=151.19). Returns solar-relevant hours (6am–7pm) for today and tomorrow, plus a `tomorrow_solar_outlook` summary (good/poor/overcast) derived from average radiation during the 8am–3pm core window.
