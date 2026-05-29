@@ -24,6 +24,17 @@ Began moving the arithmetic the system prompt asks the LLM to do in its head int
 
 NOTE — this is NOT in the control path yet. Plan: shadow mode through early June (log computed verdict alongside the LLM's actual decision, measure divergence), cut over only after the first peak-month week. One divergence already visible: on the deferral-trap scenario the deterministic layer picks self_consumption (3.18h fill fits the 3.42h window) where the LLM over-escalated to autonomous — the kind of finding shadow mode is meant to surface.
 
+**Re-architecture Phase 3 — shadow mode wired in (logs both decisions):**
+
+The deterministic layer is now computed every live cycle and both decisions are logged side-by-side for divergence measurement. This is the data-collection step before any cutover.
+
+- `run_agent()` precomputes `compute_decision_context()` before the LLM loop and injects `_format_decision_context()` output into the initial message as a "REFERENCE ONLY (you are still the decision-maker)" block — the LLM still decides; the helper is advisory.
+- `_format_decision_context(ctx)` renders all derived figures (hours_to_cheap_end, kwh_needed, fill times, spread, flags) plus `>>> RECOMMENDED:` verdict.
+- `log_decision()` now records `computed_verdict`, `computed_context`, `shadow_action_match` (did the LLM charge/not-charge match the recommendation), and `shadow_mode_match` (self_consumption vs autonomous) into `decisions.jsonl`.
+- Dry-run verified: the shadow block renders and the agent references it in its reasoning ("aligns with the deterministic helper recommendation of 'target_met, hold'"). Cycle completes clean (exit 0).
+
+NOT in the control path — the LLM's decision is still authoritative. Plan: collect divergence data through the first peak-month week (June), then decide on cutover. This directly enables the "use next week's data to validate" goal.
+
 **Fix — SoC-sensor guidance added to system prompt:**
 
 The system prompt had no battery-sensor section and never told the agent which SoC reading to trust (Rule 6 in energy_rules.md knew, but the prompt didn't). Added a CRITICAL block: always use `soc_pct` (Tessie true SoC); `soc_gateway_pct` is floor-clipped at the reserve level and lies upward whenever reserve > true SoC; never judge target-met off the gateway. Re-ran the boundary scenario: agent now correctly identifies true SoC=50%, ignores the gateway, and keeps charging instead of dropping reserve.

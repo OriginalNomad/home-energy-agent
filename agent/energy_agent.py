@@ -573,6 +573,23 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
     record["goal_3pm_soc"]      = goal_3pm
     record["projected_3pm_soc"] = proj_3pm
 
+    # Shadow comparison (Phase 3): log the deterministic verdict next to what the LLM
+    # actually did, so divergence can be measured over the coming weeks before cutover.
+    ctx = _cycle_context.get("decision_context")
+    if ctx:
+        rec = ctx["recommended"]
+        record["computed_verdict"]  = rec
+        record["computed_context"]  = {k: ctx[k] for k in (
+            "zero_solar_day", "deferral_detected", "solar_unreliable", "cost_target_pct",
+            "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85", "spread_c")}
+        soc_now      = record.get("soc")
+        actual_charge = ((reserve_set is not None and soc_now is not None and reserve_set > soc_now)
+                         or mode_set == "autonomous")
+        rec_charge   = rec["action"] == "charge"
+        record["shadow_action_match"] = (actual_charge == rec_charge)
+        record["shadow_mode_match"]   = ((mode_set == rec["mode"])
+                                         if (rec_charge and mode_set) else None)
+
     with JSONL_FILE.open("a") as f:
         f.write(json.dumps(record) + "\n")
 
@@ -920,6 +937,27 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "spread_c":            round(spread, 1),
         "recommended":         rec,
     }
+
+
+def _format_decision_context(ctx: dict) -> str:
+    """Render the decision context as a REFERENCE block for the prompt (non-authoritative)."""
+    r = ctx["recommended"]
+    return (
+        "## Deterministic decision helper — REFERENCE ONLY (you are still the decision-maker)\n"
+        "A pure-Python helper precomputed the figures below from the same state and price\n"
+        "forecast you can read via tools. Use it to sanity-check your reasoning. You may\n"
+        "disagree — but if you do, state why in your log_decision summary.\n"
+        f"  SoC (true/Tessie): {ctx['soc']}%   peak_month: {ctx['is_peak_month']}   now: {ctx['now_h']}h\n"
+        f"  zero_solar_day: {ctx['zero_solar_day']}   deferral_detected: {ctx['deferral_detected']}   "
+        f"solar_unreliable: {ctx['solar_unreliable']} (accuracy: {ctx['accuracy_class']})\n"
+        f"  cost_target: {ctx['cost_target_pct']}%   hours_to_cheap_end: {ctx['hours_to_cheap_end']}h   "
+        f"hours_to_deadline: {ctx['hours_to_deadline']}h   spread: {ctx['spread_c']}¢\n"
+        f"  to cost_target: need {ctx['kwh_needed']}kWh — self_consumption {ctx['fill_slow_h']}h / "
+        f"autonomous {ctx['fill_fast_h']}h\n"
+        f"  to 85% by 2:55pm: need {ctx['kwh_needed_85']}kWh — self_consumption {ctx['fill_slow_85_h']}h / "
+        f"autonomous {ctx['fill_fast_85_h']}h\n"
+        f"  >>> RECOMMENDED: {r['action']} target={r['target_pct']}% mode={r['mode']} (rule: {r['rule_fired']})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1411,12 +1449,30 @@ def run_agent(dry_run: bool = False):
     _cycle_context.clear()
     client        = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     recent        = get_recent_decisions(3)
+
+    # Shadow decision layer (Phase 3): precompute the deterministic verdict from the
+    # same state + forecast the LLM will read, inject it as REFERENCE ONLY, and log
+    # it alongside the LLM's actual decision so we can measure divergence over time.
+    # The LLM remains authoritative — this does not constrain it.
+    shadow_block = ""
+    try:
+        _state    = get_current_state()
+        _forecast = get_price_forecast()
+        _records  = get_recent_records(3)
+        _ctx      = compute_decision_context(_state, _forecast, _records,
+                                             datetime.now(SYDNEY_TZ))
+        _cycle_context["decision_context"] = _ctx
+        shadow_block = "\n\n" + _format_decision_context(_ctx)
+    except Exception as exc:
+        print(f"  Warning: shadow decision context failed: {exc}", file=sys.stderr)
+
     initial_msg   = (
         "Run your energy optimisation cycle now.\n\n"
         "## Recent decisions (last 3 cycles)\n"
         f"{recent}\n\n"
         "Check this before deciding to hold. If you see 2+ consecutive holds waiting for "
         "a cheaper window that hasn't arrived, apply the deferral limit rule and charge now."
+        f"{shadow_block}"
     )
     messages = [{"role": "user", "content": initial_msg}]
 
