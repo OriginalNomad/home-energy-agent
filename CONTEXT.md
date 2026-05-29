@@ -193,6 +193,7 @@ Key agent capabilities added 2026-05-29:
 | `config/automations.yaml` | The actual HA automations (12 active, 12 disabled) |
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
+| `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before June 1 |
 | `agent/.env` | API keys (gitignored — not in repo) |
 | `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
 | `agent/decisions.jsonl` | Structured JSON decision log — full context per cycle, foundation for analyst agent and accuracy tracking |

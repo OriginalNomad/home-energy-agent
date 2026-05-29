@@ -5,7 +5,7 @@
 ### Energy Agent (in progress — observing since 2026-05-25)
 
 - [ ] **Run manually for a few days** — build confidence in agent decisions before scheduling
-- [ ] **Fix price forecast** — `get_price_forecast()` returns empty; find correct Amber sensor attribute key
+- [x] **Fix price forecast** — was not empty (stale note); Amber sensor returns mixed 5-min + 30-min intervals. Now resampled to uniform 30-min buckets so deadline/spread maths is valid. Fail-loud warning on empty. (2026-05-29)
 - [ ] **Schedule via cron** — bake API key into crontab (not env var), handle Mac sleep
 - [ ] **Verify overnight behaviour** — does agent correctly decide to pre-charge at cheap overnight prices? Check morning logs
 - [ ] **June 1 demand window** — verify agent handles peak month logic correctly (no grid import 3–9pm)

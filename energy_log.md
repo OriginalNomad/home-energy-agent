@@ -1,6 +1,24 @@
 # Energy System Control Log
 
-## 2026-05-29
+## 2026-05-29 (session 2 — forecast fix, backtest harness, SoC-sensor bug)
+
+**Price forecast bug fixed — mixed interval granularity:**
+
+`get_price_forecast()` was not empty (todo was stale) but badly malformed. The Amber sensor returns *mixed* interval sizes: the first ~10 entries are 5-minute intervals, the rest are 30-minute. The code did `forecasts[:24]` assuming uniform 30-min ("12h"), so it actually saw ~7.5h, and the agent's `price_forecast_6h` (`[:12]`) was really ~1.8h. Worse, the `hours_to_cheap_end` sustained-rise scan compared intervals that were sometimes 5 min apart, sometimes 30 — making the deadline maths meaningless. Fix: resample all sub-intervals into uniform 30-min buckets (average price per bucket), so index × 0.5h is an accurate "hours from now" and the existing prose-based scan logic becomes valid. Added a fail-loud stderr warning when the forecast is empty.
+
+**Peak-month backtest harness added (`agent/backtest.py`):**
+
+Feeds the real agent (real system prompt + model) synthetic peak-month scenarios, stubbing every data-read and intercepting every write — nothing touches Tessie/HA. Purpose: validate the 2:55pm/85% demand-window logic before June 1, when it first matters live. 5 scenarios: cloudy-10am, cloudy-1:30pm (tight), sunny-11am, deferral-trap, 2:55pm-boundary.
+
+**Backtest results — 4/5 correct, 1 real bug found:**
+
+The agent correctly held on the sunny day, charged self_consumption when on-time, escalated to autonomous when tight, and fired the deferral limit. The 2:55pm-boundary scenario exposed a genuine bug: the agent trusted `soc_gateway_pct` (85%, floor-clipped to the reserve level) instead of the true `soc_pct` (Tessie, 50%), declared the demand-window target "achieved," and dropped reserve to 5% — which on a real June day would enter the 3-9pm window at 50% and risk a Rule 2 grid-import violation.
+
+**Fix — SoC-sensor guidance added to system prompt:**
+
+The system prompt had no battery-sensor section and never told the agent which SoC reading to trust (Rule 6 in energy_rules.md knew, but the prompt didn't). Added a CRITICAL block: always use `soc_pct` (Tessie true SoC); `soc_gateway_pct` is floor-clipped at the reserve level and lies upward whenever reserve > true SoC; never judge target-met off the gateway. Re-ran the boundary scenario: agent now correctly identifies true SoC=50%, ignores the gateway, and keeps charging instead of dropping reserve.
+
+
 
 **Observed failure mode — agent deferring indefinitely on a forecast that never arrives:**
 
