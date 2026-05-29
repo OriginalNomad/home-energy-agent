@@ -279,7 +279,8 @@ rest_command:
     headers:
       Authorization: "Bearer BEVtCQYyFhwkEu02WK4ONIAoyiJwGP9z"
       Content-Type: "application/json"
-    payload: '{"backup_reserve_percent": {{ percent | int }}}'
+    payload: >-
+      {"backup_reserve_percent": {{ percent | int }}}
 
   powerwall_set_mode:
     url: "https://api.tessie.com/api/1/energy_sites/2252120180790091/operation"
@@ -287,4 +288,5 @@ rest_command:
     headers:
       Authorization: "Bearer BEVtCQYyFhwkEu02WK4ONIAoyiJwGP9z"
       Content-Type: "application/json"
-    payload: '{"default_real_mode": "{{ mode }}"}'
+    payload: >-
+      {"default_real_mode": "{{ mode }}"}
