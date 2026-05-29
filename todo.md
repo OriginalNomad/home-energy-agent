@@ -24,6 +24,9 @@
 - [ ] Add Solcast forecast change trigger to solar sponge check — update reserve immediately when Solcast revises, not just at next 30-min tick
 - [ ] Confirm `sensor.solcast_pv_forecast_power_now` entity name in HA States (used in inverter underperformance alert)
 - [ ] Confirm SolarEdge inverter AC rated output for Solcast config (check label on inverter box)
+- [ ] **BOM solar forecast investigation** — Solcast and Open-Meteo have both been unreliable (today: forecast solar arriving from 11am, actual zero all day). Investigate BOM API (api.weather.bom.gov.au) for official gridded solar radiation forecasts. Track Solcast vs SolarEdge actuals in InfluxDB to quantify accuracy. Goal: replace or weight-adjust Solcast with a more reliable source, or build a "forecast confidence" metric from the accuracy history.
+- [ ] **Daily 3pm accuracy review** — `decisions.jsonl` now logs `goal_3pm_soc`, `projected_3pm_soc`, and daily accuracy records (actual vs projected at 3pm). Build InfluxDB dashboard showing forecast accuracy over time — which morning cycle hours had best projection accuracy, how often projection was optimistic vs pessimistic.
+- [ ] **Amber price forecast accuracy + risk premium derivation** *(needs ~4 weeks of data — build in late June/July)*: for each JSONL record, reconstruct the 12 forecasted times from `ts` + 30min intervals, pull actual prices from InfluxDB, compute signed error (actual − forecast) per slot. Bucket by time-of-day: Solar Sponge (10am–3pm), evening (4pm–9pm), overnight. Build error distribution per bucket — mean, 75th and 90th percentile. The 75th percentile error for evening slots becomes the empirical risk premium to add to the spread table, replacing the current gut-feel 5¢ threshold. This makes the spread threshold data-driven rather than assumed.
 
 ## Done ✅
 

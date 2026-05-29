@@ -1,5 +1,50 @@
 # Energy System Control Log
 
+## 2026-05-29
+
+**Observed failure mode — agent deferring indefinitely on a forecast that never arrives:**
+
+Battery sat at 5% SoC from midnight through ~10am while the agent held each cycle waiting for a 12–13¢ cheap window that never materialised (price stayed at 16–19¢ all morning). Each 30-min cycle the Amber forecast showed a cheap window "arriving in 2–3 hours" — agent rationally held each time, but the window kept moving. Agent is stateless between cycles so had no way to detect the pattern.
+
+Root cause: no memory of prior deferral decisions + no time-based override when the forecast is repeatedly wrong.
+
+**Rule 14 added — Solar Sponge minimum floor:**
+
+EA116's Solar Sponge (10am–3pm) is structurally cheaper than evening prices on every day — not a forecast, a tariff fact. The agent was treating it as a variable "spread check" decision and deferring indefinitely waiting for an even cheaper window. Rule: during 10am–1pm, if SoC < 50%, always charge to at least 50% regardless of spread. This is a floor only — demand window or grid charge targets above 50% override it. Self-consumption is sufficient (no autonomous needed). Added to system prompt and energy_rules.md as Rule 14.
+
+**Fix — short-term memory + escalation rules (Rule 13):**
+
+1. **Short-term memory**: `get_recent_decisions(n=3)` reads the last 3 records from `decisions.jsonl` and injects them as a "Recent decisions" context block in the initial message of each cycle. The agent sees: `[09:00] hold, [09:30] hold, [10:00] hold` and can recognise the deferral pattern.
+
+2. **Deferral limit**: if 2+ consecutive holds waiting for the same cheap window AND current price is within 2¢ of then — forecast is wrong, charge now at current price. Added to system prompt and Rule 13 in energy_rules.md.
+
+3. **Time-based escalation (Rule 13)**:
+   - Peak months: every cycle from 9am, calculate `kWh_needed / rate` vs `hours_to_2:55pm`. If self_consumption can't make the deadline, switch to autonomous immediately. Price irrelevant — demand charge is $100/month.
+   - Non-peak months: if `hours_to_fill_slow ≥ hours_to_spike − 0.5h`, start self_consumption regardless of spread. After noon with battery < 30% and flat prices for 2+ cycles: charge now.
+   - Quick-check heuristics added: past 12:30pm + <40% SoC + peak month = autonomous immediately.
+
+4. **Task each cycle** updated: step 1 is now "review recent decisions before anything else."
+
+Rule 13 added to energy_rules.md. System prompt updated to match.
+
+**Rule 15 (hours_to_cheap_end) — adaptive deadline calculation:**
+
+The old deadline logic used `hours_to_spike` = first forecast price > 30¢. This was broken in two ways:
+1. On mild-spike days (prices going 15¢ → 19¢) it found nothing and defaulted to 6h, giving false "plenty of time" readings
+2. In non-peak months where 3pm doesn't matter, 3pm was used as the deadline — wrong if cheap prices actually run until 4pm+
+
+Replaced with `hours_to_cheap_end`: scan forward through 30-min forecast intervals for the first *sustained* price rise — two consecutive intervals both ≥ current_price + 4¢. That's the real deadline regardless of absolute price level.
+
+- Non-peak months: `hours_to_cheap_end` is the deadline
+- Peak months: `min(hours_to_2:55pm, hours_to_cheap_end)` — demand window remains the hard constraint
+- No sustained rise found: use 6h (end of forecast)
+
+Example: price 15¢ all day until 4pm then 20¢. Old logic: 30¢ not reached → 6h deadline (too loose). New logic: +4¢ sustained rise found at 4pm → hours_to_cheap_end = 5.5h from 10:30am. Self-consumption decision made correctly against real deadline.
+
+Updated: system prompt SYSTEM_PROMPT (deadline-aware charging step 4, non-peak section), energy_rules.md (Rule 1 deadline table, Rule 13 non-peak section).
+
+---
+
 ## 2026-05-28
 
 **Agent bug fix — grid charging trigger mechanism:**

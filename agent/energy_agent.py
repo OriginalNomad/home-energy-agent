@@ -354,6 +354,115 @@ def set_zappi_mode(mode: str) -> str:
     return f"Zappi set to {mode}"
 
 
+def _compute_projected_3pm(now: datetime) -> tuple[int, int]:
+    """
+    Return (goal_3pm_soc, projected_3pm_soc) from current cycle context.
+    Mirrors the HA card logic so the two stay consistent.
+    """
+    state       = _cycle_context.get("state", {})
+    battery     = state.get("battery", {})
+    solar       = state.get("solar", {})
+
+    soc         = battery.get("soc_pct", 0) or 0
+    battery_kwh = soc / 100 * 13.5
+    home_load   = state.get("home_load_kw", 0) or 0
+    is_peak     = state.get("is_peak_month", False)
+
+    now_h        = now.hour + now.minute / 60
+    hours_to_3pm = max(15.0 - now_h, 0.0)
+
+    # Solar accuracy scaling
+    actual_kw   = solar.get("current_kw", 0) or 0
+    forecast_kw = solar.get("forecast_this_hour_kwh", 0) or 0
+    if forecast_kw < 0.2 or now_h < 8:
+        solar_scale = 1.0
+    elif actual_kw / forecast_kw < 0.3:
+        solar_scale = 0.0
+    elif actual_kw / forecast_kw < 0.7:
+        solar_scale = 0.5
+    else:
+        solar_scale = 1.0
+
+    remaining_solar = (solar.get("forecast_remaining_kwh", 0) or 0) * solar_scale
+    net_solar       = max(remaining_solar - home_load * hours_to_3pm, 0.0)
+
+    # Grid charging contribution (assume self_consumption rate)
+    reserve  = battery.get("reserve_pct", 5) or 5
+    grid_kwh = 0.0
+    if reserve > soc:
+        headroom = max((reserve / 100 * 13.5) - battery_kwh, 0.0)
+        grid_kwh = min(1.7 * hours_to_3pm, headroom)
+
+    proj_kwh = min(battery_kwh + net_solar + grid_kwh, 13.5)
+    proj_soc = round(proj_kwh / 13.5 * 100)
+    goal_soc = 85 if is_peak else 80
+    return goal_soc, proj_soc
+
+
+def _maybe_write_daily_accuracy(now: datetime):
+    """
+    After 3pm, write one daily_accuracy record to decisions.jsonl if not done today.
+    Compares what morning cycles projected for 3pm SoC against what actually happened.
+    """
+    if now.hour < 15 or not JSONL_FILE.exists():
+        return
+
+    today_str = now.strftime("%Y-%m-%d")
+    lines     = [l for l in JSONL_FILE.read_text().splitlines() if l.strip()]
+
+    today_records: list[dict] = []
+    for line in lines:
+        try:
+            r = json.loads(line)
+            if r.get("ts", "").startswith(today_str):
+                today_records.append(r)
+        except Exception:
+            continue
+
+    # Already written today?
+    if any(r.get("record_type") == "daily_accuracy" for r in today_records):
+        return
+
+    # Actual 3pm SoC — first record at or after 15:00
+    actual_3pm_soc = None
+    for r in today_records:
+        hour = int(r.get("ts", "T00")[11:13])
+        if hour >= 15 and r.get("record_type") != "daily_accuracy":
+            actual_3pm_soc = r.get("soc")
+            break
+
+    if actual_3pm_soc is None:
+        return  # no post-3pm record yet — will try next cycle
+
+    # Projections from key hours
+    projections: dict[str, int | None] = {}
+    for r in today_records:
+        if r.get("record_type") == "daily_accuracy":
+            continue
+        hour = int(r.get("ts", "T00")[11:13])
+        for h in (6, 8, 10, 12):
+            if hour == h and str(h) not in projections:
+                projections[str(h)] = r.get("projected_3pm_soc")
+
+    goal_soc = today_records[-1].get("goal_3pm_soc", 80) if today_records else 80
+    errors   = {h: ((v - actual_3pm_soc) if v is not None else None)
+                for h, v in projections.items()}
+
+    record = {
+        "ts":             now.isoformat(),
+        "record_type":    "daily_accuracy",
+        "date":           today_str,
+        "goal_3pm_soc":   goal_soc,
+        "actual_3pm_soc": actual_3pm_soc,
+        "projections":    projections,
+        "projection_errors": errors,   # positive = over-estimated, negative = under-estimated
+    }
+    with JSONL_FILE.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+    print(f"  Daily accuracy: goal={goal_soc}% actual={actual_3pm_soc}% "
+          f"projections={projections} errors={errors}")
+
+
 def log_decision(summary: str, actions_taken: list[str]) -> str:
     now     = datetime.now(SYDNEY_TZ)
     actions = ", ".join(actions_taken) if actions_taken else "hold"
@@ -413,6 +522,7 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
         "ev_soc":               ev.get("soc_pct"),
         "ev_zappi_mode_before": ev.get("zappi_mode"),
         "price_forecast_6h":    [f["cents_kwh"] for f in forecast[:12]],
+        "price_forecast_6h_times": [f["time"] for f in forecast[:12]],
         "tomorrow_solar_outlook":  _cycle_context.get("weather_forecast", {}).get("tomorrow_solar_outlook"),
         "tomorrow_avg_radiation":  _cycle_context.get("weather_forecast", {}).get("tomorrow_avg_radiation"),
         "input_tokens":         _cycle_context.get("input_tokens", 0),
@@ -429,8 +539,15 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
         "actions":              actions_taken,
         "summary":              summary,
     }
+
+    goal_3pm, proj_3pm = _compute_projected_3pm(now)
+    record["goal_3pm_soc"]      = goal_3pm
+    record["projected_3pm_soc"] = proj_3pm
+
     with JSONL_FILE.open("a") as f:
         f.write(json.dumps(record) + "\n")
+
+    _maybe_write_daily_accuracy(now)
 
     # Compute today's cumulative cost from JSONL and push to HA
     try:
@@ -521,6 +638,55 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
         print(f"  Warning: dashboard helper update failed: {exc}", file=sys.stderr)
 
     return "Logged"
+
+
+# ---------------------------------------------------------------------------
+# Short-term memory — last N decisions for deferral detection
+# ---------------------------------------------------------------------------
+
+def get_recent_decisions(n: int = 3) -> str:
+    """
+    Return the last n decisions from decisions.jsonl as a compact context block.
+    Injected into each cycle's initial message so the agent can detect when it
+    has been deferring on a forecast that repeatedly doesn't arrive.
+    """
+    if not JSONL_FILE.exists():
+        return "No prior decisions on record."
+
+    lines = [l for l in JSONL_FILE.read_text().splitlines() if l.strip()]
+    recent: list[dict] = []
+    for line in reversed(lines):
+        try:
+            recent.append(json.loads(line))
+        except Exception:
+            continue
+        if len(recent) >= n:
+            break
+
+    if not recent:
+        return "No recent decisions on record."
+
+    parts = []
+    for r in reversed(recent):  # chronological order
+        ts            = r.get("ts", "")[:16].replace("T", " ")
+        soc           = r.get("soc", "?")
+        price         = r.get("price_c", "?")
+        reserve_before = r.get("reserve_before", "?")
+        reserve_set   = r.get("reserve_set")
+        reserve_str   = (f"{reserve_before}%→{reserve_set}%"
+                         if reserve_set is not None else f"{reserve_before}% (unchanged)")
+        actions       = r.get("actions", [])
+        action_str    = ", ".join(actions) if actions else "hold"
+        summary       = r.get("summary", "")[:160]
+        solar_kw   = r.get("solar_current_kw", "?")
+        accuracy   = r.get("forecast_accuracy", "")
+        parts.append(
+            f"  [{ts}] SoC={soc}% price={price}¢ reserve={reserve_str} "
+            f"solar={solar_kw}kW ({accuracy[:20]}) | {action_str}\n"
+            f"    \"{summary}\""
+        )
+
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -673,11 +839,24 @@ You are the energy optimisation agent for a residential battery system in Glebe,
      Let the battery discharge freely, optimise purely for cost.
 
 2. EV NEVER FROM BATTERY
-   Zappi must stay in Eco+ unless one of these is true:
-   - Price < 10¢/kWh (ultra-cheap, fine to use Fast)
-   - EV SoC < 30% AND price < 20¢ (low battery, acceptable cost)
-   - Battery is actively charging from grid (can't discharge anyway — Fast is safe)
-   Never switch Zappi to Fast during Solar Sponge (10am–3pm) if battery is discharging.
+   Zappi default is Eco+ (charges only from actual solar export — battery never discharged for EV).
+   Switch to Fast only when one of these cases applies — check in order, first match wins:
+
+   Case 2: price < 10¢ (ultra-cheap — charge everything)
+   Case 3: EV SoC < 30% AND price < 20¢ (EV critically low)
+   Case 4: EV SoC < 60% AND cheap window AND battery SoC ≥ (reserve_pct − 5%)
+            → battery is at/above its floor, cannot be discharged for EV, Fast is safe
+   Case 5: EV SoC < 60% AND cheap window AND battery SoC < reserve_pct
+            → battery is BELOW its reserve floor, actively charging from grid
+            → battery physically cannot discharge for EV load
+            → Fast is safe — both battery and EV charge from grid simultaneously
+            → THIS IS THE COMMON CASE when battery is mid-charge and EV just plugged in
+
+   If none of the above: stay on Eco+.
+
+   Note: "battery discharging" is only a concern when battery SoC > reserve (it can discharge).
+   When battery SoC < reserve, it is charging from grid — Case 5 applies and Fast is safe.
+   Do NOT apply Solar Sponge caution to prevent Fast when Case 5 is active.
 
 3. MINIMISE COST
    - Charge battery and EV when price is cheapest; discharge when expensive.
@@ -692,19 +871,33 @@ You are the energy optimisation agent for a residential battery system in Glebe,
      2. kWh_needed = (target_soc − current_soc) / 100 × 13.5
      3. hours_to_fill_slow = kWh_needed / 1.7   (self_consumption rate)
         hours_to_fill_fast = kWh_needed / 5.0   (autonomous rate)
-     4. hours_to_spike = hours until price first exceeds 30¢ in forecast
+     4. hours_to_cheap_end — find the effective deadline by scanning the price forecast:
+        Scan forward through the 30-min forecast intervals. Find the first interval where:
+          price ≥ current_price + 4¢  AND  the following interval is also ≥ current_price + 4¢
+        This is a "sustained rise" — two consecutive elevated intervals, not a single blip.
+        hours_to_cheap_end = hours from now until that first elevated interval starts.
+        - Non-peak months: use hours_to_cheap_end as your deadline
+        - Peak months: use min(hours_to_2:55pm, hours_to_cheap_end) — demand window is hard
+        - If no sustained rise found in the full forecast horizon: use 6h (end of forecast window)
+        Why ≥ current_price + 4¢? A 1–2¢ drift is noise. A 4¢+ sustained move is a real window ending.
+        This replaces a fixed spike threshold — it adapts to whatever the actual price shape looks like
+        today: whether cheap ends at 3pm, 4pm, or 6pm, the deadline calculation is always accurate.
      5. Mode decision:
-        - hours_to_spike > hours_to_fill_slow + 1.5h → cheaper window may still be viable, evaluate spread
-        - hours_to_spike ≤ hours_to_fill_slow + 1.5h → start self_consumption NOW, no time to wait
-        - hours_to_spike ≤ hours_to_fill_fast + 0.5h → start autonomous NOW, only fast mode is fast enough
-     6. Once charging has started, re-run this every cycle. If self_consumption is falling behind
-        (hours_to_spike ≤ hours_to_fill_slow + 0.5h), escalate to autonomous automatically.
+        - hours_to_cheap_end > hours_to_fill_slow + 1.5h → window still viable, evaluate spread normally
+        - hours_to_cheap_end ≤ hours_to_fill_slow + 1.5h → start self_consumption NOW, no time to wait
+        - hours_to_cheap_end ≤ hours_to_fill_fast + 0.5h → start autonomous NOW, only fast is fast enough
+     6. Once charging has started, re-run every cycle. If self_consumption is falling behind
+        (hours_to_cheap_end ≤ hours_to_fill_slow + 0.5h), escalate to autonomous automatically.
         This means: start slow and cheap, escalate to fast only when the maths demands it.
-     Example: 36% SoC, 85% target, spike at 3pm, now 10:30am (4.5h to spike)
-       kWh_needed=6.6, hours_to_fill_slow=3.9h, hours_to_fill_fast=1.3h
-       4.5h > 3.9 + 1.5 = 5.4h? No → start self_consumption now
-       Next cycle (11am, 4h to spike, battery at ~38%): still enough for self_consumption? Recalculate.
-       By 1pm if battery at 55%: kWh_needed=4.1, hours_to_fill_slow=2.4h, spike in 2h → escalate to autonomous
+     Example (non-peak, mid-morning):
+       36% SoC, 80% target, now 10:30am. Price now 15¢. Forecast: 15¢ until 4pm then rises to 20¢+.
+       hours_to_cheap_end = 5.5h (to 4pm, first two intervals ≥ 15+4 = 19¢)
+       kWh_needed = 5.9, hours_to_fill_slow = 3.5h, hours_to_fill_fast = 1.2h
+       5.5h > 3.5 + 1.5 = 5.0h? Yes → evaluate spread; 5¢ spread → self_consumption, monitor
+       At 1:30pm, battery at 50%: kWh_needed=4.1, hours_to_fill_slow=2.4h, hours_to_cheap_end=2.5h
+         2.5 ≤ 2.4 + 1.5 → start self_consumption NOW (or already running)
+       At 2:30pm, battery at 55%: kWh_needed=3.4, hours_to_fill_slow=2.0h, hours_to_cheap_end=1.5h
+         1.5 ≤ 2.0 + 0.5 → escalate to autonomous
 
 4. SOLAR UTILISATION
    - Battery should have enough headroom to absorb forecast solar.
@@ -758,6 +951,47 @@ use autonomous regardless of spread.
 - Price now 16¢, evening peak forecast 30¢ → spread 14¢ → self_consumption fine (long window)
 - Price now 5¢ (negative window), day peak 30¢ → spread 25¢ → autonomous, fill fast
 - Peak month, 10am, battery at 40%, solar unreliable → demand charge risk → autonomous now
+
+## Time-based escalation — "enough waiting, go hard"
+
+These rules override the spread table when time pressure is real. They are not suggestions.
+
+**Deferral limit — when the forecast keeps being wrong:**
+At the start of each cycle you receive a "Recent decisions" summary in your context.
+If you see 2+ consecutive hold decisions where you were waiting for a cheaper price window
+AND the current price is within 2¢ of what it was in those cycles — the forecast is wrong.
+The cheap window is not arriving. Stop waiting.
+Apply flat-then-spike immediately: treat current price as the charge floor and start
+self_consumption toward the time-based substitute target (see Solar forecast accuracy section).
+Each additional 30-minute hold costs you charging time, not money.
+
+**PEAK MONTHS — hard deadline: 85% SoC by 2:55pm:**
+Every cycle from 9am, run this calculation:
+  kWh_needed = (0.85 − soc/100) × 13.5 − expected_solar_to_2:55pm
+              (use 0 for solar if forecast is poor or unreliable)
+  hours_to_fill_fast = kWh_needed / 5.0   (autonomous)
+  hours_to_fill_slow = kWh_needed / 1.7   (self_consumption)
+  hours_remaining    = hours until 14:55
+
+  hours_to_fill_fast ≥ hours_remaining   → autonomous NOW (already very tight, no time to waste)
+  hours_to_fill_slow ≥ hours_remaining   → autonomous NOW (self_consumption is too slow)
+  hours_to_fill_slow ≥ hours_remaining − 1.0h → self_consumption NOW, stop deferring
+
+Price spread is irrelevant for this calculation. A demand charge costs ~$100/month (~$3.30/day).
+Paying 5¢/kWh extra on 10 kWh costs 50¢. Always charge — the maths is not close.
+
+Quick check: past 12:30pm + battery below 40% + peak month = switch to autonomous immediately.
+Past 1:30pm + battery below 70% + peak month = switch to autonomous immediately.
+
+**NON-PEAK MONTHS — soft deadline: avoid evening spike:**
+Use hours_to_cheap_end (step 4 above) as your deadline — it automatically adapts to when
+prices actually start rising today, whether that's 3pm, 4pm, or later:
+  hours_to_fill_slow ≥ hours_to_cheap_end − 0.5h → start self_consumption NOW, spread irrelevant
+  hours_to_fill_fast ≥ hours_to_cheap_end − 0.5h → escalate to autonomous NOW
+
+Additional override after noon: if battery < 30% AND the price has been flat (within 3¢ of
+the "cheap window" you were waiting for) across 2+ recent cycles → charge at current price.
+The cheap window is not coming. Current price IS the floor.
 
 ## Solar forecast accuracy
 The state read includes several solar fields — use them together:
@@ -839,6 +1073,51 @@ solar is likely improving and it may be worth waiting 30–60 min before chargin
 If `effective_radiation_wm2` is also < 150 (or it is raining, `precip_mm_h > 0.1`), it is a
 genuine all-day cloudy/wet day — act accordingly, don't wait for solar.
 
+**CRITICAL — zero actual solar overrides all model forecasts:**
+Check the "Recent decisions" context. If `solar=0.0kW` appears in 2 or more of the last 3
+cycles during daylight hours (after 8am), this is a zero-solar day. Full stop.
+Do NOT cite "solar will arrive from Xam" as a reason to defer grid charging.
+Do NOT cite weather model radiation forecasts as a reason to hold.
+The Open-Meteo model saying "radiation improves at 11am" is a prediction. Zero kW actual
+for 2+ hours IS evidence. Evidence beats predictions.
+When recent decisions show 2+ cycles of zero solar during daylight: treat as zero-solar day,
+apply time-based substitute targets, and charge from grid immediately.
+
+## Price risk asymmetry
+
+The spread table treats price decisions as symmetric — 4¢ spread looks the same whether you
+charge now or wait. It is not symmetric. Evening prices have asymmetric upside risk:
+- If you charge at 15¢ and evening turns out to be 18¢: you overpaid 3¢/kWh
+- If you wait and evening turns out to be 30¢+: you underpaid by 15¢/kWh on what you missed
+
+Dynamic spot prices can spike well above forecast due to demand events, network constraints,
+or market volatility. The forecast says 19¢ tonight but the real distribution has a long
+right tail. Charging during Solar Sponge is a hedge against that tail, not just a cost decision.
+
+**Practical implication:** treat Solar Sponge charging as insurance, not arbitrage.
+The spread table applies when deciding how much above the floor to charge — but the floor
+itself should always be met during the Solar Sponge window regardless of spread.
+
+## Solar Sponge minimum floor
+
+EA116's Solar Sponge window (10am–3pm) is structurally cheaper than evening prices — always.
+This is baked into the tariff, not a price forecast. The spread table does not apply to this floor.
+
+**Rule: during 10am–1pm, if SoC < 50%, charge to 50% regardless of price spread.**
+
+This is a floor only — not a ceiling:
+- If the demand window target or grid charge target is higher than 50%, use that instead
+- If SoC is already ≥ 50%, normal spread logic applies for topping up further
+- The 50% floor is non-negotiable during 10am–1pm: Solar Sponge import is always the cheapest
+  window of the day on EA116. Waiting for a "better window" that might arrive later is wrong —
+  the Solar Sponge IS the better window. Any charge done here avoids paying evening rates.
+
+Implementation: if `in_solar_sponge` is True AND `now_h < 13` AND `soc < 50`:
+  set_powerwall_reserve(max(50, grid_target_or_demand_target))
+  Use self_consumption (don't need autonomous for a 50% floor — plenty of time)
+
+If it's past 1pm and SoC < 50%, apply the deadline-aware escalation rules instead.
+
 ## Overnight low battery logic
 In non-peak months there is NO demand window penalty, so letting the battery drain to zero
 overnight is perfectly acceptable if cheaper grid prices are coming. Do not charge just
@@ -850,12 +1129,15 @@ because the battery is low — check the price forecast first:
   AND no cheaper window within 2 hours — i.e. genuinely about to go flat with nothing better coming
 
 ## Your task each cycle
-1. Call get_current_state() — understand where things are
-2. Call get_price_forecast() — understand what's coming price-wise
-3. Call get_solar_forecast() if timing of solar is relevant to a decision
-4. Decide if action is needed. "Hold" is often correct — don't churn settings.
-5. Call set_* tools if action is needed
-6. Always call log_decision() with your reasoning, even if you did nothing
+1. Review "Recent decisions" in your context — check for deferral patterns before anything else
+2. Call get_current_state() — understand where things are
+3. Call get_price_forecast() — understand what's coming price-wise
+4. Call get_solar_forecast() if timing of solar is relevant to a decision
+5. Apply Solar Sponge minimum floor first (10am–1pm, SoC < 50% → charge regardless of spread)
+6. Apply time-based escalation rules if applicable (peak month deadline or deferral limit)
+6. Decide if action is needed. "Hold" is often correct — but not if you've held 2+ times already
+7. Call set_* tools if action is needed
+8. Always call log_decision() with your reasoning, even if you did nothing
 
 Be conservative. Only act when you're confident it improves outcomes.
 If the system is already in the right state, say so and hold.
@@ -884,8 +1166,16 @@ def run_agent(dry_run: bool = False):
     call any set_* or log_decision tools — safe for testing.
     """
     _cycle_context.clear()
-    client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    messages = [{"role": "user", "content": "Run your energy optimisation cycle now."}]
+    client        = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    recent        = get_recent_decisions(3)
+    initial_msg   = (
+        "Run your energy optimisation cycle now.\n\n"
+        "## Recent decisions (last 3 cycles)\n"
+        f"{recent}\n\n"
+        "Check this before deciding to hold. If you see 2+ consecutive holds waiting for "
+        "a cheaper window that hasn't arrived, apply the deferral limit rule and charge now."
+    )
+    messages = [{"role": "user", "content": initial_msg}]
 
     print(f"\n{'='*60}")
     print(f"Energy agent — {datetime.now(SYDNEY_TZ).strftime('%Y-%m-%d %H:%M %Z')}")
