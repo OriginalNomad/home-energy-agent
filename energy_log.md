@@ -14,6 +14,16 @@ Feeds the real agent (real system prompt + model) synthetic peak-month scenarios
 
 The agent correctly held on the sunny day, charged self_consumption when on-time, escalated to autonomous when tight, and fired the deferral limit. The 2:55pm-boundary scenario exposed a genuine bug: the agent trusted `soc_gateway_pct` (85%, floor-clipped to the reserve level) instead of the true `soc_pct` (Tessie, 50%), declared the demand-window target "achieved," and dropped reserve to 5% — which on a real June day would enter the 3-9pm window at 50% and risk a Rule 2 grid-import violation.
 
+**Re-architecture Phase 1 + 2 — deterministic decision layer (shadow only, not yet wired in):**
+
+Began moving the arithmetic the system prompt asks the LLM to do in its head into a pure Python function. Rationale: every edge-case fix over the last fortnight (deferral limit, hours_to_cheap_end, zero-solar, Solar Sponge floor) is a deterministic computation bolted on as prose — the LLM is bad at exactly this (mental arithmetic, array scanning, counting) and there's no verification when it errs.
+
+- `compute_decision_context(state, price_forecast, recent_records, now)` — pure function (no HTTP, no clock reads, no globals). Computes hours_to_cheap_end, kwh_needed/fill times (both cost-target and 85% demand), zero_solar_day, deferral_detected, effective cost target (grid_target vs time-based substitute), spread, and a recommended verdict `{action, target_pct, mode, rule_fired}` via an ordered decision tree (demand window → peak deadline → Solar Sponge floor → deferral → spread table).
+- `get_recent_records(n)` — parsed-dict version of the recent decisions (the existing function returns a formatted string; the pure function needs structured data).
+- `agent/test_decision.py` — 26 assert-based unit tests, no API calls, run in ms. Cover hours_to_cheap_end (sustained rise vs blip), deferral/zero-solar detectors, and the verdict for every backtest scenario incl. the SoC-gateway divergence.
+
+NOTE — this is NOT in the control path yet. Plan: shadow mode through early June (log computed verdict alongside the LLM's actual decision, measure divergence), cut over only after the first peak-month week. One divergence already visible: on the deferral-trap scenario the deterministic layer picks self_consumption (3.18h fill fits the 3.42h window) where the LLM over-escalated to autonomous — the kind of finding shadow mode is meant to surface.
+
 **Fix — SoC-sensor guidance added to system prompt:**
 
 The system prompt had no battery-sensor section and never told the agent which SoC reading to trust (Rule 6 in energy_rules.md knew, but the prompt didn't). Added a CRITICAL block: always use `soc_pct` (Tessie true SoC); `soc_gateway_pct` is floor-clipped at the reserve level and lies upward whenever reserve > true SoC; never judge target-met off the gateway. Re-ran the boundary scenario: agent now correctly identifies true SoC=50%, ignores the gateway, and keeps charging instead of dropping reserve.
