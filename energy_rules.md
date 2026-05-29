@@ -121,20 +121,28 @@ Peak months always charge regardless of price — demand window risk overrides e
 If the price forecast shows no window more than 3¢ cheaper than the current price before an evening spike, treat current price as the charge window — don't hold for a cheaper window that isn't coming. Check: if `min(forecast prices before spike) ≥ current price − 3¢`, charge now rather than waiting. This commonly occurs on overcast days where Solar Sponge prices are similar to morning prices (~20¢ all day) before a 3pm+ spike.
 
 **Deadline-aware charging with adaptive escalation:**
-The agent re-runs this calculation every 30-min cycle when a price spike is visible in the forecast. It starts slow (cheap) and escalates to fast only when the maths demands it.
+The agent re-runs this calculation every 30-min cycle. It starts slow (cheap) and escalates to fast only when the maths demands it.
 
 1. `kWh_needed = (target_soc − current_soc) / 100 × 13.5`
 2. `hours_to_fill_slow = kWh_needed / 1.7` (self_consumption)
    `hours_to_fill_fast = kWh_needed / 5.0` (autonomous)
-3. `hours_to_spike` = hours until price first exceeds 30¢ in forecast
+3. `hours_to_cheap_end` — scan the price forecast forward for the first interval where:
+   `price ≥ current_price + 4¢` AND `the following interval is also ≥ current_price + 4¢` (sustained rise, not a blip).
+   `hours_to_cheap_end` = hours from now until that first elevated interval.
+   - Non-peak months: use `hours_to_cheap_end` as the deadline
+   - Peak months: use `min(hours_to_2:55pm, hours_to_cheap_end)` — demand window is hard
+   - If no sustained rise found in forecast: use 6h (end of forecast window)
 4. Mode decisions:
-   - `hours_to_spike > hours_to_fill_slow + 1.5h` → spread logic applies, may wait for cheaper window
-   - `hours_to_spike ≤ hours_to_fill_slow + 1.5h` → start self_consumption now, no time to wait
-   - `hours_to_spike ≤ hours_to_fill_fast + 0.5h` → escalate to autonomous immediately
+   - `hours_to_cheap_end > hours_to_fill_slow + 1.5h` → spread logic applies, window still viable
+   - `hours_to_cheap_end ≤ hours_to_fill_slow + 1.5h` → start self_consumption now, no time to wait
+   - `hours_to_cheap_end ≤ hours_to_fill_fast + 0.5h` → escalate to autonomous immediately
 
-**Escalation:** once self_consumption charging has started, the agent rechecks each cycle. If `hours_to_spike ≤ hours_to_fill_slow + 0.5h`, it switches to autonomous. Start slow and cheap; escalate automatically when the deadline demands it.
+**Escalation:** once self_consumption charging has started, the agent rechecks each cycle. If `hours_to_cheap_end ≤ hours_to_fill_slow + 0.5h`, it switches to autonomous. Start slow and cheap; escalate automatically when the deadline demands it.
 
-*Example: 36% SoC, 85% target, spike at 3pm, now 10:30am. kWh needed = 6.6, slow needs 3.9h, fast needs 1.3h. 4.5h to spike ≤ 3.9 + 1.5 = 5.4h → start self_consumption now. At 1pm, 55% SoC, 2h to spike, slow needs 2.4h → 2h ≤ 2.4 + 0.5 → escalate to autonomous.*
+*Example (non-peak): 36% SoC, 80% target, now 10:30am, price 15¢. Forecast: 15¢ until 4pm then rises to 19¢+. hours_to_cheap_end = 5.5h. kWh needed = 5.9, slow needs 3.5h, fast needs 1.2h. 5.5h > 3.5 + 1.5 = 5.0h → spread logic applies; 5¢ spread → self_consumption, monitor. At 2:30pm, battery at 55%: kWh_needed = 3.4, slow needs 2.0h, hours_to_cheap_end = 1.5h → 1.5 ≤ 2.0 + 0.5 → escalate to autonomous.*
+
+**Why `hours_to_cheap_end` instead of `hours_to_spike`:**
+The old logic found the first interval exceeding 30¢ — which means it found nothing on mild-spike days (e.g. prices going 15¢ → 19¢) and gave incorrect 6h default deadlines. `hours_to_cheap_end` finds the first *sustained* price rise of ≥ 4¢, which correctly identifies when "cheap now" ends regardless of the absolute price level.
 
 **Timing:**
 - Checked at **9:30 am** (initial trigger)
@@ -352,6 +360,67 @@ Also uses `forecast_next_hour` for timing: if next hour is forecast significantl
 - Spike threshold of **50¢** is configurable — monitor actual spike patterns to tune
 - Forecast source: Amber feed-in forecast sensor
 - Rule 2 still applies: no grid **import** during demand window regardless of price — but grid **export** during demand window is fine and encouraged during spikes
+
+### Rule 14 — Solar Sponge Minimum Floor
+
+EA116's Solar Sponge window (10am–3pm) is structurally cheaper than evening prices on every day, regardless of spot price movement. This is a tariff design feature — not a forecast. The spread table does not apply to this floor.
+
+**Rule: during 10am–1pm, if SoC < 50%, always charge to at least 50%.**
+
+This is a floor, not a ceiling:
+- If the demand window target (85%) or grid charge target is higher, use that instead
+- If SoC is already ≥ 50%, normal spread logic applies for charging further
+- If it's past 1pm and SoC < 50%, apply Rule 13 escalation logic instead
+
+**Why 50%:** enough to cover ~3.5 kWh of evening home load (reasonable buffer without over-committing). Getting to 50% during Solar Sponge is always better than paying evening rates for the same kWh.
+
+**Why 10am–1pm:** leaves 2h of Solar Sponge remaining after the target is reached, so actual solar arriving late still has headroom to charge. After 1pm the deadline-aware escalation rules take over.
+
+**Mode:** self_consumption is sufficient (2–4h available, no urgency requiring autonomous).
+
+*Implementation rationale:* this rule prevents the agent from deferring indefinitely on a cheap-window forecast that may not arrive. The Solar Sponge window is the reliable cheap window — it's always there. Any other cheaper dip is a bonus, not a guarantee.
+
+### Rule 13 — Time-Based Escalation: "Enough Waiting, Go Hard"
+
+Overrides the spread table and deferral logic when time pressure is real. Not a suggestion — a hard override.
+
+**Deferral limit (non-peak and peak months):**
+The agent receives the last 3 decisions as context at the start of each cycle. If 2+ consecutive cycles show a "hold" decision while waiting for a cheaper price window — and the current price is within 2¢ of where it was in those cycles — the forecast is wrong. The cheap window is not arriving.
+
+Action: stop deferring. Apply flat-then-spike logic immediately. Treat current price as the charge floor. Start self_consumption toward the time-based substitute target.
+
+Recognising this pattern is as important as recognising a genuine cheap window. Each 30-minute hold costs charging time, not money.
+
+**Peak months — hard deadline (85% SoC by 2:55pm):**
+
+Every cycle from 9am, the agent calculates:
+```
+kWh_needed = (0.85 − soc/100) × 13.5 − expected_solar_to_2:55pm
+             (use 0 for solar if forecast is poor or unreliable)
+hours_to_fill_fast = kWh_needed / 5.0   (autonomous)
+hours_to_fill_slow = kWh_needed / 1.7   (self_consumption)
+hours_remaining    = hours until 14:55
+```
+
+| Condition | Action |
+|-----------|--------|
+| `hours_to_fill_fast ≥ hours_remaining` | Autonomous NOW — already very tight |
+| `hours_to_fill_slow ≥ hours_remaining` | Autonomous NOW — self_consumption too slow |
+| `hours_to_fill_slow ≥ hours_remaining − 1.0h` | Self_consumption NOW — stop deferring |
+
+Price spread is irrelevant. Demand charge ≈ $100/month ($3.30/day). Paying 5¢/kWh extra on 10 kWh costs 50¢. Always charge — the maths is obvious.
+
+Quick checks:
+- Past 12:30pm + battery < 40% + peak month → autonomous immediately
+- Past 1:30pm + battery < 70% + peak month → autonomous immediately
+
+**Non-peak months — soft deadline (avoid evening spike):**
+
+Use `hours_to_cheap_end` (from the deadline calculation above) as the deadline — it automatically adapts to when prices actually start rising today, whether that's 3pm, 4pm, or later:
+- `hours_to_fill_slow ≥ hours_to_cheap_end − 0.5h` → start self_consumption NOW, spread irrelevant
+- `hours_to_fill_fast ≥ hours_to_cheap_end − 0.5h` → escalate to autonomous NOW
+
+Additional override after noon: if battery < 30% AND price has been flat (within 3¢ of the expected cheap window) across 2+ recent cycles → charge at current price. The cheap window is not coming. Current price IS the floor.
 
 ---
 
