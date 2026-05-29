@@ -90,6 +90,7 @@ ENTITIES = {
     "solcast_this_hour":     "sensor.solcast_pv_forecast_forecast_this_hour",  # Wh — expected for current hour (÷1000 for kWh)
     "solcast_next_hour":     "sensor.solcast_pv_forecast_forecast_next_hour",  # Wh — expected for next hour (÷1000 for kWh)
     "home_load":            "sensor.home_load_30min_average",          # kW
+    "battery_power":        "sensor.tesla_powerwall_2_battery_power",  # kW, positive=charging, negative=discharging
     "ev_plug":              "sensor.home_ev_charger_zappi_myenergi_home_ev_charger_zappi_plug_status",
     "ev_zappi_mode":        "select.home_ev_charger_zappi_myenergi_home_ev_charger_zappi_charge_mode",
     "ev_soc":               "sensor.polestar_7853_battery_charge_level",
@@ -183,6 +184,7 @@ def get_current_state() -> dict:
             "mode":             ha_state(ENTITIES["battery_mode"]),
             "reserve_pct":      _int(ha_state(ENTITIES["battery_reserve"])),
             "grid_target_pct":  _int(ha_state(ENTITIES["battery_target"])),
+            "charge_rate_kw":   round(_float(ha_state(ENTITIES["battery_power"])), 2),
         },
         "grid": {
             "price_cents_kwh":  round(_float(ha_state(ENTITIES["grid_price"])) * 100, 1),
@@ -1085,7 +1087,7 @@ TOOLS = [
         "name": "set_powerwall_mode",
         "description": (
             "Set Powerwall operating mode. "
-            "'self_consumption': charges from grid at ~1.7 kW ONLY when backup_reserve_percent > "
+            "'self_consumption': charges from grid at a variable rate (typically 0.2–2.5 kW, read battery.charge_rate_kw) ONLY when backup_reserve_percent >"
             "current_soc. If reserve ≤ soc, battery charges from solar surplus only — no grid draw. "
             "Use for long cheap windows (3h+) or when spread doesn't justify urgency. "
             "'autonomous': fast ~5 kW grid charge. ALWAYS pair with set_powerwall_reserve(100) — "
@@ -1227,7 +1229,11 @@ EV SCHEDULE (read ev.schedule each cycle):
    - Deadline-aware charging — run this calculation every cycle when a spike is visible:
      1. target_soc = grid_target_pct (or time-based substitute if forecast is poor/unreliable)
      2. kWh_needed = (target_soc − current_soc) / 100 × 13.5
-     3. hours_to_fill_slow = kWh_needed / 1.7   (self_consumption rate)
+     3. hours_to_fill_slow = kWh_needed / actual_charge_rate_kw
+        Use battery.charge_rate_kw (actual live rate from HA sensor) if it is > 0.3 kW —
+        Tesla firmware varies widely (0.2–2.5 kW in self_consumption); never assume 1.7 kW.
+        If charge_rate_kw ≤ 0.3 kW or battery is not currently charging, use 1.7 kW as the
+        planning estimate (it will charge faster once reserve is raised).
         hours_to_fill_fast = kWh_needed / 5.0   (autonomous rate)
      4. hours_to_cheap_end — find the effective deadline by scanning the price forecast:
         Scan forward through the 30-min forecast intervals. Find the first interval where:
