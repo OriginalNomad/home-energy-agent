@@ -75,19 +75,28 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 ---
 
-## System architecture (as of 2026-05-26)
+## System architecture (as of 2026-05-29)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
 
 **Layer 1 — Intent**: encoded in the agent system prompt (`agent/energy_agent.py`). Goals in priority order: no demand charges, EV never from battery, minimise cost, use solar. Changes rarely.
 
-**Layer 2 — Agent** (`agent/energy_agent.py`): Claude-powered Python script. Runs every 30 min via cron. Reads HA sensor state + Amber price forecast + Solcast solar forecast, reasons about trade-offs, sets `backup_reserve_percent`, Powerwall mode, and Zappi mode. Logs decisions to HA Activity (logbook) and `/tmp/energy_agent.log`. The agent handles all *strategic* decisions.
+**Layer 2 — Agent** (`agent/energy_agent.py`): Claude-powered Python script. Runs every 30 min via cron. Reads HA sensor state + Amber price forecast + Solcast solar forecast, reasons about trade-offs, sets `backup_reserve_percent`, Powerwall mode, and Zappi mode. Logs decisions to `agent/agent_decisions.log` (plain text) and `agent/decisions.jsonl` (structured JSON per cycle). The agent handles all *strategic* decisions.
+
+Key agent capabilities added 2026-05-29:
+- **Short-term memory**: last 3 decisions from `decisions.jsonl` injected into every cycle. Agent can detect stateless deferral (holding 2+ cycles for a cheap window that never arrives).
+- **Deferral limit**: if 2+ consecutive holds + price within 2¢ of prior cycles → flat-then-spike, charge now.
+- **Time-based escalation (Rule 13)**: peak month hard deadline maths every cycle from 9am; non-peak soft deadline via `hours_to_cheap_end`.
+- **`hours_to_cheap_end`**: replaces `hours_to_spike` (first price > 30¢). Scans forecast for first *sustained* +4¢ rise (two consecutive intervals). Gives accurate deadline on mild-spike days where absolute 30¢ threshold was never reached.
+- **Solar zero-override**: if actual solar = 0 kW in 2+ of last 3 daylight cycles, treat as zero-solar day regardless of Solcast/Open-Meteo forecasts. Evidence beats model predictions.
+- **Solar Sponge minimum floor (Rule 14)**: 10am–1pm, SoC < 50% → always charge to 50%, spread table irrelevant.
+- **Price risk asymmetry**: evening prices have fat right tail — Solar Sponge charging is insurance, not arbitrage.
 
 **Layer 3 — Rules** (HA automations, always active): hard constraints that fire deterministically regardless of agent decisions. React in seconds. Cannot be overridden by the agent. Handle safety, demand window, export guard, and edge cases.
 
 ---
 
-## Current automation status (as of 2026-05-26)
+## Current automation status (as of 2026-05-29)
 
 **24 automations** in `config/automations.yaml` — **12 active (safety/monitoring), 12 disabled (agent handles)**
 
@@ -129,7 +138,7 @@ Three layers control the system. Read this before assuming any automation is "in
 
 ---
 
-## Charge mode policy (as of 2026-05-26)
+## Charge mode policy (as of 2026-05-29)
 
 - **`self_consumption`**: normal operation, ~1.7 kW grid charge rate. Used for long cheap windows (3h+) or when price spread doesn't justify urgency.
 - **`autonomous` + `reserve=100%`**: fast ~5 kW grid charge. `reserve=100%` is the export guard. HA safety net (`battery_autonomous_export_safety_net`) reverts to self_consumption within 30s if export is detected. Previously banned but re-enabled after safety net was patched (2026-05-25).
@@ -147,7 +156,7 @@ Three layers control the system. Read this before assuming any automation is "in
 
 ---
 
-## EV status (as of 2026-05-26)
+## EV status (as of 2026-05-29)
 
 **Zappi plug_status values confirmed:**
 - `"EV Disconnected"` — not plugged in
@@ -176,7 +185,7 @@ Three layers control the system. Read this before assuming any automation is "in
 
 | File | What it contains |
 |------|-----------------|
-| `energy_rules.md` | Full rule-set (10 rules), all business logic, decision priority order, known limitations |
+| `energy_rules.md` | Full rule-set (Rules 1–14), all business logic, decision priority order, known limitations |
 | `ea116_tariff.md` | EA116 tariff structure — demand charge, Solar Sponge, export penalty |
 | `energy_log.md` | Chronological log of what was built each day and observations |
 | `todo.md` | Personal and product to-do lists |
@@ -185,7 +194,8 @@ Three layers control the system. Read this before assuming any automation is "in
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/.env` | API keys (gitignored — not in repo) |
-| `/tmp/energy_agent.log` | Agent decision log (local only, not committed) |
+| `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
+| `agent/decisions.jsonl` | Structured JSON decision log — full context per cycle, foundation for analyst agent and accuracy tracking |
 
 ---
 

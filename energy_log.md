@@ -27,7 +27,37 @@ EA116's Solar Sponge (10am–3pm) is structurally cheaper than evening prices on
 
 Rule 13 added to energy_rules.md. System prompt updated to match.
 
-**Rule 15 (hours_to_cheap_end) — adaptive deadline calculation:**
+**Zero-solar override added to system prompt:**
+
+Agent kept citing "solar will arrive from 11am" as a reason to defer charging even when solar had been 0 kW for 2+ consecutive cycles during daylight. Root cause: the Solcast/Open-Meteo forecasts predicted solar clearing — the agent treated model prediction as more credible than actual evidence. Fix: explicit CRITICAL rule — if `solar=0.0kW` appears in 2+ of the last 3 cycles during daylight hours (after 8am), that is a zero-solar day. Do NOT cite weather model radiation forecasts as a reason to hold. Evidence beats predictions. The `solar_current_kw` field added to recent-decisions context format so agent can see the pattern.
+
+**EV Case 5 bug fix:**
+
+Agent left Zappi on Eco+ when battery was at 29% below reserve=70% and EV was at 34%. Agent said "Eco+ correctly" because it applied Solar Sponge caution ("don't use Fast during Solar Sponge if discharging") — but battery was BELOW reserve, so it cannot discharge. Case 5 (battery below reserve, charging from grid) explicitly allows Fast. Fix: rewrote EV section of system prompt with explicit numbered priority list (Cases 2/3/4/5) and an explicit note "Do NOT apply Solar Sponge caution to prevent Fast when Case 5 is active." CONTEXT.md EV policy updated to match.
+
+**Battery forecast card redesign:**
+
+Rebuilt the HA markdown card to show the decision context clearly:
+- Goal by deadline (85% peak / 80% non-peak)
+- Projected SoC with solar-accuracy scaling (0%/50%/100% of Solcast remaining)
+- Grid charging contribution included in projection (was previously missing — caused "10% projected" when battery was actively charging)
+- Gap in % and kWh with plain-English "Why" reasons
+- "To close the gap" section with self-consumption vs autonomous ETAs, and flag when the deadline is too tight
+
+**JSONL record additions and daily accuracy tracking:**
+
+Three new fields added to every `decisions.jsonl` record:
+- `goal_3pm_soc`: target SoC at 3pm (85% peak, 80% non-peak)
+- `projected_3pm_soc`: solar-accuracy-adjusted projected SoC at 3pm (mirrors card logic)
+- `price_forecast_6h_times`: ISO timestamps for each price forecast slot (joins with InfluxDB actuals later)
+
+New function `_maybe_write_daily_accuracy(now)`: fires once after 3pm, checks if today's accuracy record exists, finds the actual 3pm SoC from the first post-3pm cycle, compares against morning projections (6am, 8am, 10am, 12pm cycle timestamps) and writes a `record_type: "daily_accuracy"` record with `projections`, `actual_3pm_soc`, and signed `projection_errors`. Foundation for the InfluxDB accuracy dashboard.
+
+**Price risk asymmetry section added to system prompt:**
+
+Added explicit framing: the spread table is symmetric but evening prices are not. If you charge at 15¢ and evening is 18¢, you overpaid 3¢. If you wait and evening hits 30¢+, you underpaid by 15¢ on what you missed. Spot prices have a fat right tail. Solar Sponge charging is insurance against that tail, not just an arbitrage calculation. Practical implication: the spread floor itself should always be met during Solar Sponge regardless of spread — which leads directly to Rule 14.
+
+**Adaptive deadline calculation (hours_to_cheap_end) — replaces hours_to_spike:**
 
 The old deadline logic used `hours_to_spike` = first forecast price > 30¢. This was broken in two ways:
 1. On mild-spike days (prices going 15¢ → 19¢) it found nothing and defaulted to 6h, giving false "plenty of time" readings
@@ -42,6 +72,10 @@ Replaced with `hours_to_cheap_end`: scan forward through 30-min forecast interva
 Example: price 15¢ all day until 4pm then 20¢. Old logic: 30¢ not reached → 6h deadline (too loose). New logic: +4¢ sustained rise found at 4pm → hours_to_cheap_end = 5.5h from 10:30am. Self-consumption decision made correctly against real deadline.
 
 Updated: system prompt SYSTEM_PROMPT (deadline-aware charging step 4, non-peak section), energy_rules.md (Rule 1 deadline table, Rule 13 non-peak section).
+
+**HA battery forecast card updated for dynamic deadline:**
+
+Card now scans the Amber forecast attribute directly in Jinja2 to compute `hours_to_cheap_end` (same algorithm as agent): first sustained +4¢ rise over two consecutive intervals. Non-peak months show "Goal by 4pm" (or actual dynamic time); peak months show "Goal by 3pm". All projection, gap, and "to close" calculations use `hours_to_deadline` rather than a hardcoded `hours_to_3pm`. Footer "kWh to 3pm" also updated to the real deadline time.
 
 ---
 
