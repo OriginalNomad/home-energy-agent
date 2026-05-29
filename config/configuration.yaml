@@ -80,6 +80,22 @@ input_number:
     unit_of_measurement: "%"
     mode: slider
     icon: mdi:battery-charging-80
+  ev_min_soc_pct:
+    name: "EV — Minimum SoC"
+    min: 0
+    max: 80
+    step: 5
+    unit_of_measurement: "%"
+    mode: slider
+    icon: mdi:battery-low
+  ev_charge_target_pct:
+    name: "EV — Charge target"
+    min: 20
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: slider
+    icon: mdi:battery-charging-high
 
 input_text:
   battery_decision_automation:
