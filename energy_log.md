@@ -24,6 +24,21 @@ Began moving the arithmetic the system prompt asks the LLM to do in its head int
 
 NOTE — this is NOT in the control path yet. Plan: shadow mode through early June (log computed verdict alongside the LLM's actual decision, measure divergence), cut over only after the first peak-month week. One divergence already visible: on the deferral-trap scenario the deterministic layer picks self_consumption (3.18h fill fits the 3.42h window) where the LLM over-escalated to autonomous — the kind of finding shadow mode is meant to surface.
 
+**Phase 4 finding (first real divergence) — `_hours_to_cheap_end` under-reports urgency on a gradual price ramp:**
+
+Live at 15:30 the LLM was charging in autonomous; the deterministic layer recommended `nonpeak_deadline_selfcons` (charge to 90% but at self_consumption). They agreed on action+target, diverged on mode. Investigation (prompted by Simon noticing the cheap window was visibly closing in ~30 min, not 1.5h):
+
+- Forecast: 13.4 (now) → 15.7 (16:00) → 17.0 (16:30) → 19.0 (17:00, sustained).
+- `_hours_to_cheap_end` anchors to *current* price and only flags "cheap end" at the first sustained **+4¢** step. 15.7 is +2.3, 17.0 is +3.6 — both under +4 — so it only triggers at the 19¢ step = **1.5h**.
+- But the window is effectively closing at 16:00–16:30 (price already +2–3.6¢, Amber cheap flag/descriptor flipping). Real remaining cheap time ≈ **30 min**.
+- Consequence: with only ~30 min left, self_consumption (`fill_slow_h`=1.59h) cannot reach 90%; only autonomous (`fill_fast_h`=0.54h ≈32min) makes it. **The LLM's autonomous call was correct; the deterministic recommendation was wrong** — because its urgency metric over-stated remaining cheap time on a gradual ramp.
+
+Root cause: `+4¢-relative-to-current-price` threshold. On a stepwise jump it's fine; on a smooth climb off a low base it never accumulates +4¢ between adjacent intervals until the very end.
+
+Proposed fix (HOLD until a few more June examples confirm the pattern): redefine cheap-end as hours until price crosses an **absolute** cheapness band (or until the Amber `in_cheap_window`/descriptor clears), rather than a relative jump off the current price. Candidate: cheap-end = first interval where `cents_kwh > min(current_price, today_cheap_band) + N` measured against an absolute reference, or simply consume Amber's own descriptor transition (very_low/low → neutral+). Keep the relative-jump test as a secondary trigger for genuine step events. `agent/energy_agent.py:784`.
+
+This is exactly the divergence shadow mode was built to surface — captured for the Phase 4 review.
+
 **Re-architecture Phase 3 — shadow mode wired in (logs both decisions):**
 
 The deterministic layer is now computed every live cycle and both decisions are logged side-by-side for divergence measurement. This is the data-collection step before any cutover.
