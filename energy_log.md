@@ -39,6 +39,17 @@ Proposed fix (HOLD until a few more June examples confirm the pattern): redefine
 
 This is exactly the divergence shadow mode was built to surface — captured for the Phase 4 review.
 
+**Fix implemented — `_hours_to_cheap_end` rewritten as a scale-free daily-shape model (Option 1):**
+
+Replaced the +4¢-relative-to-current-price test with a range-normalised cheap band, so the metric tracks the *structural shape* of the day (morning bump → noon trough → evening peak) regardless of absolute price level:
+
+- `p_min` = cheapest interval ahead; `p_peak` = max price in the **evening window (15:00–21:00)** (anchored there so the morning bump doesn't inflate the range; falls back to forward max if no evening intervals in horizon).
+- `rng = p_peak − p_min`; cheap band `T = p_min + α·rng`, `α = 0.30` (`CHEAP_BAND_ALPHA`).
+- `hours_to_cheap_end` = hours to the right edge of the cheap region ahead (first sustained interval where price > T). Returns 0.0 if already above the band, 6.0 if it never ends in the horizon.
+- **Flat-day guard:** if `rng < 5¢` (`MIN_DAILY_SWING`), return 6.0 — a flat day has no real trough/ramp, so 1¢ jitter must not register as a closing window.
+
+Backtested against every forecast in `decisions.jsonl`: on flat May days (15–17¢, ~1–2¢ swing) the new metric returns 6.0 just like the old one (no false urgency); on the morning of a big-swing day (08:30, 41→16¢ descending) it returns 6.0 (trough still ahead — correct); and on the 15:30 evening ramp it returns **0.5h**, matching the eye and fixing the bug. Re-running the live 15:30 verdict now yields `charge/90%/autonomous` — **agreeing with the LLM**; the earlier false divergence is resolved. Added unit tests for the gradual-ramp and sub-5¢-jitter cases (28 pass). α/swing values are first-pass; revisit once June peak-month forecasts (larger swings) accumulate. `agent/energy_agent.py:784`.
+
 **Re-architecture Phase 3 — shadow mode wired in (logs both decisions):**
 
 The deterministic layer is now computed every live cycle and both decisions are logged side-by-side for divergence measurement. This is the data-collection step before any cutover.
