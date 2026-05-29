@@ -77,6 +77,14 @@ def test_hours_to_cheap_end():
     check("cheap_end ignores blip", ea._hours_to_cheap_end(f2, 13) == 6.0,
           ea._hours_to_cheap_end(f2, 13))
     check("cheap_end flat -> 6h", ea._hours_to_cheap_end(flat(16), 16) == 6.0)
+    # Gradual ramp off a low base: relative bands catch it where a +4¢ jump test misses.
+    ramp = fc([13.4, 15.7, 17, 19, 19, 19, 19, 19])      # smooth climb to evening peak
+    check("cheap_end catches gradual ramp", ea._hours_to_cheap_end(ramp, 13.4) == 0.5,
+          ea._hours_to_cheap_end(ramp, 13.4))
+    # Flat-ish day with sub-5¢ swing: no meaningful trough to end.
+    jitter = fc([15, 15, 16, 15, 16, 15, 15, 16])
+    check("cheap_end ignores sub-5c jitter", ea._hours_to_cheap_end(jitter, 15) == 6.0,
+          ea._hours_to_cheap_end(jitter, 15))
 
 
 def test_detectors():

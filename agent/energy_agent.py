@@ -781,17 +781,46 @@ def _accuracy_class(label: str) -> str:
     return "na"
 
 
-def _hours_to_cheap_end(price_forecast: list[dict], current_price: float) -> float:
-    """First sustained (+4¢ over two consecutive 30-min intervals) rise, in hours from now.
+CHEAP_BAND_ALPHA = 0.30   # cheap = bottom 30% of today's price swing (trough → evening peak)
+MIN_DAILY_SWING  = 5.0    # ¢ — below this the day is flat; no meaningful cheap window to "end"
 
-    Assumes price_forecast is uniform 30-min spacing (get_price_forecast resamples to that).
-    Returns 6.0 if no sustained rise is found in the horizon.
+
+def _hours_to_cheap_end(price_forecast: list[dict], current_price: float,
+                        alpha: float = CHEAP_BAND_ALPHA) -> float:
+    """Hours until today's cheap trough ends — i.e. price climbs out of the bottom
+    `alpha`-band of the day's own range and starts the ramp toward the evening peak.
+
+    Scale-free by design: normalises to each day's own minimum and *evening* peak
+    (15:00–21:00) rather than absolute cents or a fixed +N¢ jump. This captures the
+    structural daily shape (morning bump → noon trough → evening peak) on both a
+    10–20¢ day and a 30–80¢ day. Anchoring the high to the evening window keeps the
+    morning bump from inflating the range. Returns hours to the end of the cheap
+    region that lies ahead; 0.0 if no cheap interval remains; 6.0 if it never ends
+    within the horizon. Assumes uniform 30-min spacing.
     """
     prices = [f.get("cents_kwh", 0.0) for f in price_forecast]
-    threshold = current_price + 4.0
-    for i in range(len(prices) - 1):
-        if prices[i] >= threshold and prices[i + 1] >= threshold:
-            return i * 0.5
+    if len(prices) < 2:
+        return 6.0
+
+    evening = []
+    for f in price_forecast:
+        t  = f.get("time", "")
+        hh = t[11:13] if len(t) >= 13 else ""
+        if hh.isdigit() and 15 <= int(hh) < 21:
+            evening.append(f.get("cents_kwh", 0.0))
+    p_peak = max(evening) if evening else max(prices)
+    p_min  = min(prices)
+    rng    = p_peak - p_min
+    if rng < MIN_DAILY_SWING:
+        return 6.0                       # flat day — no real trough/ramp to track
+
+    threshold = p_min + alpha * rng
+    start = next((i for i, p in enumerate(prices) if p <= threshold), None)
+    if start is None:
+        return 0.0                       # already above the cheap band — window closed
+    for j in range(start, len(prices) - 1):
+        if prices[j] > threshold and prices[j + 1] > threshold:
+            return j * 0.5               # right edge of the cheap region
     return 6.0
 
 
