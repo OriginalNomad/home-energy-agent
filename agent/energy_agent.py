@@ -93,6 +93,9 @@ ENTITIES = {
     "ev_plug":              "sensor.home_ev_charger_zappi_myenergi_home_ev_charger_zappi_plug_status",
     "ev_zappi_mode":        "select.home_ev_charger_zappi_myenergi_home_ev_charger_zappi_charge_mode",
     "ev_soc":               "sensor.polestar_7853_battery_charge_level",
+    "ev_schedule_active":   "input_boolean.ev_schedule_active",
+    "ev_departure_time":    "input_datetime.ev_departure_time",
+    "ev_departure_target":  "input_number.ev_departure_target_pct",
 }
 
 # ---------------------------------------------------------------------------
@@ -137,6 +140,26 @@ def ha_set_state(entity_id: str, state: str, attributes=None):
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
+
+def _ev_schedule(now: datetime) -> dict:
+    """Read the HA EV schedule controls and return structured context for the agent."""
+    active = ha_state(ENTITIES["ev_schedule_active"]) == "on"
+    if not active:
+        return {"active": False}
+    try:
+        dep_str    = ha_state(ENTITIES["ev_departure_time"])   # "YYYY-MM-DD HH:MM:SS"
+        dep_target = int(float(ha_state(ENTITIES["ev_departure_target"])))
+        dep_dt     = datetime.strptime(dep_str[:16], "%Y-%m-%d %H:%M").replace(tzinfo=SYDNEY_TZ)
+        hours_to_departure = round((dep_dt - now).total_seconds() / 3600, 1)
+        return {
+            "active":              True,
+            "departure_time":      dep_dt.strftime("%Y-%m-%d %H:%M"),
+            "departure_target_pct": dep_target,
+            "hours_to_departure":  hours_to_departure,
+        }
+    except Exception:
+        return {"active": True, "error": "could not parse departure time"}
+
 
 def get_current_state() -> dict:
     now = datetime.now(SYDNEY_TZ)
@@ -186,6 +209,7 @@ def get_current_state() -> dict:
             "charging":    ev_plug_state == "Charging",
             "zappi_mode":  ha_state(ENTITIES["ev_zappi_mode"]) if ev_plugged else "n/a",
             "soc_pct":     _safe_int(ENTITIES["ev_soc"]) if ev_plugged else None,
+            "schedule":    _ev_schedule(now),
         },
     }
     _cycle_context["state"] = state
@@ -1173,6 +1197,24 @@ You are the energy optimisation agent for a residential battery system in Glebe,
    Note: "battery discharging" is only a concern when battery SoC > reserve (it can discharge).
    When battery SoC < reserve, it is charging from grid — Case 5 applies and Fast is safe.
    Do NOT apply Solar Sponge caution to prevent Fast when Case 5 is active.
+
+EV SCHEDULE (read ev.schedule each cycle):
+   ev.schedule.active = false → no deadline, use Cases 2–5 above as normal.
+   ev.schedule.active = true → a departure deadline is set. Additional logic:
+
+   Compute ev_kwh_needed = (departure_target_pct − ev_soc_pct) / 100 × 100 kWh (Polestar 4 battery)
+   Zappi Fast rate ≈ 7.2 kW (32A, single phase). fill_fast_h = ev_kwh_needed / 7.2
+   Zappi Eco+ rate = depends on solar export; treat as 0 kW guaranteed for deadline maths.
+
+   Deadline rules (checked AFTER the "EV NEVER FROM BATTERY" constraint):
+   - If ev_soc_pct ≥ departure_target_pct: target met, no deadline action needed. Eco+ or Off.
+   - If fill_fast_h ≥ hours_to_departure − 0.5: URGENT — switch to Fast immediately regardless of
+     price (missing the departure target is worse than paying a few extra cents).
+   - If fill_fast_h < hours_to_departure × 0.5: plenty of time — stay on Eco+ unless a Fast Case
+     (2–5) applies independently.
+   - Otherwise: moderate urgency — use Fast if price < 20¢, else Eco+ and re-evaluate next cycle.
+
+   Always state hours_to_departure and fill_fast_h in ev_summary so the user can sanity-check.
 
 3. MINIMISE COST
    - Charge battery and EV when price is cheapest; discharge when expensive.
