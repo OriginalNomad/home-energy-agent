@@ -193,15 +193,44 @@ def get_current_state() -> dict:
 
 
 def get_price_forecast() -> list[dict]:
-    """Next 12 hours of Amber price forecasts from HA forecast sensor attributes."""
+    """Next 12 hours of Amber prices, resampled to uniform 30-minute buckets.
+
+    The Amber sensor mixes interval sizes: the near-term intervals are 5-minute
+    and the rest are 30-minute. Downstream logic (hours_to_cheap_end, the
+    sustained-rise scan, the "6h"/"12h" forecast slices) all assume uniform
+    30-min spacing — so we bucket every sub-interval into its 30-min slot and
+    average the price. This makes index × 0.5h an accurate "hours from now".
+    """
     attrs = ha_attrs(ENTITIES["grid_forecast"])
     forecasts = attrs.get("forecasts", [])
+    if not forecasts:
+        print("  Warning: price forecast is EMPTY — agent is flying blind on prices",
+              file=sys.stderr)
+        _cycle_context["price_forecast"] = []
+        return []
+
+    buckets: dict[str, list[float]] = {}
+    descriptors: dict[str, str] = {}
+    order: list[str] = []
+    for f in forecasts:
+        nem = f.get("nem_date", "")
+        if len(nem) < 16:
+            continue
+        slot = "00" if int(nem[14:16]) < 30 else "30"
+        key  = f"{nem[:11]}{nem[11:13]}:{slot}"     # e.g. 2026-05-29T16:30
+        if key not in buckets:
+            buckets[key]     = []
+            descriptors[key] = f.get("descriptor", "")
+            order.append(key)
+        buckets[key].append(_float(f.get("per_kwh", 0)) * 100)
+
     result = []
-    for f in forecasts[:24]:        # 24 × 30 min = 12 h
+    for key in order[:24]:          # 24 × 30 min = 12 h
+        prices = buckets[key]
         result.append({
-            "time":       f.get("nem_date", "")[:16],
-            "cents_kwh":  round(_float(f.get("per_kwh", 0)) * 100, 1),
-            "descriptor": f.get("descriptor", ""),
+            "time":       key[:16].replace("T", " "),
+            "cents_kwh":  round(sum(prices) / len(prices), 1),
+            "descriptor": descriptors[key],
         })
     _cycle_context["price_forecast"] = result
     return result
@@ -907,6 +936,16 @@ You are the energy optimisation agent for a residential battery system in Glebe,
 
 ## Operating constraints
 - Only control: backup_reserve_percent and mode (via Tessie API)
+
+**CRITICAL — which SoC reading to trust:**
+The state gives you two battery readings:
+- `soc_pct` (from the Tessie cloud poll) — the TRUE state of charge. ALWAYS use this.
+- `soc_gateway_pct` (from the local Powerwall gateway) — FLOOR-CLIPPED at the reserve level.
+  When reserve is high (e.g. 85%), the gateway reports 85% even if the battery is really at 50%.
+Never use `soc_gateway_pct` to judge whether a charge target has been met — it will lie upward
+whenever reserve > true SoC. If the two disagree, the Tessie `soc_pct` is correct. Declaring the
+demand-window target "achieved" off the gateway reading is a Rule-2-violation trap: you would
+drop reserve and enter the 3-9pm window far below target.
 
 **CRITICAL — how grid charging actually works:**
 Grid charging ONLY occurs when `backup_reserve_percent > current_soc`. This is the trigger.
