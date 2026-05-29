@@ -212,7 +212,7 @@ def get_current_state() -> dict:
             "plugged_in":  ev_plugged,
             "charging":    ev_plug_state == "Charging",
             "zappi_mode":  ha_state(ENTITIES["ev_zappi_mode"]) if ev_plugged else "n/a",
-            "soc_pct":     _safe_int(ENTITIES["ev_soc"]) if ev_plugged else None,
+            "ev_soc_pct":  _safe_int(ENTITIES["ev_soc"]) if ev_plugged else None,
             "min_soc_pct": int(float(ha_state(ENTITIES["ev_min_soc"]) or 20)),
             "charge_target_pct": int(float(ha_state(ENTITIES["ev_charge_target"]) or 80)),
             "schedule":    _ev_schedule(now),
@@ -578,7 +578,7 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "solar_next_hour_kwh":  solar.get("forecast_next_hour_kwh"),
         "home_load_kw":         state.get("home_load_kw"),
         "ev_plugged":           ev.get("plugged_in"),
-        "ev_soc":               ev.get("soc_pct"),
+        "ev_soc":               ev.get("ev_soc_pct"),
         "ev_zappi_mode_before": ev.get("zappi_mode"),
         "price_forecast_6h":    [f["cents_kwh"] for f in forecast[:12]],
         "price_forecast_6h_times": [f["time"] for f in forecast[:12]],
@@ -1212,12 +1212,12 @@ EV SCHEDULE (read ev.schedule each cycle):
    ev.schedule.active = false → no deadline, use Cases 2–5 above as normal.
    ev.schedule.active = true → a departure deadline is set. Additional logic:
 
-   Compute ev_kwh_needed = (departure_target_pct − ev_soc_pct) / 100 × 100 kWh (Polestar 4 battery)
+   Compute ev_kwh_needed = (departure_target_pct − ev.ev_soc_pct) / 100 × 100 kWh (Polestar 4 battery)
    Zappi Fast rate ≈ 7.2 kW (32A, single phase). fill_fast_h = ev_kwh_needed / 7.2
    Zappi Eco+ rate = depends on solar export; treat as 0 kW guaranteed for deadline maths.
 
    Deadline rules (checked AFTER the "EV NEVER FROM BATTERY" constraint):
-   - If ev_soc_pct ≥ departure_target_pct: target met, no deadline action needed. Eco+ or Off.
+   - If ev.ev_soc_pct ≥ departure_target_pct: target met, no deadline action needed. Eco+ or Off.
    - If fill_fast_h ≥ hours_to_departure − 0.5: URGENT — switch to Fast immediately regardless of
      price (missing the departure target is worse than paying a few extra cents).
    - If fill_fast_h < hours_to_departure × 0.5: plenty of time — stay on Eco+ unless a Fast Case
