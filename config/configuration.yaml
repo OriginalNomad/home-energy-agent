@@ -42,6 +42,36 @@ input_datetime:
     has_time: true
 
 input_number:
+  battery_decision_soc:
+    name: "Battery Decision — SoC"
+    min: 0
+    max: 100
+    unit_of_measurement: "%"
+    mode: box
+  battery_decision_price:
+    name: "Battery Decision — Price"
+    min: -100
+    max: 500
+    unit_of_measurement: "¢/kWh"
+    mode: box
+  battery_decision_solar_remaining:
+    name: "Battery Decision — Solar Remaining"
+    min: 0
+    max: 30
+    unit_of_measurement: "kWh"
+    mode: box
+  battery_decision_grid_target:
+    name: "Battery Decision — Grid Target"
+    min: 0
+    max: 100
+    unit_of_measurement: "%"
+    mode: box
+  battery_decision_reserve_set:
+    name: "Battery Decision — Reserve Set"
+    min: 0
+    max: 100
+    unit_of_measurement: "%"
+    mode: box
   ev_departure_target_pct:
     name: "EV — Departure target %"
     min: 10
@@ -58,31 +88,6 @@ input_text:
   battery_decision_action:
     name: "Battery Decision — Action"
     max: 255
-  battery_decision_soc:
-    name: "Battery Decision — SoC"
-    min: 0
-    max: 100
-    unit_of_measurement: "%"
-  battery_decision_price:
-    name: "Battery Decision — Price"
-    min: -100
-    max: 500
-    unit_of_measurement: "¢/kWh"
-  battery_decision_solar_remaining:
-    name: "Battery Decision — Solar Remaining"
-    min: 0
-    max: 30
-    unit_of_measurement: "kWh"
-  battery_decision_grid_target:
-    name: "Battery Decision — Grid Target"
-    min: 0
-    max: 100
-    unit_of_measurement: "%"
-  battery_decision_reserve_set:
-    name: "Battery Decision — Reserve Set"
-    min: 0
-    max: 100
-    unit_of_measurement: "%"
 
 sensor:
   - platform: statistics
