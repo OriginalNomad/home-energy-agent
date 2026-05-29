@@ -492,7 +492,7 @@ def _maybe_write_daily_accuracy(now: datetime):
           f"projections={projections} errors={errors}")
 
 
-def log_decision(summary: str, actions_taken: list[str]) -> str:
+def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -> str:
     now     = datetime.now(SYDNEY_TZ)
     actions = ", ".join(actions_taken) if actions_taken else "hold"
     entry   = f"[{now.strftime('%Y-%m-%d %H:%M')}] {summary} | Actions: {actions}"
@@ -622,11 +622,23 @@ def log_decision(summary: str, actions_taken: list[str]) -> str:
     except Exception as exc:
         print(f"  Warning: daily cost push failed: {exc}", file=sys.stderr)
 
-    # Overwrite the "last decision" notification — quick at-a-glance in HA
+    # Battery notification
+    battery_actions = [a for a in actions_taken if not a.startswith("set_zappi")]
+    battery_actions_str = ", ".join(battery_actions) if battery_actions else "hold"
     ha_service("persistent_notification", "create", {
-        "notification_id": "energy_agent_latest",
-        "title": f"⚡ Agent — {now.strftime('%H:%M')}",
-        "message": f"{summary}\n\n**Actions:** {actions}",
+        "notification_id": "energy_agent_battery",
+        "title": f"🔋 Battery — {now.strftime('%H:%M')}",
+        "message": f"{summary}\n\n**Actions:** {battery_actions_str}",
+    })
+
+    # EV notification
+    ev_actions = [a for a in actions_taken if a.startswith("set_zappi")]
+    ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
+    ev_msg = ev_summary if ev_summary else summary
+    ha_service("persistent_notification", "create", {
+        "notification_id": "energy_agent_ev",
+        "title": f"🚗 EV — {now.strftime('%H:%M')}",
+        "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
     })
 
     # Write a logbook entry — sequential history in HA History panel
@@ -1099,6 +1111,10 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "List of actions taken, e.g. ['set_reserve(62%)', 'set_zappi(Eco+']. Empty list if no action.",
                 },
+                "ev_summary": {
+                    "type": "string",
+                    "description": "1–2 sentences covering EV status only: plug state, EV SoC, Zappi mode set and why. If EV is disconnected, say so briefly.",
+                },
             },
             "required": ["summary", "actions_taken"],
         },
@@ -1447,7 +1463,9 @@ because the battery is low — check the price forecast first:
 6. Apply time-based escalation rules if applicable (peak month deadline or deferral limit)
 6. Decide if action is needed. "Hold" is often correct — but not if you've held 2+ times already
 7. Call set_* tools if action is needed
-8. Always call log_decision() with your reasoning, even if you did nothing
+8. Always call log_decision() with your reasoning, even if you did nothing.
+   - `summary`: battery-focused — SoC, price, mode, reserve, what you did and why.
+   - `ev_summary`: EV-focused — plug state, EV SoC, Zappi mode set and why (1–2 sentences). If disconnected, say "EV disconnected — no action."
 
 Be conservative. Only act when you're confident it improves outcomes.
 If the system is already in the right state, say so and hold.
@@ -1465,7 +1483,7 @@ TOOL_MAP = {
     "set_powerwall_reserve":lambda a: set_powerwall_reserve(a["percent"]),
     "set_powerwall_mode":   lambda a: set_powerwall_mode(a["mode"]),
     "set_zappi_mode":       lambda a: set_zappi_mode(a["mode"]),
-    "log_decision":         lambda a: log_decision(a["summary"], a["actions_taken"]),
+    "log_decision":         lambda a: log_decision(a["summary"], a["actions_taken"], a.get("ev_summary", "")),
 }
 
 
