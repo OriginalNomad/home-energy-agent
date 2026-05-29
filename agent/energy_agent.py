@@ -97,6 +97,8 @@ ENTITIES = {
     "ev_schedule_active":   "input_boolean.ev_schedule_active",
     "ev_departure_time":    "input_datetime.ev_departure_time",
     "ev_departure_target":  "input_number.ev_departure_target_pct",
+    "ev_min_soc":           "input_number.ev_min_soc_pct",
+    "ev_charge_target":     "input_number.ev_charge_target_pct",
 }
 
 # ---------------------------------------------------------------------------
@@ -211,6 +213,8 @@ def get_current_state() -> dict:
             "charging":    ev_plug_state == "Charging",
             "zappi_mode":  ha_state(ENTITIES["ev_zappi_mode"]) if ev_plugged else "n/a",
             "soc_pct":     _safe_int(ENTITIES["ev_soc"]) if ev_plugged else None,
+            "min_soc_pct": int(float(ha_state(ENTITIES["ev_min_soc"]) or 20)),
+            "charge_target_pct": int(float(ha_state(ENTITIES["ev_charge_target"]) or 80)),
             "schedule":    _ev_schedule(now),
         },
     }
@@ -1184,11 +1188,15 @@ You are the energy optimisation agent for a residential battery system in Glebe,
    Zappi default is Eco+ (charges only from actual solar export — battery never discharged for EV).
    Switch to Fast only when one of these cases applies — check in order, first match wins:
 
-   Case 2: price < 10¢ (ultra-cheap — charge everything)
-   Case 3: EV SoC < 30% AND price < 20¢ (EV critically low)
-   Case 4: EV SoC < 60% AND cheap window AND battery SoC ≥ (reserve_pct − 5%)
+   Read ev.min_soc_pct and ev.charge_target_pct each cycle — these are user-set sliders.
+   Use them instead of the hardcoded values below wherever you see [min] and [target].
+   Defaults if unset: min=20%, target=80%.
+
+   Case 2: price < 10¢ (ultra-cheap — charge everything up to [target])
+   Case 3: EV SoC < [min] AND price < 20¢ (EV below minimum — charge now)
+   Case 4: EV SoC < [target] AND cheap window AND battery SoC ≥ (reserve_pct − 5%)
             → battery is at/above its floor, cannot be discharged for EV, Fast is safe
-   Case 5: EV SoC < 60% AND cheap window AND battery SoC < reserve_pct
+   Case 5: EV SoC < [target] AND cheap window AND battery SoC < reserve_pct
             → battery is BELOW its reserve floor, actively charging from grid
             → battery physically cannot discharge for EV load
             → Fast is safe — both battery and EV charge from grid simultaneously
