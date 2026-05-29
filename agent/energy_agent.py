@@ -927,10 +927,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     elif in_sponge and now_h < 13 and soc < 50:
         # Rule 14 — Solar Sponge minimum floor
         rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
-    elif deferral_detected:
-        rec = verdict("charge", cost_target, "self_consumption", "deferral_limit")
     elif cost_target <= soc:
         rec = verdict("hold", None, None, "target_met")
+    elif deferral_detected:
+        rec = verdict("charge", cost_target, "self_consumption", "deferral_limit")
     elif fill_fast >= hours_to_deadline - 0.5:
         rec = verdict("charge", cost_target, "autonomous", "nonpeak_deadline_autonomous")
     elif fill_slow >= hours_to_deadline - 0.5:

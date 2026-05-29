@@ -1,5 +1,19 @@
 # Energy System Control Log
 
+## 2026-05-30 (session 3 — deferral_limit ordering bug fixed)
+
+**Shadow-layer `/morning` analysis — deterministic layer bug found and fixed:**
+
+34 shadow records accumulated (15:30 yesterday → 07:30 today). Agreement rate was 41% (14/34), but all 20 divergences were the same single bug: `deferral_limit` branch in `compute_decision_context()` was ordered **before** the `target_met` (cost_target ≤ soc) check. Result: any time 3+ consecutive holds occurred with SoC already above the cost floor (normal overnight behaviour), the deterministic layer fired `charge/deferral_limit` erroneously. The LLM correctly held all 20 times.
+
+Fix: swapped the two branches so `target_met` is checked first. 28 unit tests pass. Trivial reorder, no logic change — the deferral_limit rule is still correct; it now only fires when a genuine charge gap exists.
+
+Current state: SoC=24% at 07:30, holding for Solar Sponge (forecast: 7¢ at 09:30, 6¢ from 11:30). LLM is correct to hold.
+
+June 1 demand window activates Monday — backtest covered it, but not yet run live.
+
+---
+
 ## 2026-05-29 (session 2 — forecast fix, backtest harness, SoC-sensor bug, shadow mode, cheap-end rewrite)
 
 **`/morning` review extended — shadow-layer analysis section added (`.claude/commands/morning.md`):**
