@@ -1,6 +1,11 @@
 # Energy System Control Log
 
-## 2026-05-29 (session 2 — forecast fix, backtest harness, SoC-sensor bug)
+## 2026-05-29 (session 2 — forecast fix, backtest harness, SoC-sensor bug, shadow mode, cheap-end rewrite)
+
+**`/morning` review extended — shadow-layer analysis section added (`.claude/commands/morning.md`):**
+
+The morning summary is now 4 parts (was 3); the new part compares the LLM's actual decisions against the deterministic shadow layer from `decisions.jsonl` and reports: agreement rate (`shadow_action_match`/`shadow_mode_match`), each divergence with a right/wrong read, and a recommendation on advancing the re-architecture (Phase 4 collect → Phase 5 cutover with kill-switch → Phase 6 slim prompt). Handles the "too few records yet" case. This makes divergence review a standing daily habit through the June peak week.
+
 
 **Price forecast bug fixed — mixed interval granularity:**
 

@@ -9,6 +9,10 @@
 - [ ] **Schedule via cron** — bake API key into crontab (not env var), handle Mac sleep
 - [ ] **Verify overnight behaviour** — does agent correctly decide to pre-charge at cheap overnight prices? Check morning logs
 - [ ] **June 1 demand window** — verify agent handles peak month logic correctly (no grid import 3–9pm)
+- [ ] **Re-architecture Phase 4 — collect shadow divergence** *(through first June peak week)*: shadow mode now logs LLM vs deterministic verdict each cycle. Review via the `/morning` shadow-layer section; tag each divergence as deterministic-layer bug vs LLM over/under-cautious. Goal: enough data to trust (or fix) the deterministic layer before cutover.
+- [ ] **Re-architecture Phase 5 — cutover with kill-switch**: once divergence data supports it, let the deterministic verdict drive (LLM advisory/oversight only), behind a flag that reverts to LLM-authoritative instantly.
+- [ ] **Re-architecture Phase 6 — slim the prompt**: once deterministic layer is authoritative, remove the arithmetic the LLM no longer needs to do in its head; unify the LLM-facing `hours_to_cheap_end` prose onto the scale-free model.
+- [ ] **Tune `α` / `MIN_DAILY_SWING`** in `_hours_to_cheap_end` against June peak-month forecasts (larger swings than the flat May days the 0.30 / 5¢ first-pass was set on).
 - [ ] **Consider moving agent into HA** — run as `shell_command` triggered by HA automation, avoids Mac sleep problem
 
 - [x] **Add InfluxDB** — pipe HA sensor history into InfluxDB for long-term retention and analysis (default SQLite rolls off after 10 days)
@@ -38,6 +42,12 @@
 - [x] Autonomous mode banned — confirmed exports at 4¢ while buying at 11¢
 - [x] True SoC sensor via Tessie live_status — replaces floor-clipped gateway reading
 - [x] 30-min averaged home load — smooths stove/kettle spikes from forecast
+- [x] Peak-month backtest harness (`agent/backtest.py`) — validate demand-window logic before June 1 (2026-05-29)
+- [x] SoC-sensor trust bug fixed — agent was judging "target met" off the floor-clipped gateway; guidance added to system prompt + Rule 6 (2026-05-29)
+- [x] Deterministic decision layer (`compute_decision_context`) + 28 unit tests (`agent/test_decision.py`) (2026-05-29)
+- [x] Shadow mode wired in — logs LLM + deterministic verdict per cycle to `decisions.jsonl` (2026-05-29)
+- [x] `_hours_to_cheap_end` rewritten as scale-free daily-shape model — fixes gradual-ramp under-reporting (2026-05-29)
+- [x] `/morning` review extended with shadow-layer analysis section (2026-05-29)
 
 ## Product Design — Battery Control Service
 

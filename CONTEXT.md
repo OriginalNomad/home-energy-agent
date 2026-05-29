@@ -87,7 +87,8 @@ Key agent capabilities added 2026-05-29:
 - **Short-term memory**: last 3 decisions from `decisions.jsonl` injected into every cycle. Agent can detect stateless deferral (holding 2+ cycles for a cheap window that never arrives).
 - **Deferral limit**: if 2+ consecutive holds + price within 2¢ of prior cycles → flat-then-spike, charge now.
 - **Time-based escalation (Rule 13)**: peak month hard deadline maths every cycle from 9am; non-peak soft deadline via `hours_to_cheap_end`.
-- **`hours_to_cheap_end`**: replaces `hours_to_spike` (first price > 30¢). Scans forecast for first *sustained* +4¢ rise (two consecutive intervals). Gives accurate deadline on mild-spike days where absolute 30¢ threshold was never reached.
+- **`hours_to_cheap_end`**: replaces `hours_to_spike` (first price > 30¢). LLM-facing definition (system prompt) is the first *sustained* +4¢ rise. The deterministic shadow layer now uses an improved **scale-free daily-shape** version (bottom-30% band of the day's trough→evening-peak swing, with a 5¢ flat-day guard) — fixes under-reporting on gradual ramps (see below).
+- **Deterministic decision layer + shadow mode (added 2026-05-29, NOT in control path)**: `compute_decision_context()` is a pure function that reproduces the agent's arithmetic (deadline maths, fill times, spread, zero-solar/deferral detectors, effective cost target) and emits a recommended verdict `{action, target_pct, mode, rule_fired}` via an ordered decision tree. Each live cycle it's computed and injected into the prompt as a *reference only* block; both the LLM's actual decision and the computed verdict are logged to `decisions.jsonl` (`computed_verdict`, `shadow_action_match`, `shadow_mode_match`) for divergence measurement. Covered by `agent/test_decision.py` (28 unit tests). Plan: collect divergence through the first June peak week → cutover with kill-switch → slim the prompt.
 - **Solar zero-override**: if actual solar = 0 kW in 2+ of last 3 daylight cycles, treat as zero-solar day regardless of Solcast/Open-Meteo forecasts. Evidence beats model predictions.
 - **Solar Sponge minimum floor (Rule 14)**: 10am–1pm, SoC < 50% → always charge to 50%, spread table irrelevant.
 - **Price risk asymmetry**: evening prices have fat right tail — Solar Sponge charging is insurance, not arbitrage.
@@ -194,6 +195,7 @@ Key agent capabilities added 2026-05-29:
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before June 1 |
+| `agent/test_decision.py` | 28 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
 | `agent/.env` | API keys (gitignored — not in repo) |
 | `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
 | `agent/decisions.jsonl` | Structured JSON decision log — full context per cycle, foundation for analyst agent and accuracy tracking |
@@ -211,6 +213,7 @@ Key agent capabilities added 2026-05-29:
 - Does `battery_autonomous_export_safety_net` catch any misbehaviour within 30s?
 - Does overnight agent cycle correctly identify cheap windows and defer charging to them?
 - June 1: does the agent recognise peak month and apply 2:55pm target from day one?
+- **Shadow divergence**: each `/morning` review now reports LLM-vs-deterministic agreement rate and divergences. Collect through the first June peak week before deciding on cutover (Phase 5). Watch whether divergences are deterministic-layer bugs vs the LLM being over/under-cautious.
 
 ---
 
