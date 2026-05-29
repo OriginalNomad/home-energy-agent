@@ -718,6 +718,210 @@ def get_recent_decisions(n: int = 3) -> str:
     return "\n".join(parts)
 
 
+def get_recent_records(n: int = 3) -> list[dict]:
+    """Return the last n non-accuracy decision records as parsed dicts (chronological)."""
+    if not JSONL_FILE.exists():
+        return []
+    lines = [l for l in JSONL_FILE.read_text().splitlines() if l.strip()]
+    recent: list[dict] = []
+    for line in reversed(lines):
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get("record_type") == "daily_accuracy":
+            continue
+        recent.append(r)
+        if len(recent) >= n:
+            break
+    return list(reversed(recent))
+
+
+# ---------------------------------------------------------------------------
+# Pure decision logic — deterministic precompute (Phase 1 of re-architecture)
+#
+# compute_decision_context() takes plain data in and returns a dict out: no HTTP,
+# no clock reads (now is passed in), no globals. This makes every calculation the
+# system prompt currently asks the LLM to do in its head unit-testable in
+# isolation. It is NOT yet wired into the control path — it runs in shadow only.
+# ---------------------------------------------------------------------------
+
+USABLE_KWH       = 13.5
+SLOW_KW          = 1.7
+FAST_KW          = 5.0
+DEMAND_DEADLINE  = 14 + 55 / 60   # 2:55pm as a decimal hour
+
+
+def _accuracy_class(label: str) -> str:
+    """Collapse the verbose forecast_accuracy string into one of: good/poor/unreliable/na."""
+    s = (label or "").lower()
+    if s.startswith("good"):
+        return "good"
+    if s.startswith("poor"):
+        return "poor"
+    if s.startswith("unreliable"):
+        return "unreliable"
+    return "na"
+
+
+def _hours_to_cheap_end(price_forecast: list[dict], current_price: float) -> float:
+    """First sustained (+4¢ over two consecutive 30-min intervals) rise, in hours from now.
+
+    Assumes price_forecast is uniform 30-min spacing (get_price_forecast resamples to that).
+    Returns 6.0 if no sustained rise is found in the horizon.
+    """
+    prices = [f.get("cents_kwh", 0.0) for f in price_forecast]
+    threshold = current_price + 4.0
+    for i in range(len(prices) - 1):
+        if prices[i] >= threshold and prices[i + 1] >= threshold:
+            return i * 0.5
+    return 6.0
+
+
+def _detect_deferral(recent_records: list[dict], current_price: float) -> bool:
+    """2+ consecutive holds while price stayed within 2¢ → the awaited cheap window isn't coming."""
+    if len(recent_records) < 2:
+        return False
+    holds = 0
+    for r in reversed(recent_records):
+        actions = r.get("actions") or []
+        price   = r.get("price_c")
+        if not actions and price is not None and abs(price - current_price) <= 2.0:
+            holds += 1
+        else:
+            break
+    return holds >= 2
+
+
+def _detect_zero_solar(recent_records: list[dict], current_solar_kw: float,
+                       now_h: float) -> bool:
+    """0 kW actual in 2+ of the last 3 daylight cycles (incl. now) → zero-solar day."""
+    if now_h < 8:
+        return False
+    zeros = 1 if current_solar_kw <= 0.1 else 0
+    for r in recent_records[-3:]:
+        ts_hour = int(r.get("ts", "T00")[11:13] or 0) if r.get("ts") else 0
+        if ts_hour >= 8 and (r.get("solar_current_kw") or 0) <= 0.1:
+            zeros += 1
+    return zeros >= 2
+
+
+def compute_decision_context(state: dict, price_forecast: list[dict],
+                             recent_records: list[dict], now: datetime) -> dict:
+    """Deterministic decision context + recommended verdict. Pure function."""
+    now_h    = now.hour + now.minute / 60
+    battery  = state.get("battery", {})
+    grid     = state.get("grid", {})
+    solar    = state.get("solar", {})
+
+    # ALWAYS the Tessie reading — never the floor-clipped gateway value.
+    soc          = battery.get("soc_pct", 0) or 0
+    grid_target  = battery.get("grid_target_pct", 5) or 5
+    price        = grid.get("price_cents_kwh", 0.0) or 0.0
+    is_peak      = state.get("is_peak_month", False)
+    in_demand    = state.get("in_demand_window", False)
+    in_sponge    = state.get("in_solar_sponge", False)
+    solar_now    = solar.get("current_kw", 0.0) or 0.0
+    remaining    = solar.get("forecast_remaining_kwh", 0.0) or 0.0
+    accuracy     = _accuracy_class(solar.get("forecast_accuracy", ""))
+
+    zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h)
+    deferral_detected = _detect_deferral(recent_records, price)
+    solar_unreliable  = accuracy in ("poor", "unreliable") or zero_solar_day
+
+    # Effective cost-optimisation target: grid_target when solar trusted, else time-based substitute
+    if solar_unreliable:
+        cost_target = 85 if now_h < 12 else 70 if now_h < 14 else 50
+    else:
+        cost_target = grid_target
+
+    # Expected solar contribution to the demand deadline (0 if solar can't be trusted)
+    expected_solar = 0.0 if solar_unreliable else remaining
+
+    # Deadline maths
+    hours_to_cheap_end = _hours_to_cheap_end(price_forecast, price)
+    hours_to_2_55      = max(DEMAND_DEADLINE - now_h, 0.0)
+    hours_to_deadline  = min(hours_to_2_55, hours_to_cheap_end) if is_peak else hours_to_cheap_end
+
+    # Peak-month demand fill maths (toward 85% by 2:55pm)
+    kwh_needed_85   = max((0.85 - soc / 100) * USABLE_KWH - expected_solar, 0.0)
+    fill_slow_85    = kwh_needed_85 / SLOW_KW
+    fill_fast_85    = kwh_needed_85 / FAST_KW
+
+    # Cost-target fill maths
+    kwh_needed   = max((cost_target / 100 - soc / 100) * USABLE_KWH, 0.0)
+    fill_slow    = kwh_needed / SLOW_KW
+    fill_fast    = kwh_needed / FAST_KW
+
+    # Spread: most expensive upcoming slot (next 6h) vs current price
+    upcoming      = [f.get("cents_kwh", 0.0) for f in price_forecast[:12]]
+    next_expensive = max(upcoming) if upcoming else price
+    spread        = next_expensive - price
+
+    # ---- Recommended verdict — ordered decision tree, first match wins ----
+    def verdict(action, target, mode, rule):
+        return {"action": action, "target_pct": target, "mode": mode, "rule_fired": rule}
+
+    if in_demand:
+        rec = verdict("hold", None, None, "demand_window_active")
+    elif is_peak and now_h < DEMAND_DEADLINE and soc < 85:
+        # Peak-month hard deadline escalation (Rule 13)
+        if kwh_needed_85 <= 0:
+            rec = verdict("hold", None, None, "peak_target_met")
+        elif fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55:
+            rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
+        elif (now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70):
+            rec = verdict("charge", 100, "autonomous", "peak_deadline_quickcheck")
+        elif fill_slow_85 >= hours_to_2_55 - 1.0:
+            rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
+        elif in_sponge and now_h < 13 and soc < 50:
+            rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
+        else:
+            rec = verdict("hold", None, None, "peak_on_track")
+    elif in_sponge and now_h < 13 and soc < 50:
+        # Rule 14 — Solar Sponge minimum floor
+        rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
+    elif deferral_detected:
+        rec = verdict("charge", cost_target, "self_consumption", "deferral_limit")
+    elif cost_target <= soc:
+        rec = verdict("hold", None, None, "target_met")
+    elif fill_fast >= hours_to_deadline - 0.5:
+        rec = verdict("charge", cost_target, "autonomous", "nonpeak_deadline_autonomous")
+    elif fill_slow >= hours_to_deadline - 0.5:
+        rec = verdict("charge", cost_target, "self_consumption", "nonpeak_deadline_selfcons")
+    else:
+        # Spread table — window still viable, decide on economics
+        if spread < 5:
+            rec = verdict("hold", None, None, "spread_too_small")
+        elif spread > 15 and (cost_target - soc) > 15:
+            rec = verdict("charge", cost_target, "autonomous", "spread_arbitrage")
+        else:
+            rec = verdict("charge", cost_target, "self_consumption", "spread_selfcons")
+
+    return {
+        "now_h":               round(now_h, 2),
+        "soc":                 soc,
+        "is_peak_month":       is_peak,
+        "accuracy_class":      accuracy,
+        "zero_solar_day":      zero_solar_day,
+        "deferral_detected":   deferral_detected,
+        "solar_unreliable":    solar_unreliable,
+        "cost_target_pct":     cost_target,
+        "expected_solar_kwh":  round(expected_solar, 2),
+        "hours_to_cheap_end":  round(hours_to_cheap_end, 2),
+        "hours_to_2_55pm":     round(hours_to_2_55, 2),
+        "hours_to_deadline":   round(hours_to_deadline, 2),
+        "kwh_needed_85":       round(kwh_needed_85, 2),
+        "fill_slow_85_h":      round(fill_slow_85, 2),
+        "fill_fast_85_h":      round(fill_fast_85, 2),
+        "kwh_needed":          round(kwh_needed, 2),
+        "fill_slow_h":         round(fill_slow, 2),
+        "fill_fast_h":         round(fill_fast, 2),
+        "spread_c":            round(spread, 1),
+        "recommended":         rec,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions (schema passed to Claude)
 # ---------------------------------------------------------------------------
