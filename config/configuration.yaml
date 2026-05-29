@@ -30,6 +30,9 @@ automation: !include automations.yaml
 script: !include scripts.yaml
 scene: !include scenes.yaml
 
+shell_command:
+  run_energy_agent: "cd /Users/simonmonk/Simon\\ Projects/Home\\ Energy\\ Console/agent && python3 energy_agent.py >> /tmp/energy_agent.log 2>&1"
+
 input_boolean:
   ev_schedule_active:
     name: "EV — Schedule active"
