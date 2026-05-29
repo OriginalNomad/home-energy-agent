@@ -30,6 +30,27 @@ automation: !include automations.yaml
 script: !include scripts.yaml
 scene: !include scenes.yaml
 
+input_boolean:
+  ev_schedule_active:
+    name: "EV — Schedule active"
+    icon: mdi:car-clock
+
+input_datetime:
+  ev_departure_time:
+    name: "EV — Departure time"
+    has_date: true
+    has_time: true
+
+input_number:
+  ev_departure_target_pct:
+    name: "EV — Departure target %"
+    min: 10
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: slider
+    icon: mdi:battery-charging-80
+
 input_text:
   battery_decision_automation:
     name: "Battery Decision — Automation"
