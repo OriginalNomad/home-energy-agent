@@ -608,7 +608,10 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
     ctx = _cycle_context.get("decision_context")
     if ctx:
         rec = ctx["recommended"]
-        record["computed_verdict"]  = rec
+        rec    = ctx["recommended"]
+        ev_rec = ctx["ev_recommended"]
+        record["computed_verdict"]    = rec
+        record["computed_ev_verdict"] = ev_rec
         record["computed_context"]  = {k: ctx[k] for k in (
             "zero_solar_day", "deferral_detected", "solar_unreliable", "cost_target_pct",
             "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85", "spread_c")}
@@ -619,6 +622,9 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         record["shadow_action_match"] = (actual_charge == rec_charge)
         record["shadow_mode_match"]   = ((mode_set == rec["mode"])
                                          if (rec_charge and mode_set) else None)
+        # EV shadow match — only meaningful when EV is plugged in
+        if ev_rec.get("rule_fired") != "ev_disconnected":
+            record["shadow_ev_match"] = (zappi_set == ev_rec.get("zappi_mode"))
 
     with JSONL_FILE.open("a") as f:
         f.write(json.dumps(record) + "\n")
@@ -946,7 +952,31 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     next_expensive = max(upcoming) if upcoming else price
     spread        = next_expensive - price
 
-    # ---- Recommended verdict — ordered decision tree, first match wins ----
+    # ---- EV verdict (Cases 2–5 from system prompt) ----
+    ev           = state.get("ev", {})
+    ev_plugged   = ev.get("plugged_in", False)
+    ev_soc       = ev.get("ev_soc_pct") or 0
+    ev_min       = ev.get("min_soc_pct") or 20
+    ev_target    = ev.get("charge_target_pct") or 80
+    cheap_window = grid.get("in_cheap_window", False)
+    reserve      = battery.get("reserve_pct", 20) or 20
+
+    if not ev_plugged:
+        ev_rec = {"zappi_mode": "n/a", "rule_fired": "ev_disconnected"}
+    elif price < 10:
+        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case2_ultra_cheap"}
+    elif ev_soc < ev_min and price < 20:
+        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case3_below_minimum"}
+    elif ev_soc < ev_target and cheap_window and soc >= (reserve - 5):
+        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case4_cheap_battery_ok"}
+    elif ev_soc < ev_target and cheap_window and soc < reserve:
+        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case5_battery_charging"}
+    elif ev_soc >= ev_target:
+        ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_target_met"}
+    else:
+        ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_default"}
+
+    # ---- Battery verdict — ordered decision tree, first match wins ----
     def verdict(action, target, mode, rule):
         return {"action": action, "target_pct": target, "mode": mode, "rule_fired": rule}
 
@@ -1007,6 +1037,7 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "fill_fast_h":         round(fill_fast, 2),
         "spread_c":            round(spread, 1),
         "recommended":         rec,
+        "ev_recommended":      ev_rec,
     }
 
 
@@ -1027,7 +1058,8 @@ def _format_decision_context(ctx: dict) -> str:
         f"autonomous {ctx['fill_fast_h']}h\n"
         f"  to 85% by 2:55pm: need {ctx['kwh_needed_85']}kWh — self_consumption {ctx['fill_slow_85_h']}h / "
         f"autonomous {ctx['fill_fast_85_h']}h\n"
-        f"  >>> RECOMMENDED: {r['action']} target={r['target_pct']}% mode={r['mode']} (rule: {r['rule_fired']})"
+        f"  >>> BATTERY: {r['action']} target={r['target_pct']}% mode={r['mode']} (rule: {r['rule_fired']})\n"
+        f"  >>> EV: zappi={ctx['ev_recommended']['zappi_mode']} (rule: {ctx['ev_recommended']['rule_fired']})"
     )
 
 
