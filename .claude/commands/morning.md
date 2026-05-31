@@ -21,6 +21,12 @@ For this section, read recent records from `agent/decisions.jsonl` (skip `daily_
 rows; focus on roughly the last day or two of cycles, and any records that carry the
 `computed_verdict` field) and report:
 
+**Key JSONL field names** (use these exactly — wrong names silently return null):
+- LLM action: `actions` (list, empty = hold), `reserve_set` (int or null), `mode_set` (str or null)
+- State: `soc` (not `soc_pct`), `price_c` (not `price_now_c`), `mode_before`
+- Shadow: `shadow_action_match`, `shadow_mode_match`, `computed_verdict` (dict with `action/mode/rule_fired`), `computed_context` (dict with `spread_c`, `forward_min_c`, `hours_to_cheap_end`, `deferral_detected`)
+- LLM held = `actions == []` (no set_reserve or set_mode calls made)
+
 - **Agreement rate** — % of cycles where action matched (`shadow_action_match`) and, among
   charge cycles, where mode matched (`shadow_mode_match`).
 - **Divergences** — for each disagreement: timestamp, what the LLM did vs what the

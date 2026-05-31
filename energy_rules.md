@@ -296,6 +296,8 @@ The Powerwall cannot distinguish EV load from home appliance load on the same ci
 - `unreliable` (actual < 30% of forecast): ignore `remaining_today` entirely; treat as zero-solar day
 - `not_applicable`: night or near-zero forecast (< 0.2 kWh) — no meaningful comparison possible
 
+**Solar start hour (2026-05-31):** Zero-solar detection and accuracy-based `solar_unreliable` only activate from **9am** onwards (was 8am). Before 9am, panels on a flat roof in Sydney don't produce meaningfully regardless of cloud — zero output is expected and must not be counted as evidence of a zero-solar day. The `SOLAR_START_HOUR = 9` constant controls this.
+
 **Agent response to unreliable or poor forecast:**
 The `battery_grid_charge_target` sensor is computed from Solcast's remaining forecast. On a cloudy day it will be optimistically low (e.g. "60% is enough — solar will cover the rest") even when actual solar is delivering almost nothing. When `forecast_accuracy` is `poor` or `unreliable`, the agent ignores `grid_target_pct` entirely and substitutes a time-based charge target:
 
@@ -382,6 +384,54 @@ This is a floor, not a ceiling:
 **Mode:** self_consumption is sufficient (2–4h available, no urgency requiring autonomous).
 
 *Implementation rationale:* this rule prevents the agent from deferring indefinitely on a cheap-window forecast that may not arrive. The Solar Sponge window is the reliable cheap window — it's always there. Any other cheaper dip is a bonus, not a guarantee.
+
+### Rule 15 — Historical Price Model for Grid Charge Target (non-peak)
+
+Replaces fixed thresholds with a self-calibrating model based on rolling 7-day price history from `decisions.jsonl`.
+
+- `p25` = 25th percentile of recent prices (cheap anchor); `p75` = 75th percentile (normal/expensive anchor)
+- `price_position = (P_now − p25) / (p75 − p25)` — 0.0 = cheapest by recent standards, 1.0 = normal
+- **Solar trust**: `solar_trusted = forecast × confidence × price_position` — when prices are cheap (position→0), discount solar (cost of over-charging is low, be aggressive from grid)
+- **Insurance floor**: `floor = max_insurance_floor × (1 − price_position)` — hold a minimum SoC proportional to how cheap prices are, guarding against the cheap window closing early
+- `cost_target = max(solar_adjusted_target, insurance_floor)`
+- Falls back to legacy (time-based substitute) when: `HISTORICAL_PRICE_MODEL = False`, insufficient history (< 48 records), price history flat (swing < 2¢), or peak month
+- Rollback: set `HISTORICAL_PRICE_MODEL = False` in `energy_agent.py`
+- User-settable: `input_number.battery_max_insurance_floor_pct` (default 70%)
+
+**Why**: a cheap-window that closes 1.5h early (as observed 2026-05-31) causes under-charging when relying on solar forecast alone. The insurance floor ensures a meaningful minimum SoC is locked in while prices are cheap, independent of the solar forecast.
+
+### Rule 16 — Solar-Unreliable Autonomous Escalation (non-peak)
+
+When `solar_unreliable = True`, self_consumption at 1.7 kW cannot be supplemented by uncertain solar. Apply a tighter autonomous escalation buffer:
+
+- Normal (solar reliable): autonomous if `fill_slow ≥ hours_to_deadline − 0.5h`
+- Solar unreliable: autonomous if `fill_slow ≥ hours_to_deadline − 1.5h`
+
+The 1h extra buffer ensures the battery fills from grid before the cheap window closes, rather than relying on solar that may not arrive.
+
+### Rule 17 — Sliding Forecast Detection
+
+If the Amber cheap window has been forecast as "1–2h away" for 3+ consecutive cycles but the actual price never dropped to that level, the forecast is sliding — it's not a genuine upcoming cheap window, it's a phantom. Action: treat as `deferral_limit` and charge now at current price.
+
+Detection: `_detect_sliding_forecast()` fires when, for the last 3+ records, `forward_min < price − 2¢` in each record but the actual recorded price never reached `forward_min + 2¢`. JSONL `rule_fired = "sliding_forecast"`.
+
+### Rule 18 — EV Eco/Fast/Eco+ Progression
+
+Three-phase EV charging strategy based on price position:
+
+1. **Eco** (trickle from grid+solar): in cheap window, but a meaningfully cheaper price is still forecast (forward_min > eco_gap_c below current price) AND EV above minimum SoC → wait for the cheapest moment
+2. **Fast** (full grid rate): in cheap window and this IS the cheapest upcoming price → charge hard now
+3. **Eco+** (solar overflow only): target met → absorb any remaining solar export for free
+
+Thresholds user-settable: `input_number.ev_ultra_cheap_threshold_c` (Case 2, default 6¢) and `input_number.ev_eco_gap_c` (eco/fast gap, default 1.5¢).
+
+### Rule 19 — Negative FIT Solar Dump (EV Case 6)
+
+When FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%:
+- Switch EV to **Eco+** (not Fast) — absorbs surplus solar that would otherwise be exported at negative price
+- Eco+ draws only from actual solar export, so no grid import occurs — the goal is to avoid paying to export, not to buy grid power
+- Battery threshold 85% ensures this only activates when the battery is genuinely near full
+- Overrides the user-set EV charge target — treats 100% as the effective target while FIT is negative
 
 ### Rule 13 — Time-Based Escalation: "Enough Waiting, Go Hard"
 
