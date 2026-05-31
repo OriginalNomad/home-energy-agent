@@ -436,6 +436,43 @@ def test_sliding_forecast_drives_charge():
     check("sliding forecast rule_fired", r["rule_fired"] == "sliding_forecast", r)
 
 
+def test_overnight_hold_suppresses_charging():
+    # 10pm, price=15¢ (above 10¢ threshold), SoC=60% — should hold for Solar Sponge
+    ctx = ea.compute_decision_context(
+        mk_state(60, 22, "na", 0.0, 0.0, is_peak=False, grid_target=80, price=15),
+        flat(15), [], now_at(22))
+    r = ctx["recommended"]
+    check("overnight hold fires at 10pm at 15c", r["rule_fired"] == "overnight_hold_wait_for_sponge", r)
+    check("overnight hold action is hold", r["action"] == "hold", r)
+
+
+def test_overnight_hold_not_fired_when_cheap():
+    # 10pm but price=8¢ (below 10¢ threshold) — charging IS justified overnight
+    ctx = ea.compute_decision_context(
+        mk_state(60, 22, "na", 0.0, 0.0, is_peak=False, grid_target=80, price=8),
+        flat(8), [], now_at(22))
+    r = ctx["recommended"]
+    check("overnight hold not fired when price cheap", r["rule_fired"] != "overnight_hold_wait_for_sponge", r)
+
+
+def test_overnight_hold_not_fired_when_critically_low():
+    # 10pm, 15¢, but SoC=20% (at/below 25% threshold) — don't apply overnight hold
+    ctx = ea.compute_decision_context(
+        mk_state(20, 22, "na", 0.0, 0.0, is_peak=False, grid_target=80, price=15),
+        flat(15), [], now_at(22))
+    r = ctx["recommended"]
+    check("overnight hold not fired when SoC critically low", r["rule_fired"] != "overnight_hold_wait_for_sponge", r)
+
+
+def test_overnight_hold_not_fired_during_day():
+    # 11am, 15¢ — not nighttime, overnight hold must not fire
+    ctx = ea.compute_decision_context(
+        mk_state(60, 11, "na", 0.0, 0.0, is_peak=False, grid_target=80, price=15),
+        flat(15), [], now_at(11))
+    r = ctx["recommended"]
+    check("overnight hold not fired during day", r["rule_fired"] != "overnight_hold_wait_for_sponge", r)
+
+
 if __name__ == "__main__":
     for fn in [test_ev_case6_negative_fit_solar_dump,
                test_ev_case6_not_fired_when_battery_low,
@@ -456,7 +493,11 @@ if __name__ == "__main__":
                test_nonpeak_solar_good_stays_selfcons,
                test_sliding_forecast_fires, test_sliding_forecast_not_enough_cycles,
                test_sliding_forecast_suppressed_when_window_arrived,
-               test_sliding_forecast_drives_charge]:
+               test_sliding_forecast_drives_charge,
+               test_overnight_hold_suppresses_charging,
+               test_overnight_hold_not_fired_when_cheap,
+               test_overnight_hold_not_fired_when_critically_low,
+               test_overnight_hold_not_fired_during_day]:
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'='*50}\n{_passed} passed, {_failed} failed")

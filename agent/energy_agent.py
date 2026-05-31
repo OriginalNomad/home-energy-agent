@@ -76,6 +76,11 @@ DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
 PRICE_HISTORY_DAYS          = 7    # days of JSONL price history to use
 MIN_HISTORY_RECORDS         = 48   # minimum records before model activates (~1 day)
 
+# Overnight hold: Solar Sponge (10am-3pm) is structurally cheaper than evening/overnight
+# prices on most days. Don't charge overnight if current price exceeds this threshold —
+# wait for the morning Solar Sponge instead. Rule 13 deadline maths handles peak months.
+SOLAR_SPONGE_PRICE_THRESHOLD = 10.0   # ¢ — if overnight price > this, wait for Sponge
+
 # Populated by get_current_state() / get_price_forecast() during each cycle,
 # then read by log_decision() to write the structured JSON record.
 _cycle_context: dict = {}
@@ -1083,6 +1088,16 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
 
     zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h)
     deferral_detected = _detect_deferral(recent_records, price)
+
+    # Overnight hold: Solar Sponge (10am–3pm) is structurally cheaper than overnight
+    # prices. Don't charge overnight when Solar Sponge tomorrow will be cheaper.
+    # Fires when: nighttime (20:00–07:00) AND price > SOLAR_SPONGE_PRICE_THRESHOLD
+    # AND SoC is not critically low (> 25% — emergency automation handles the floor).
+    # Peak months: also apply — Rule 13 morning deadline maths will escalate if needed.
+    is_night = now_h >= 20 or now_h < 7
+    overnight_hold = (is_night
+                      and price > SOLAR_SPONGE_PRICE_THRESHOLD
+                      and soc > 25)
     # Accuracy-based unreliability only valid from SOLAR_START_HOUR — before then,
     # Solcast forecasts >0 but panels haven't started yet (low sun angle, flat roof).
     # zero_solar_day has its own time guard via _detect_zero_solar.
@@ -1214,6 +1229,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
     elif cost_target <= soc:
         rec = verdict("hold", None, None, "target_met")
+    elif overnight_hold:
+        # Solar Sponge tomorrow will be cheaper — don't charge overnight at high prices.
+        # Rule 13 morning deadline maths will escalate if peak month demands it.
+        rec = verdict("hold", None, None, "overnight_hold_wait_for_sponge")
     elif deferral_detected and (forward_min >= price - 2.0 or sliding_forecast):
         # Fire when: no meaningfully cheaper window is incoming (forward_min within 2¢),
         # OR the forecast has been sliding for 3+ cycles (cheap window keeps moving forward
@@ -1245,6 +1264,7 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "zero_solar_day":      zero_solar_day,
         "deferral_detected":   deferral_detected,
         "sliding_forecast":    sliding_forecast,
+        "overnight_hold":      overnight_hold,
         "solar_unreliable":    solar_unreliable,
         "cost_target_pct":     cost_target,
         "cost_target_method":  cost_target_method,
@@ -1276,7 +1296,7 @@ def _format_decision_context(ctx: dict) -> str:
         "disagree — but if you do, state why in your log_decision summary.\n"
         f"  SoC (true/Tessie): {ctx['soc']}%   peak_month: {ctx['is_peak_month']}   now: {ctx['now_h']}h\n"
         f"  zero_solar_day: {ctx['zero_solar_day']}   deferral_detected: {ctx['deferral_detected']}   "
-        f"sliding_forecast: {ctx['sliding_forecast']}   "
+        f"sliding_forecast: {ctx['sliding_forecast']}   overnight_hold: {ctx['overnight_hold']}   "
         f"solar_unreliable: {ctx['solar_unreliable']} (accuracy: {ctx['accuracy_class']})\n"
         f"  cost_target: {ctx['cost_target_pct']}% ({ctx['cost_target_method']})   hours_to_cheap_end: {ctx['hours_to_cheap_end']}h   "
         f"hours_to_deadline: {ctx['hours_to_deadline']}h   spread: {ctx['spread_c']}¢\n"
@@ -1718,14 +1738,23 @@ rainfall attenuates irradiance and the SolarEdge inverter won't start below ~50 
   "the whole day is cloudy" (radiation consistently low) from "temporary cloud passing through"
   (radiation high but actual output low right now — wait 30 min before acting).
 
-**Overnight pre-charging rule (peak months only):**
-If tomorrow is a peak month day AND `tomorrow_solar_outlook` is poor or overcast:
-- The battery must reach 85%+ SoC by 2:55pm regardless — solar won't cover it
-- Pre-charge tonight if price is reasonable (< 20¢) rather than relying on a daytime window
-  that may not materialise
-- Target: 80–90% SoC by end of overnight window, so only a small top-up is needed next morning
-- Use `self_consumption` overnight (no urgency, long window); autonomous only if falling behind
-  at 5am with battery below 60%
+**Overnight pre-charging — DO NOT pre-charge at high prices when Solar Sponge will be cheaper:**
+
+Solar Sponge (10am–3pm) is structurally cheaper than overnight prices on most days.
+The demand window is only 3–9pm — the battery just needs to reach 85% by 2:55pm, not overnight.
+Rule 13 morning deadline maths handles peak months: it will escalate to autonomous at 9am if needed.
+
+**Default overnight behaviour: hold and let the battery drain.**
+Do NOT raise reserve or charge overnight unless one of these specific exceptions applies:
+
+1. `overnight_hold = False` in the deterministic helper (price ≤ 10¢ overnight — genuinely cheap)
+2. SoC ≤ 25% AND no cheap window in the next 8h — emergency floor only
+3. Tomorrow is peak month AND tomorrow's solar outlook is `overcast` (< 150 W/m²) AND
+   overnight price < 15¢ — in this case Solar Sponge alone may not fill the battery
+
+If none of these apply: **hold, let the battery drain, charge during Solar Sponge tomorrow at 6–8¢.**
+Charging overnight at 13–17¢ when 6¢ Solar Sponge is 8–12h away wastes money unnecessarily.
+The deterministic helper will show `overnight_hold: True` when this applies — respect it.
 
 **Cross-check use (daytime):**
 If `forecast_accuracy` is unreliable but `effective_radiation_wm2` for the next 2–3 hours is > 250,
