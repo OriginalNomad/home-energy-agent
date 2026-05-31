@@ -1,5 +1,66 @@
 # Energy System Control Log
 
+## 2026-05-31 (session 4 — deferral_limit false-positive fix + morning analysis field names)
+
+**EV Eco+/Fast progression + solar zero-detection threshold fixes:**
+
+**FIT price integration + EV Case 6 (negative FIT solar dump):**
+
+Added `sensor.1a_wigram_road_glebe_feed_in_price` and `_descriptor` to state read and JSONL log (`fit_price_c`). New EV Case 6: when FIT < 0¢ AND battery SoC ≥ 85% AND EV < 100%, switch EV to **Eco+** (not Fast) — Eco+ absorbs surplus solar that would otherwise export at negative price, without pulling from grid. Fast was initially used but corrected: the goal is to avoid paying to export, not to buy grid power. Battery threshold 85% ensures this only activates when battery is genuinely near full. 55 unit tests pass.
+
+**`battery_autonomous_revert_target_reached` automation bug fixed:**
+
+Automation was reverting reserve to 5% prematurely because it used Tessie OR gateway sensor. When reserve=100%, the gateway immediately reads 100% (it floors at reserve level), matching the grid_target_pct and triggering the revert within 30s — long before the battery actually reached the target. Fixed: changed trigger to Tessie sensor only. The 2-minute Tessie poll lag is acceptable; the gateway was unusable for this check.
+
+**New HA input_number sliders added** (require HA restart to activate):
+- `input_number.ev_ultra_cheap_threshold_c` (default 6¢)
+- `input_number.ev_eco_gap_c` (default 1.5¢)
+- `input_number.battery_charge_price_threshold_c` (default 12¢)
+- `input_number.battery_max_insurance_floor_pct` (default 70%)
+
+**Live observation 2026-05-31 14:38–15:00:**
+Battery was at 73% with price at 6¢ and cheap window until 16:30. Historical model correctly targeted 95% (price at p25 floor). Agent set reserve=95% then escalated to autonomous+reserve=100% at 14:40 when automation prematurely reverted. After automation fix, battery charged cleanly to ~82% by 15:00 with agent maintaining reserve. FIT was -1¢ throughout — EV correctly held on Eco+ (already at 80% target; Case 6 didn't fire until battery ≥ 85%).
+
+**Historical price model for grid target (non-peak, `HISTORICAL_PRICE_MODEL = True`):**
+
+Replaces the static `cost_target` logic with a rolling price-percentile model that makes the grid charge target continuous and self-calibrating:
+
+- `load_price_history(7)` reads the last 7 days of `price_c` from `decisions.jsonl` each cycle
+- `_price_stats()` computes `p25` (cheap anchor) and `p75` (reference anchor) from those prices
+- `price_position = (P_now − p25) / (p75 − p25)` — where current price sits in recent history (0=cheapest, 1=normal/expensive)
+- **Solar trust**: `solar_trusted = forecast × confidence × price_position` — when prices are cheap (position→0), discount solar forecast (cost of over-charging is low, be aggressive from grid). At normal prices (position→1), full trust.
+- **Insurance floor**: `floor = max_floor × (1 − price_position)` — maintain a minimum SoC proportional to how cheap prices are, guarding against the cheap window closing early.
+- `cost_target = max(solar_adjusted_target, insurance_floor)`
+- Falls back to legacy logic when: `HISTORICAL_PRICE_MODEL = False`, insufficient history (< 48 records), price history is flat (swing < 2¢), or peak month (demand deadline overrides anyway).
+- `cost_target_method` field in JSONL (`historical` vs `legacy`) tracks which path fired.
+- Rollback: set `HISTORICAL_PRICE_MODEL = False` at top of `energy_agent.py`.
+- New HA slider: `input_number.battery_max_insurance_floor_pct` (default 70%).
+- 52 unit tests pass.
+
+**Solar-unreliable autonomous escalation (non-peak):** When `solar_unreliable=True`, self_consumption at 1.7 kW cannot be supplemented by uncertain solar, so the autonomous escalation threshold is tightened from `fill_slow >= deadline - 0.5h` to `fill_slow >= deadline - 1.5h`. If there's less than 1.5h of buffer at the slow rate and solar is unreliable, the agent escalates to autonomous (~5 kW) to fill the battery from grid while prices are still cheap rather than risking arriving at the evening spike short. New rule_fired: `nonpeak_solar_unreliable_autonomous`. System prompt updated with matching guidance. 47 unit tests pass.
+
+**EV charging refinement (Cases 4 & 5):** When in a cheap window but a genuinely cheaper price is still coming (forward_min > 1.5¢ below current) AND EV is above the minimum SoC (no urgency), use Eco+ now and save Fast for the actual cheapest moment. New rule_fired values: `ev_case4_cheaper_upcoming` / `ev_case5_cheaper_upcoming`. When forward_min ≥ current − 1.5¢ (this IS the cheapest window), use Fast as before. System prompt updated to document the Eco+/Fast progression. This covers the user's scenario: EV at 50%, 8¢ now but 6¢ in 2h → Eco+ now → Fast when 6¢ arrives.
+
+**Solar zero-detection threshold raised from 8am → 9am:** Two separate paths were firing too early on flat-roof panels in Sydney in late May/June:
+1. `_detect_zero_solar`: guard raised from `now_h < 8` to `now_h < SOLAR_START_HOUR (9)`, and the recent-records check now only counts records from ts_hour ≥ 9. Prevents 8:30am false positives when the 8:00 record shows solar=0 (expected — sun angle too low on a flat roof).
+2. `solar_unreliable` (accuracy-based): added `and now_h >= SOLAR_START_HOUR` gate. Before 9am, Solcast may forecast 1.2kWh but actual is 0 — this is expected dawn behaviour, not a forecast failure. Prevents the agent from declaring "unreliable forecast, treating as zero-solar day" all morning on sunny days. System prompt updated to say "after 9am" instead of "after 8am".
+
+39 unit tests, all pass.
+
+---
+
+**Two shadow-layer data-quality bugs fixed:**
+
+**Bug 1 — morning analysis wrong field names (cosmetic):** The `/morning` analysis script was reading `action`, `soc_pct`, `price_now_c` — fields that don't exist in the JSONL schema. Actual fields are `actions` (list), `soc`, `price_c`. This made every record look like it had null LLM decisions. The underlying data was fine; only the analysis display was wrong. Fixed: added a field-name reference table to `.claude/commands/morning.md`.
+
+**Bug 2 — deferral_limit false-positive on overnight hold (logic fix):** The deterministic layer was firing `deferral_limit/charge` at 22:30–23:30 and 07:00–07:30 when the LLM correctly held, waiting for a 6¢ Solar Sponge window 7+ hours away. Root cause: `deferral_limit` only checked `deferral_detected` (3 holds with flat price) but not whether a genuinely cheaper window was incoming. Overnight, prices are flat at 13¢ but the forecast clearly shows 6¢ from 10am — `forward_min = 6¢`, well below current 13¢.
+
+Fix: compute `forward_min = min(price_forecast)` (cheapest price in the full horizon, not just 6h), and gate `deferral_limit` on `forward_min >= price - 2.0`. If there's meaningfully cheaper power coming (>2¢ below current), holding is correct and deferral_limit is suppressed. Existing `nonpeak_deferral` test (flat 16¢ forecast, no cheaper window) still passes — deferral_limit still fires correctly when it's a genuine stuck-wait. New test `test_overnight_hold_for_cheap_window` added and passes. 30 unit tests total.
+
+**`forward_min_c` added to JSONL `computed_context`** so future `/morning` reviews can see it in divergence records.
+
+---
+
 ## 2026-05-30 (session 3 — deferral_limit ordering bug fixed)
 
 **Shadow-layer `/morning` analysis — deterministic layer bug found and fixed:**

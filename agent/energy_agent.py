@@ -63,6 +63,19 @@ COST_PER_1M_OUTPUT       = 15.00
 COST_PER_1M_CACHE_READ   = COST_PER_1M_INPUT * 0.10
 COST_PER_1M_CACHE_WRITE  = COST_PER_1M_INPUT * 1.25  # 25% premium on cache writes
 
+# ---------------------------------------------------------------------------
+# Feature flag — historical price model
+# Set True to use rolling price percentiles for grid target calculation.
+# Set False to revert to the static cost_target logic instantly.
+# ---------------------------------------------------------------------------
+HISTORICAL_PRICE_MODEL = True
+
+# Insurance floor ceiling — maximum floor percentage when price is at the
+# cheapest historical level. User can override via HA slider (below).
+DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
+PRICE_HISTORY_DAYS          = 7    # days of JSONL price history to use
+MIN_HISTORY_RECORDS         = 48   # minimum records before model activates (~1 day)
+
 # Populated by get_current_state() / get_price_forecast() during each cycle,
 # then read by log_decision() to write the structured JSON record.
 _cycle_context: dict = {}
@@ -99,6 +112,13 @@ ENTITIES = {
     "ev_departure_target":  "input_number.ev_departure_target_pct",
     "ev_min_soc":           "input_number.ev_min_soc_pct",
     "ev_charge_target":     "input_number.ev_charge_target_pct",
+    "ev_ultra_cheap_c":     "input_number.ev_ultra_cheap_threshold_c",
+    "ev_eco_gap_c":         "input_number.ev_eco_gap_c",
+    "battery_charge_threshold_c": "input_number.battery_charge_price_threshold_c",
+    "battery_max_insurance_floor": "input_number.battery_max_insurance_floor_pct",
+    "fit_price":              "sensor.1a_wigram_road_glebe_feed_in_price",
+    "fit_forecast":           "sensor.1a_wigram_road_glebe_feed_in_forecast",
+    "fit_descriptor":         "sensor.1a_wigram_road_glebe_feed_in_price_descriptor",
 }
 
 # ---------------------------------------------------------------------------
@@ -191,6 +211,8 @@ def get_current_state() -> dict:
         "grid": {
             "price_cents_kwh":  round(_float(ha_state(ENTITIES["grid_price"])) * 100, 1),
             "in_cheap_window":  ha_state(ENTITIES["cheap_window"]) == "True",
+            "fit_price_cents_kwh": round(_float(ha_state(ENTITIES["fit_price"])) * 100, 1),
+            "fit_descriptor":   ha_state(ENTITIES["fit_descriptor"]),
         },
         "solar": {
             # Unit notes: solaredge_current_power=W, solcast_power_now=W, this_hour=Wh, next_hour=Wh
@@ -216,6 +238,13 @@ def get_current_state() -> dict:
             "min_soc_pct": int(float(ha_state(ENTITIES["ev_min_soc"]) or 20)),
             "charge_target_pct": int(float(ha_state(ENTITIES["ev_charge_target"]) or 80)),
             "schedule":    _ev_schedule(now),
+        },
+        "settings": {
+            "ev_ultra_cheap_c":           _safe_float(ENTITIES["ev_ultra_cheap_c"], 6),
+            "ev_eco_gap_c":               _safe_float(ENTITIES["ev_eco_gap_c"], 1.5),
+            "battery_charge_threshold_c": _safe_float(ENTITIES["battery_charge_threshold_c"], 12),
+            "max_insurance_floor_pct":    _safe_float(ENTITIES["battery_max_insurance_floor"], DEFAULT_MAX_INSURANCE_FLOOR),
+            # price_stats injected by run_agent() after get_current_state() returns
         },
     }
     _cycle_context["state"] = state
@@ -552,6 +581,8 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
             mode_set = "self_consumption"
         if "Eco+" in a:
             zappi_set = "Eco+"
+        elif "Eco" in a:
+            zappi_set = "Eco"
         elif "Fast" in a:
             zappi_set = "Fast"
         elif "Off" in a:
@@ -577,6 +608,8 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "solar_this_hour_kwh":  solar.get("forecast_this_hour_kwh"),
         "solar_next_hour_kwh":  solar.get("forecast_next_hour_kwh"),
         "home_load_kw":         state.get("home_load_kw"),
+        "fit_price_c":          grid.get("fit_price_cents_kwh"),
+        "fit_descriptor":       grid.get("fit_descriptor"),
         "ev_plugged":           ev.get("plugged_in"),
         "ev_soc":               ev.get("ev_soc_pct"),
         "ev_zappi_mode_before": ev.get("zappi_mode"),
@@ -613,8 +646,9 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         record["computed_verdict"]    = rec
         record["computed_ev_verdict"] = ev_rec
         record["computed_context"]  = {k: ctx[k] for k in (
-            "zero_solar_day", "deferral_detected", "solar_unreliable", "cost_target_pct",
-            "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85", "spread_c")}
+            "zero_solar_day", "deferral_detected", "sliding_forecast", "solar_unreliable",
+            "cost_target_pct", "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85",
+            "spread_c", "forward_min_c")}
         soc_now      = record.get("soc")
         actual_charge = ((reserve_set is not None and soc_now is not None and reserve_set > soc_now)
                          or mode_set == "autonomous")
@@ -773,7 +807,7 @@ def get_recent_decisions(n: int = 3) -> str:
         action_str    = ", ".join(actions) if actions else "hold"
         summary       = r.get("summary", "")[:160]
         solar_kw   = r.get("solar_current_kw", "?")
-        accuracy   = r.get("forecast_accuracy", "")
+        accuracy   = r.get("forecast_accuracy") or ""
         parts.append(
             f"  [{ts}] SoC={soc}% price={price}¢ reserve={reserve_str} "
             f"solar={solar_kw}kW ({accuracy[:20]}) | {action_str}\n"
@@ -887,17 +921,143 @@ def _detect_deferral(recent_records: list[dict], current_price: float) -> bool:
     return holds >= 2
 
 
+def _detect_sliding_forecast(recent_records: list[dict], current_price: float,
+                             current_forward_min: float, gap_threshold: float = 2.0,
+                             min_cycles: int = 3) -> bool:
+    """Amber cheap window keeps being forecast as upcoming but never arrives.
+
+    Fires when ALL of the last `min_cycles` records (including now) show:
+      - a cheaper window was forecast (forward_min < price - gap_threshold), AND
+      - the cheap window hadn't actually arrived yet (actual price was still above
+        current_forward_min + gap_threshold, i.e. we never got there)
+
+    If the window were real it would have arrived by now. If it keeps being 1–2h away
+    each cycle, the forecast is sliding and the agent should stop deferring.
+    """
+    if len(recent_records) < min_cycles - 1:
+        return False
+
+    # Check current cycle first
+    if current_forward_min >= current_price - gap_threshold:
+        return False  # no meaningful cheap window forecast right now
+
+    # Check the last (min_cycles - 1) records
+    consecutive = 0
+    for r in reversed(recent_records):
+        ctx = r.get("computed_context") or {}
+        rec_price       = r.get("price_c")
+        rec_forward_min = ctx.get("forward_min_c")
+        if rec_price is None or rec_forward_min is None:
+            break
+        # Was a cheap window forecast in this record?
+        if rec_forward_min >= rec_price - gap_threshold:
+            break  # cheap window wasn't forecast that cycle — stop counting
+        # Did the cheap window actually arrive? (actual price dropped close to forward_min)
+        if rec_price <= rec_forward_min + gap_threshold:
+            break  # price reached the cheap band — window arrived, not sliding
+        consecutive += 1
+        if consecutive >= min_cycles - 1:
+            return True
+    return False
+
+
+SOLAR_START_HOUR = 9  # flat roof in Sydney: panels don't produce meaningfully before ~9am
+
 def _detect_zero_solar(recent_records: list[dict], current_solar_kw: float,
                        now_h: float) -> bool:
-    """0 kW actual in 2+ of the last 3 daylight cycles (incl. now) → zero-solar day."""
-    if now_h < 8:
+    """0 kW actual in 2+ of the last 3 daylight cycles (incl. now) → zero-solar day.
+    Only active from SOLAR_START_HOUR onward — before then, zero output is expected
+    (low sun angle) and must not be counted as evidence of a zero-solar day."""
+    if now_h < SOLAR_START_HOUR:
         return False
     zeros = 1 if current_solar_kw <= 0.1 else 0
     for r in recent_records[-3:]:
         ts_hour = int(r.get("ts", "T00")[11:13] or 0) if r.get("ts") else 0
-        if ts_hour >= 8 and (r.get("solar_current_kw") or 0) <= 0.1:
+        if ts_hour >= SOLAR_START_HOUR and (r.get("solar_current_kw") or 0) <= 0.1:
             zeros += 1
     return zeros >= 2
+
+
+def load_price_history(days: int = PRICE_HISTORY_DAYS) -> list[float]:
+    """Read price_c values from the last N days of JSONL records.
+    Returns a sorted list of floats (¢/kWh). Returns [] if file missing."""
+    if not JSONL_FILE.exists():
+        return []
+    cutoff = datetime.now(SYDNEY_TZ) - timedelta(days=days)
+    prices = []
+    try:
+        for line in JSONL_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("type") == "daily_accuracy":
+                continue
+            price = r.get("price_c")
+            ts    = r.get("ts", "")
+            if price is None or not ts:
+                continue
+            try:
+                # Parse timestamp — may have timezone offset
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = SYDNEY_TZ.localize(dt)
+                if dt >= cutoff:
+                    prices.append(float(price))
+            except (ValueError, TypeError):
+                continue
+    except Exception:
+        return []
+    return sorted(prices)
+
+
+def _price_stats(prices: list[float]):
+    """Compute p25 / p75 from a sorted price list. Returns None if too few records."""
+    if len(prices) < MIN_HISTORY_RECORDS:
+        return None
+    n    = len(prices)
+    p25  = prices[int(n * 0.25)]
+    p75  = prices[int(n * 0.75)]
+    pmin = prices[0]
+    pmax = prices[-1]
+    return {"p25": p25, "p75": p75, "pmin": pmin, "pmax": pmax, "n": n}
+
+
+def _historical_grid_target(soc: float, solar_forecast_kwh: float,
+                             confidence: float, p_now: float,
+                             stats: dict, max_floor: float = DEFAULT_MAX_INSURANCE_FLOOR) -> float:
+    """Compute grid charge target using rolling historical price percentiles.
+
+    Two components combined with max():
+
+    1. Solar-adjusted target: discount solar trust when prices are cheap
+       (low cost of over-charging → be more aggressive from grid).
+    2. Insurance floor: maintain a minimum SoC proportional to price cheapness,
+       guarding against the cheap window closing earlier than forecast.
+
+    price_position = 0.0  →  P_now at or below p25 (very cheap by recent standards)
+    price_position = 1.0  →  P_now at or above p75 (normal/expensive)
+    """
+    swing = stats["p75"] - stats["p25"]
+    if swing < 2.0:
+        # Flat price history — no meaningful percentile signal, fall back
+        return None
+    price_position = max(0.0, min(1.0, (p_now - stats["p25"]) / swing))
+
+    # 1. Solar trust: scale solar contribution by price_position.
+    #    At price_position=0 (very cheap) → trust solar 0% (fill from grid).
+    #    At price_position=1 (normal)     → trust solar fully.
+    solar_trusted_kwh = solar_forecast_kwh * confidence * price_position
+    solar_target = max(5.0, min(95.0, 95.0 - (solar_trusted_kwh / USABLE_KWH * 100)))
+
+    # 2. Insurance floor: decreases as price rises toward p75.
+    insurance_floor = max_floor * (1.0 - price_position)
+
+    target = max(solar_target, insurance_floor)
+    return round(max(soc, min(95.0, target)), 1)
 
 
 def compute_decision_context(state: dict, price_forecast: list[dict],
@@ -907,11 +1067,13 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     battery  = state.get("battery", {})
     grid     = state.get("grid", {})
     solar    = state.get("solar", {})
+    settings = state.get("settings", {})
 
     # ALWAYS the Tessie reading — never the floor-clipped gateway value.
     soc          = battery.get("soc_pct", 0) or 0
     grid_target  = battery.get("grid_target_pct", 5) or 5
     price        = grid.get("price_cents_kwh", 0.0) or 0.0
+    fit_price    = grid.get("fit_price_cents_kwh", 0.0) or 0.0
     is_peak      = state.get("is_peak_month", False)
     in_demand    = state.get("in_demand_window", False)
     in_sponge    = state.get("in_solar_sponge", False)
@@ -921,13 +1083,39 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
 
     zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h)
     deferral_detected = _detect_deferral(recent_records, price)
-    solar_unreliable  = accuracy in ("poor", "unreliable") or zero_solar_day
+    # Accuracy-based unreliability only valid from SOLAR_START_HOUR — before then,
+    # Solcast forecasts >0 but panels haven't started yet (low sun angle, flat roof).
+    # zero_solar_day has its own time guard via _detect_zero_solar.
+    solar_unreliable  = (accuracy in ("poor", "unreliable") and now_h >= SOLAR_START_HOUR) or zero_solar_day
 
-    # Effective cost-optimisation target: grid_target when solar trusted, else time-based substitute
-    if solar_unreliable:
-        cost_target = 85 if now_h < 12 else 70 if now_h < 14 else 50
+    # Confidence factor for solar forecast
+    confidence_factor = {"good": 1.0, "poor": 0.5, "unreliable": 0.0, "na": 1.0}.get(accuracy, 1.0)
+    if zero_solar_day:
+        confidence_factor = 0.0
+
+    # ---- Cost target: historical price model (if enabled + sufficient data) ----
+    price_stats_data = settings.get("price_stats")   # injected by run_agent() each cycle
+    max_floor        = settings.get("max_insurance_floor_pct", DEFAULT_MAX_INSURANCE_FLOOR)
+    cost_target_method = "legacy"
+
+    if HISTORICAL_PRICE_MODEL and price_stats_data and not is_peak:
+        hist_target = _historical_grid_target(
+            soc, remaining, confidence_factor, price, price_stats_data, max_floor)
+        if hist_target is not None:
+            cost_target = hist_target
+            cost_target_method = "historical"
+        else:
+            # Insufficient price swing in history — fall back
+            cost_target = 85 if solar_unreliable and now_h < 12 else (
+                70 if solar_unreliable and now_h < 14 else (
+                50 if solar_unreliable else grid_target))
     else:
-        cost_target = grid_target
+        # Legacy: time-based substitute when solar unreliable; grid_target otherwise
+        # (Also used for peak months — demand deadline logic overrides cost_target anyway)
+        if solar_unreliable:
+            cost_target = 85 if now_h < 12 else 70 if now_h < 14 else 50
+        else:
+            cost_target = grid_target
 
     # Expected solar contribution to the demand deadline (0 if solar can't be trusted)
     expected_solar = 0.0 if solar_unreliable else remaining
@@ -948,9 +1136,16 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     fill_fast    = kwh_needed / FAST_KW
 
     # Spread: most expensive upcoming slot (next 6h) vs current price
-    upcoming      = [f.get("cents_kwh", 0.0) for f in price_forecast[:12]]
+    upcoming       = [f.get("cents_kwh", 0.0) for f in price_forecast[:12]]
     next_expensive = max(upcoming) if upcoming else price
-    spread        = next_expensive - price
+    spread         = next_expensive - price
+    # Cheapest price in the full forecast horizon — used to suppress deferral_limit when a
+    # genuinely cheaper window is approaching (may be >6h away, e.g. overnight wait for Solar Sponge).
+    all_prices  = [f.get("cents_kwh", 0.0) for f in price_forecast]
+    forward_min = min(all_prices) if all_prices else price
+
+    # Sliding forecast: cheap window forecast for 3+ consecutive cycles but never arrives.
+    sliding_forecast = _detect_sliding_forecast(recent_records, price, forward_min)
 
     # ---- EV verdict (Cases 2–5 from system prompt) ----
     ev           = state.get("ev", {})
@@ -961,16 +1156,34 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     cheap_window = grid.get("in_cheap_window", False)
     reserve      = battery.get("reserve_pct", 20) or 20
 
+    ultra_cheap_c = settings.get("ev_ultra_cheap_c", 6)
+    eco_gap_c     = settings.get("ev_eco_gap_c", 1.5)
+
     if not ev_plugged:
         ev_rec = {"zappi_mode": "n/a", "rule_fired": "ev_disconnected"}
-    elif price < 10:
+    elif price < ultra_cheap_c:
         ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case2_ultra_cheap"}
     elif ev_soc < ev_min and price < 20:
         ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case3_below_minimum"}
+    elif fit_price < 0 and soc >= 85 and ev_soc < 100:
+        # Case 6: FIT is negative (exporting costs money) AND battery is near full.
+        # Use Eco+ — absorbs actual solar export surplus without pulling from grid.
+        # Fast is not needed here: the goal is to avoid paying to export, not to buy grid power.
+        ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_case6_negative_fit_solar_dump"}
     elif ev_soc < ev_target and cheap_window and soc >= (reserve - 5):
-        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case4_cheap_battery_ok"}
+        # Case 4: cheap window, battery OK.
+        # 3-phase strategy: Eco (trickle, grid+solar) while cheapish but cheaper is coming;
+        # Fast at the actual cheapest moment; Eco+ once target met (catches free solar).
+        if forward_min < price - eco_gap_c and ev_soc > ev_min:
+            ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_case4_cheaper_upcoming"}
+        else:
+            ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case4_cheap_battery_ok"}
     elif ev_soc < ev_target and cheap_window and soc < reserve:
-        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case5_battery_charging"}
+        # Case 5: battery charging from grid (below reserve). Same 3-phase logic.
+        if forward_min < price - eco_gap_c and ev_soc > ev_min:
+            ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_case5_cheaper_upcoming"}
+        else:
+            ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case5_battery_charging"}
     elif ev_soc >= ev_target:
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_target_met"}
     else:
@@ -1001,10 +1214,18 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
     elif cost_target <= soc:
         rec = verdict("hold", None, None, "target_met")
-    elif deferral_detected:
-        rec = verdict("charge", cost_target, "self_consumption", "deferral_limit")
+    elif deferral_detected and (forward_min >= price - 2.0 or sliding_forecast):
+        # Fire when: no meaningfully cheaper window is incoming (forward_min within 2¢),
+        # OR the forecast has been sliding for 3+ cycles (cheap window keeps moving forward
+        # but never arrives — forecast is unreliable, stop deferring and charge now).
+        rule = "sliding_forecast" if sliding_forecast else "deferral_limit"
+        rec = verdict("charge", cost_target, "self_consumption", rule)
+    # When solar is unreliable, we can't count on it supplementing self_consumption —
+    # apply a tighter buffer (1.5h instead of 0.5h) to escalate to autonomous sooner.
     elif fill_fast >= hours_to_deadline - 0.5:
         rec = verdict("charge", cost_target, "autonomous", "nonpeak_deadline_autonomous")
+    elif solar_unreliable and fill_slow >= hours_to_deadline - 1.5:
+        rec = verdict("charge", cost_target, "autonomous", "nonpeak_solar_unreliable_autonomous")
     elif fill_slow >= hours_to_deadline - 0.5:
         rec = verdict("charge", cost_target, "self_consumption", "nonpeak_deadline_selfcons")
     else:
@@ -1023,8 +1244,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "accuracy_class":      accuracy,
         "zero_solar_day":      zero_solar_day,
         "deferral_detected":   deferral_detected,
+        "sliding_forecast":    sliding_forecast,
         "solar_unreliable":    solar_unreliable,
         "cost_target_pct":     cost_target,
+        "cost_target_method":  cost_target_method,
         "expected_solar_kwh":  round(expected_solar, 2),
         "hours_to_cheap_end":  round(hours_to_cheap_end, 2),
         "hours_to_2_55pm":     round(hours_to_2_55, 2),
@@ -1036,6 +1259,8 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "fill_slow_h":         round(fill_slow, 2),
         "fill_fast_h":         round(fill_fast, 2),
         "spread_c":            round(spread, 1),
+        "forward_min_c":       round(forward_min, 1),
+        "fit_price_c":         round(fit_price, 1),
         "recommended":         rec,
         "ev_recommended":      ev_rec,
     }
@@ -1051,14 +1276,16 @@ def _format_decision_context(ctx: dict) -> str:
         "disagree — but if you do, state why in your log_decision summary.\n"
         f"  SoC (true/Tessie): {ctx['soc']}%   peak_month: {ctx['is_peak_month']}   now: {ctx['now_h']}h\n"
         f"  zero_solar_day: {ctx['zero_solar_day']}   deferral_detected: {ctx['deferral_detected']}   "
+        f"sliding_forecast: {ctx['sliding_forecast']}   "
         f"solar_unreliable: {ctx['solar_unreliable']} (accuracy: {ctx['accuracy_class']})\n"
-        f"  cost_target: {ctx['cost_target_pct']}%   hours_to_cheap_end: {ctx['hours_to_cheap_end']}h   "
+        f"  cost_target: {ctx['cost_target_pct']}% ({ctx['cost_target_method']})   hours_to_cheap_end: {ctx['hours_to_cheap_end']}h   "
         f"hours_to_deadline: {ctx['hours_to_deadline']}h   spread: {ctx['spread_c']}¢\n"
         f"  to cost_target: need {ctx['kwh_needed']}kWh — self_consumption {ctx['fill_slow_h']}h / "
         f"autonomous {ctx['fill_fast_h']}h\n"
         f"  to 85% by 2:55pm: need {ctx['kwh_needed_85']}kWh — self_consumption {ctx['fill_slow_85_h']}h / "
         f"autonomous {ctx['fill_fast_85_h']}h\n"
         f"  >>> BATTERY: {r['action']} target={r['target_pct']}% mode={r['mode']} (rule: {r['rule_fired']})\n"
+        f"  fit_price: {round(ctx.get('fit_price_c', 0) or 0, 1)}¢   "
         f"  >>> EV: zappi={ctx['ev_recommended']['zappi_mode']} (rule: {ctx['ev_recommended']['rule_fired']})"
     )
 
@@ -1153,7 +1380,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "mode": {"type": "string", "enum": ["Eco+", "Fast", "Off"]}
+                "mode": {"type": "string", "enum": ["Eco+", "Eco", "Fast", "Off"]}
             },
             "required": ["mode"],
         },
@@ -1224,14 +1451,25 @@ You are the energy optimisation agent for a residential battery system in Glebe,
    Use them instead of the hardcoded values below wherever you see [min] and [target].
    Defaults if unset: min=20%, target=80%.
 
-   Case 2: price < 10¢ (ultra-cheap — charge everything up to [target])
+   Case 2: price < 6¢ (ultra-cheap — charge everything up to [target])
    Case 3: EV SoC < [min] AND price < 20¢ (EV below minimum — charge now)
+   Case 6: FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%
+            → exporting is costing money; battery is near full; absorb surplus solar into EV
+            → use Eco+ (solar export only — no grid draw, just captures what would be exported at cost)
+            → do NOT use Fast here: the goal is to avoid paying to export, not to buy grid power
+            → checked before Cases 4/5 — takes priority when FIT is negative and battery full
    Case 4: EV SoC < [target] AND cheap window AND battery SoC ≥ (reserve_pct − 5%)
-            → battery is at/above its floor, cannot be discharged for EV, Fast is safe
+            → battery is at/above its floor, Fast is safe
+            → 3-phase strategy:
+              • cheaper still coming (forward_min_c > 1.5¢ below current) AND EV > [min]:
+                use Eco (trickle from grid+solar) now — charges slowly while waiting
+              • this IS the cheapest moment (forward_min_c within 1.5¢ of current):
+                use Fast — charge hard now
+              • EV reaches [target]: switch to Eco+ — catches free solar overflow only
    Case 5: EV SoC < [target] AND cheap window AND battery SoC < reserve_pct
             → battery is BELOW its reserve floor, actively charging from grid
             → battery physically cannot discharge for EV load
-            → Fast is safe — both battery and EV charge from grid simultaneously
+            → Same 3-phase Eco/Fast/Eco+ logic as Case 4
             → THIS IS THE COMMON CASE when battery is mid-charge and EV just plugged in
 
    If none of the above: stay on Eco+.
@@ -1403,6 +1641,14 @@ prices actually start rising today, whether that's 3pm, 4pm, or later:
   hours_to_fill_slow ≥ hours_to_cheap_end − 0.5h → start self_consumption NOW, spread irrelevant
   hours_to_fill_fast ≥ hours_to_cheap_end − 0.5h → escalate to autonomous NOW
 
+**Solar unreliable escalation (non-peak):**
+When forecast_accuracy is poor or unreliable (solar_unreliable = true), you cannot count on
+solar supplementing self_consumption to reach the target. Apply a tighter buffer:
+  hours_to_fill_slow ≥ hours_to_cheap_end − 1.5h AND solar_unreliable → autonomous NOW
+Self_consumption at 1.7 kW with no solar contribution may not fill the battery in time.
+Charging fast now while prices are still cheap is better than arriving at the evening spike
+short, having relied on solar that never materialised.
+
 Additional override after noon: if battery < 30% AND the price has been flat (within 3¢ of
 the "cheap window" you were waiting for) across 2+ recent cycles → charge at current price.
 The cheap window is not coming. Current price IS the floor.
@@ -1489,12 +1735,14 @@ genuine all-day cloudy/wet day — act accordingly, don't wait for solar.
 
 **CRITICAL — zero actual solar overrides all model forecasts:**
 Check the "Recent decisions" context. If `solar=0.0kW` appears in 2 or more of the last 3
-cycles during daylight hours (after 8am), this is a zero-solar day. Full stop.
+cycles during daylight hours (after 9am), this is a zero-solar day. Full stop.
+Do NOT count pre-9am zero readings — panels on a flat roof in Sydney don't produce
+meaningful power before ~9am regardless of cloud cover. Zero output at 8am is normal.
 Do NOT cite "solar will arrive from Xam" as a reason to defer grid charging.
 Do NOT cite weather model radiation forecasts as a reason to hold.
 The Open-Meteo model saying "radiation improves at 11am" is a prediction. Zero kW actual
-for 2+ hours IS evidence. Evidence beats predictions.
-When recent decisions show 2+ cycles of zero solar during daylight: treat as zero-solar day,
+for 2+ hours after 9am IS evidence. Evidence beats predictions.
+When recent decisions show 2+ cycles of zero solar after 9am: treat as zero-solar day,
 apply time-based substitute targets, and charge from grid immediately.
 
 ## Price risk asymmetry
@@ -1594,6 +1842,10 @@ def run_agent(dry_run: bool = False):
         _state    = get_current_state()
         _forecast = get_price_forecast()
         _records  = get_recent_records(3)
+        # Inject price stats into settings so compute_decision_context can use them
+        _prices   = load_price_history(PRICE_HISTORY_DAYS)
+        _stats    = _price_stats(_prices)
+        _state.setdefault("settings", {})["price_stats"] = _stats
         _ctx      = compute_decision_context(_state, _forecast, _records,
                                              datetime.now(SYDNEY_TZ))
         _cycle_context["decision_context"] = _ctx
@@ -1704,6 +1956,13 @@ def _safe_int(entity_id: str, default=None):
     """Read an entity state as int, returning default if entity missing or unavailable."""
     try:
         return _int(ha_state(entity_id))
+    except Exception:
+        return default
+
+def _safe_float(entity_id: str, default: float = 0.0) -> float:
+    """Read an entity state as float, returning default if entity missing or unavailable."""
+    try:
+        return float(ha_state(entity_id) or default)
     except Exception:
         return default
 

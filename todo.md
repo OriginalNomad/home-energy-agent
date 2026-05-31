@@ -6,14 +6,20 @@
 
 - [ ] **Run manually for a few days** — build confidence in agent decisions before scheduling
 - [x] **Fix price forecast** — was not empty (stale note); Amber sensor returns mixed 5-min + 30-min intervals. Now resampled to uniform 30-min buckets so deadline/spread maths is valid. Fail-loud warning on empty. (2026-05-29)
-- [ ] **Schedule via cron** — bake API key into crontab (not env var), handle Mac sleep
+- [x] **Schedule via cron** — cron job running, API key baked in, Mac Studio with sleep disabled is sufficient (2026-05-31)
 - [ ] **Verify overnight behaviour** — does agent correctly decide to pre-charge at cheap overnight prices? Check morning logs
-- [ ] **June 1 demand window** — verify agent handles peak month logic correctly (no grid import 3–9pm)
+- [ ] **June 1 demand window** — verify agent handles peak month logic correctly (no grid import 3–9pm) ← **TOMORROW, first live test**
 - [ ] **Re-architecture Phase 4 — collect shadow divergence** *(through first June peak week)*: shadow mode now logs LLM vs deterministic verdict each cycle. Review via the `/morning` shadow-layer section; tag each divergence as deterministic-layer bug vs LLM over/under-cautious. Goal: enough data to trust (or fix) the deterministic layer before cutover.
 - [ ] **Re-architecture Phase 5 — cutover with kill-switch**: once divergence data supports it, let the deterministic verdict drive (LLM advisory/oversight only), behind a flag that reverts to LLM-authoritative instantly.
 - [ ] **Re-architecture Phase 6 — slim the prompt**: once deterministic layer is authoritative, remove the arithmetic the LLM no longer needs to do in its head; unify the LLM-facing `hours_to_cheap_end` prose onto the scale-free model.
+- [ ] **Re-architecture Phase 7 — selective narrative**: once Phase 6 is done, consider dropping the LLM call on routine cycles (hold overnight, target_met) and only calling it when a high-stakes rule fires (autonomous, peak_deadline_autonomous) or the verdict changes from the previous cycle. Normal cycles log `rule_fired` + numbers to JSONL only; interesting cycles get the full narrative. Reduces cost from ~$97/month to near-zero without losing visibility on decisions that matter.
 - [ ] **Tune `α` / `MIN_DAILY_SWING`** in `_hours_to_cheap_end` against June peak-month forecasts (larger swings than the flat May days the 0.30 / 5¢ first-pass was set on).
-- [ ] **Consider moving agent into HA** — run as `shell_command` triggered by HA automation, avoids Mac sleep problem
+- [ ] **Tune historical price model** — `CHEAP_BAND_ALPHA`, `MAX_INSURANCE_FLOOR`, `PRICE_HISTORY_DAYS` after first week of June peak-month data accumulates. May need to raise insurance floor or adjust p25/p75 thresholds for larger winter price swings.
+- [ ] **Verify Zappi "Eco" mode string** — confirm myenergi integration accepts exactly `"Eco"` (verified in HA States as of 2026-05-31, but worth checking after any integration updates).
+- [ ] **Set initial values on new HA sliders** after HA restart: `ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`, `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`.
+- [x] **Sliding forecast detector** — implemented `_detect_sliding_forecast()`, fires `rule_fired: "sliding_forecast"` after 3+ cycles of phantom cheap window. (2026-05-31)
+- [ ] **Sliding forecast display** — expose forecast snapshot data from `decisions.jsonl` as HA sensor so past forecasts can be overlaid on the Amber price chart, making sliding visible.
+- [x] **Consider moving agent into HA** — Mac Studio with sleep disabled + cron job is sufficient; no need to move into HA
 
 - [x] **Add InfluxDB** — pipe HA sensor history into InfluxDB for long-term retention and analysis (default SQLite rolls off after 10 days)
 - [ ] **InfluxDB dashboards & reports** — set up Data Explorer queries and dashboards for battery SoC history, charging patterns, price vs SoC correlation, daily 3pm SoC outcomes

@@ -75,13 +75,26 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 ---
 
-## System architecture (as of 2026-05-29)
+## System architecture (as of 2026-05-31)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
 
 **Layer 1 — Intent**: encoded in the agent system prompt (`agent/energy_agent.py`). Goals in priority order: no demand charges, EV never from battery, minimise cost, use solar. Changes rarely.
 
 **Layer 2 — Agent** (`agent/energy_agent.py`): Claude-powered Python script. Runs every 30 min via cron. Reads HA sensor state + Amber price forecast + Solcast solar forecast, reasons about trade-offs, sets `backup_reserve_percent`, Powerwall mode, and Zappi mode. Logs decisions to `agent/agent_decisions.log` (plain text) and `agent/decisions.jsonl` (structured JSON per cycle). The agent handles all *strategic* decisions.
+
+Key agent capabilities added 2026-05-31:
+- **Historical price model (Rule 15)**: `HISTORICAL_PRICE_MODEL = True`. Grid charge target now computed from rolling 7-day price percentiles (p25/p75) — at cheap prices, discounts solar forecast and adds insurance floor. Self-calibrating. Rollback: set flag to False.
+- **Insurance floor**: `input_number.battery_max_insurance_floor_pct` (default 70%) — minimum SoC to lock in while prices are cheap, guards against cheap window closing early.
+- **Sliding forecast detector (Rule 17)**: `_detect_sliding_forecast()` — if cheap window has been "1–2h away" for 3+ cycles but never arrived, treats forecast as unreliable and charges now.
+- **Solar-unreliable autonomous escalation (Rule 16)**: when solar unreliable, uses 1.5h buffer instead of 0.5h for autonomous escalation — fills from grid before cheap window closes.
+- **EV 3-phase progression (Rule 18)**: Eco (trickle while cheaper upcoming) → Fast (at cheapest moment) → Eco+ (target met). Thresholds user-settable via HA sliders.
+- **EV Case 6 — negative FIT solar dump (Rule 19)**: FIT < 0¢ + battery ≥ 85% + EV < 100% → Eco+ to absorb surplus solar rather than paying to export.
+- **FIT price read**: `sensor.1a_wigram_road_glebe_feed_in_price` now in state + JSONL.
+- **Solar zero threshold raised 8am → 9am**: flat-roof panels don't produce before ~9am; zero output at 8am is expected, not a forecast failure.
+- **`battery_autonomous_revert_target_reached` automation fixed**: changed from Tessie OR gateway to Tessie only — gateway floors at reserve level, causing premature revert when reserve=100%.
+- **New HA sliders**: `ev_ultra_cheap_threshold_c`, `ev_eco_gap_c`, `battery_charge_price_threshold_c`, `battery_max_insurance_floor_pct`.
+- **55 unit tests** in `agent/test_decision.py`.
 
 Key agent capabilities added 2026-05-29:
 - **Short-term memory**: last 3 decisions from `decisions.jsonl` injected into every cycle. Agent can detect stateless deferral (holding 2+ cycles for a cheap window that never arrives).
@@ -97,7 +110,7 @@ Key agent capabilities added 2026-05-29:
 
 ---
 
-## Current automation status (as of 2026-05-29)
+## Current automation status (as of 2026-05-31)
 
 **24 automations** in `config/automations.yaml` — **12 active (safety/monitoring), 12 disabled (agent handles)**
 
@@ -203,6 +216,14 @@ Key agent capabilities added 2026-05-29:
 ---
 
 ## What to watch for
+
+**June 1 is tomorrow** — demand window logic activates for the first time live. Watch:
+- Does agent read `is_peak_month = True` from the first cycle?
+- Does it apply 85% SoC target by 2:55pm deadline maths?
+- Does `battery_pre_demand_window_reset` fire at 2:55pm as backstop?
+- Does `battery_autonomous_revert_target_reached` (now Tessie-only) hold correctly until target is genuinely reached?
+
+**Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate (larger swings expected). May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
 
 **June 1 is critical** — demand window logic activates. Any grid import 3–9pm sets the monthly demand charge. The agent must ensure battery ≥85% SoC by 2:55pm on peak month days. The `battery_pre_demand_window_reset` automation is the last-resort backstop at 2:55pm.
 

@@ -293,15 +293,11 @@
   alias: "Battery: Revert to self_consumption when grid charge target reached"
   description: "Rule 1 — shortfall is zero, no more grid charging needed, solar covers the rest"
   triggers:
-    # Use both Tessie (accurate) and local gateway (fast) as OR — whichever responds first.
-    # Tessie has ~2 min poll lag; local gateway is near-instant but floors at reserve level.
-    # for: 30s catches the condition persisting rather than a transient spike.
+    # Tessie only — the gateway sensor floors at reserve level, so using it with OR
+    # causes premature revert when reserve=100% (gateway immediately reads 100%).
     - trigger: template
       value_template: >
         {{ states('sensor.tessie_powerwall_charge') | int >=
-           states('sensor.battery_grid_charge_target') | int
-           or
-           states('sensor.tesla_powerwall_2_charge') | int >=
            states('sensor.battery_grid_charge_target') | int }}
       for: "00:00:30"
   conditions:

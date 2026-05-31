@@ -99,7 +99,11 @@ def test_detectors():
     zeros = [{"ts": "2026-06-15T10:00", "solar_current_kw": 0.0},
              {"ts": "2026-06-15T10:30", "solar_current_kw": 0.0}]
     check("zero-solar day detected", ea._detect_zero_solar(zeros, 0.0, 11.0) is True)
-    check("zero-solar off before 8am", ea._detect_zero_solar(zeros, 0.0, 6.0) is False)
+    check("zero-solar off before 9am", ea._detect_zero_solar(zeros, 0.0, 8.5) is False)
+    # At 8:30am with a zero solar record at 8:00 — must not fire (pre-9am guard)
+    early_zeros = [{"ts": "2026-06-15T08:00", "solar_current_kw": 0.0},
+                   {"ts": "2026-06-15T08:30", "solar_current_kw": 0.0}]
+    check("zero-solar ignores pre-9am records", ea._detect_zero_solar(early_zeros, 0.0, 8.5) is False)
     sunny = [{"ts": "2026-06-15T10:00", "solar_current_kw": 3.0}]
     check("zero-solar false when sunny", ea._detect_zero_solar(sunny, 3.0, 11.0) is False)
 
@@ -166,6 +170,23 @@ def test_nonpeak_deferral():
           ctx["recommended"])
 
 
+def test_overnight_hold_for_cheap_window():
+    # Overnight at 3am: price 13c, cheap window (6c) arrives at 10am — 7h away.
+    # Deferral detected (3 holds at flat overnight price), but holding is correct
+    # because forward_min=6c is well below current 13c. deferral_limit must NOT fire.
+    holds = [{"actions": [], "price_c": 13, "ts": "2026-05-31T02:00", "solar_current_kw": 0.0},
+             {"actions": [], "price_c": 13, "ts": "2026-05-31T02:30", "solar_current_kw": 0.0}]
+    # Forecast: 13c flat overnight, drops to 6c from 10am (index 14 = 7h from 3am)
+    forecast_prices = [13] * 14 + [6] * 10
+    ctx = ea.compute_decision_context(
+        mk_state(20, 3, "na", 0.0, 0.0, is_peak=False, grid_target=30, price=13),
+        fc(forecast_prices), holds, now_at(3, 0))
+    r = ctx["recommended"]
+    check("overnight hold: deferral_limit suppressed when cheap window incoming",
+          r["rule_fired"] != "deferral_limit", r)
+    check("overnight hold: forward_min captured", ctx["forward_min_c"] == 6.0, ctx["forward_min_c"])
+
+
 def test_nonpeak_spread_arbitrage():
     prices = [10] * 10 + [30] * 14            # cheap 5h then spike
     ctx = ea.compute_decision_context(
@@ -191,12 +212,251 @@ def test_demand_window_no_import():
           ctx["recommended"])
 
 
+def mk_state_with_stats(soc, hour, accuracy, solar_kw, remaining, price,
+                        p25, p75, is_peak=False, grid_target=30):
+    """mk_state + price_stats injected into settings."""
+    state = mk_state(soc, hour, accuracy=accuracy, solar_kw=solar_kw,
+                     remaining=remaining, is_peak=is_peak,
+                     grid_target=grid_target, price=price)
+    state["settings"] = {"price_stats": {"p25": p25, "p75": p75,
+                                          "pmin": p25 - 2, "pmax": p75 + 5, "n": 100},
+                         "max_insurance_floor_pct": 70}
+    return state
+
+
+def test_historical_model_cheap_price_raises_target():
+    # p25=6, p75=18. P_now=6 (at p25) → price_position=0 → solar_trusted=0 → target=95
+    # insurance_floor = 70 × 1.0 = 70. max(95, 70) = 95
+    state = mk_state_with_stats(30, 11, "good", 3.0, 8.0, price=6,
+                                p25=6, p75=18)
+    ctx = ea.compute_decision_context(state, flat(6), [], now_at(11))
+    check("cheap price target near 95%", ctx["cost_target_pct"] >= 90, ctx["cost_target_pct"])
+    check("cost_target_method is historical", ctx["cost_target_method"] == "historical",
+          ctx["cost_target_method"])
+
+
+def test_historical_model_expensive_price_lowers_target():
+    # p25=6, p75=18. P_now=18 (at p75) → price_position=1 → full solar trust
+    # solar_trusted = 8 kWh × 1.0 × 1.0 = 8 kWh → target = 95 - (8/13.5*100) ≈ 36%
+    # insurance_floor = 70 × 0 = 0. target ≈ 36
+    state = mk_state_with_stats(30, 11, "good", 3.0, 8.0, price=18,
+                                p25=6, p75=18)
+    ctx = ea.compute_decision_context(state, flat(18), [], now_at(11))
+    check("expensive price target is low (trusts solar)", ctx["cost_target_pct"] < 50,
+          ctx["cost_target_pct"])
+
+
+def test_historical_model_falls_back_without_stats():
+    # No price_stats in settings → falls back to legacy
+    state = mk_state(30, 11, "unreliable", 0.0, 0.0, is_peak=False,
+                     grid_target=30, price=13)
+    ctx = ea.compute_decision_context(state, flat(13), [], now_at(11))
+    check("fallback to legacy when no stats", ctx["cost_target_method"] == "legacy",
+          ctx["cost_target_method"])
+
+
+def test_historical_model_flat_history_falls_back():
+    # p25=13, p75=14 → swing=1 < 2 → fall back to legacy
+    state = mk_state_with_stats(30, 11, "good", 3.0, 8.0, price=13,
+                                p25=13, p75=14)
+    ctx = ea.compute_decision_context(state, flat(13), [], now_at(11))
+    check("flat history falls back to legacy", ctx["cost_target_method"] == "legacy",
+          ctx["cost_target_method"])
+
+
+def test_ev_case6_negative_fit_solar_dump():
+    # FIT negative, battery 90%+, EV below 100% → Fast regardless of EV target
+    state = mk_state(90, 12, "good", 3.0, 2.0, is_peak=False, grid_target=30, price=6)
+    state["grid"]["fit_price_cents_kwh"] = -1.0
+    state["ev"] = {"plugged_in": True, "plug_status": "EV Connected", "charging": False,
+                   "zappi_mode": "Eco+", "ev_soc_pct": 80,
+                   "min_soc_pct": 20, "charge_target_pct": 80, "schedule": None}
+    ctx = ea.compute_decision_context(state, flat(6), [], now_at(12))
+    ev = ctx["ev_recommended"]
+    check("case6: Eco+ when FIT negative and battery full", ev["zappi_mode"] == "Eco+", ev)
+    check("case6: rule fired", ev["rule_fired"] == "ev_case6_negative_fit_solar_dump", ev)
+
+
+def test_ev_case6_not_fired_when_battery_low():
+    # FIT negative but battery only 60% — don't dump into EV yet
+    state = mk_state(60, 12, "good", 3.0, 2.0, is_peak=False, grid_target=30, price=6)
+    state["grid"]["fit_price_cents_kwh"] = -1.0
+    state["ev"] = {"plugged_in": True, "plug_status": "EV Connected", "charging": False,
+                   "zappi_mode": "Eco+", "ev_soc_pct": 70,
+                   "min_soc_pct": 20, "charge_target_pct": 80, "schedule": None}
+    ctx = ea.compute_decision_context(state, flat(6), [], now_at(12))
+    ev = ctx["ev_recommended"]
+    check("case6: not fired when battery below 85%",
+          ev["rule_fired"] != "ev_case6_negative_fit_solar_dump", ev)
+
+
+def mk_ev_state(ev_soc, ev_min, ev_target, batt_soc, reserve, price, forward_prices=None,
+                cheap_window=True):
+    """Helper: build minimal state dict for EV verdict tests."""
+    forecast = fc(forward_prices) if forward_prices else flat(price)
+    state = {
+        "is_peak_month": False, "in_demand_window": False, "in_solar_sponge": False,
+        "battery": {"soc_pct": batt_soc, "soc_gateway_pct": batt_soc,
+                    "grid_target_pct": 30, "reserve_pct": reserve, "mode": "self_consumption"},
+        "grid": {"price_cents_kwh": price, "in_cheap_window": cheap_window},
+        "solar": {"current_kw": 0.0, "forecast_remaining_kwh": 0.0,
+                  "forecast_accuracy": "not_applicable (night or near-zero forecast)"},
+        "home_load_kw": 0.5,
+        "ev": {"plugged_in": True, "plug_status": "EV Connected", "charging": False,
+               "zappi_mode": "Eco+", "ev_soc_pct": ev_soc,
+               "min_soc_pct": ev_min, "charge_target_pct": ev_target, "schedule": None},
+    }
+    return state, forecast
+
+
+def test_ev_eco_plus_when_cheaper_incoming():
+    # EV at 50%, min=20%, target=70%, price=13c (cheap window), but 11c coming → Eco+ first
+    # Prices must be above 10c to avoid Case 2 ("ultra-cheap") firing first.
+    forward = [13] * 4 + [11] * 10 + [28] * 10  # 13c now, 11c in 2h (>1.5c cheaper), spike later
+    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=13,
+                               forward_prices=forward)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Eco when cheaper price upcoming", ev["zappi_mode"] == "Eco", ev)
+    check("ev: rule is ev_case4_cheaper_upcoming", ev["rule_fired"] == "ev_case4_cheaper_upcoming", ev)
+
+
+def test_ev_fast_at_cheapest_price():
+    # EV at 50%, min=20%, target=70%, price=11c, this IS the cheapest (flat) → Fast
+    forward = [11] * 8 + [28] * 10  # 11c now and for 4h, then spike
+    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=11,
+                               forward_prices=forward)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Fast at cheapest price (no cheaper incoming)", ev["zappi_mode"] == "Fast", ev)
+    check("ev: rule is ev_case4_cheap_battery_ok", ev["rule_fired"] == "ev_case4_cheap_battery_ok", ev)
+
+
+def test_ev_fast_when_below_min_despite_cheaper_incoming():
+    # EV at 15% (below min=20%) → Fast regardless of forward_min, Case 3 fires first
+    state, fcast = mk_ev_state(15, 20, 70, batt_soc=80, reserve=20, price=14)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Fast when below min SoC", ev["zappi_mode"] == "Fast", ev)
+    check("ev: Case 3 rule", ev["rule_fired"] == "ev_case3_below_minimum", ev)
+
+
+def test_solar_unreliable_not_before_9am():
+    # At 8:30am, actual solar=0 but Solcast forecasts 1.2kWh — should NOT be solar_unreliable
+    state = mk_state(30, 8, accuracy="unreliable", solar_kw=0.0, remaining=6.0,
+                     is_peak=False, grid_target=30, price=13)
+    ctx = ea.compute_decision_context(state, flat(13), [], now_at(8, 30))
+    check("solar_unreliable False before 9am", ctx["solar_unreliable"] is False, ctx["solar_unreliable"])
+
+
+def test_solar_unreliable_after_9am():
+    # At 10am, actual solar=0 vs significant forecast → IS solar_unreliable
+    state = mk_state(30, 10, accuracy="unreliable", solar_kw=0.0, remaining=6.0,
+                     is_peak=False, grid_target=30, price=13)
+    ctx = ea.compute_decision_context(state, flat(13), [], now_at(10))
+    check("solar_unreliable True after 9am with poor accuracy", ctx["solar_unreliable"] is True,
+          ctx["solar_unreliable"])
+
+
+def make_sliding_records(n, price, forward_min):
+    """Build n recent records where cheap window was forecast but never arrived."""
+    return [{"actions": [], "price_c": price,
+             "ts": f"2026-05-31T10:{i*30:02d}:00+10:00",
+             "solar_current_kw": 0.5,
+             "computed_context": {"forward_min_c": forward_min}} for i in range(n)]
+
+
+def test_nonpeak_solar_unreliable_escalates_autonomous():
+    # Solar unreliable, fill_slow=4.5h, hours_to_deadline=5.5h
+    # Normal threshold: 5.5 - 0.5 = 5.0h → self_consumption (4.5 < 5.0, no fire)
+    # Unreliable threshold: 5.5 - 1.5 = 4.0h → autonomous (4.5 >= 4.0, fires)
+    # SoC=55 (above sponge floor), 9am (before sponge), target=80
+    # need 25%=3.375kWh, fill_slow=3.375/1.7=1.99h
+    # forecast: cheap 5.5h then spike → deadline=5.5h
+    # normal threshold: 5.5-0.5=5.0 → 1.99 < 5.0, no fire
+    # unreliable threshold: 5.5-1.5=4.0 → 1.99 < 4.0, no fire either
+    # Need bigger gap: SoC=30 but use time=9am (before sponge window which starts at 10)
+    # need 50%=6.75kWh, fill_slow=3.97h; deadline=5.5h
+    # normal: 3.97 < 5.0 → no fire; unreliable: 3.97 >= 4.0 → fires ✓
+    forecast_prices = [13] * 11 + [25] * 13  # cheap for 5.5h then spike
+    ctx = ea.compute_decision_context(
+        mk_state(30, 9, accuracy="unreliable", solar_kw=0.0, remaining=0.0,
+                 is_peak=False, grid_target=80, price=13),
+        fc(forecast_prices), [], now_at(9))
+    r = ctx["recommended"]
+    check("solar unreliable escalates to autonomous", r["mode"] == "autonomous", r)
+    check("solar unreliable rule fired", r["rule_fired"] == "nonpeak_solar_unreliable_autonomous", r)
+
+
+def test_nonpeak_solar_good_stays_selfcons():
+    # Same scenario but solar is good — should NOT fire nonpeak_solar_unreliable_autonomous
+    forecast_prices = [13] * 11 + [25] * 13
+    ctx = ea.compute_decision_context(
+        mk_state(30, 9, accuracy="good", solar_kw=2.0, remaining=4.0,
+                 is_peak=False, grid_target=80, price=13),
+        fc(forecast_prices), [], now_at(9))
+    r = ctx["recommended"]
+    check("solar good stays self_consumption", r["mode"] != "autonomous" or r["rule_fired"] != "nonpeak_solar_unreliable_autonomous", r)
+
+
+def test_sliding_forecast_fires():
+    # 3 consecutive records: price=9c, forward_min=6c (3c gap > 2c threshold), price never dropped
+    records = make_sliding_records(3, price=9, forward_min=6)
+    result = ea._detect_sliding_forecast(records, current_price=9, current_forward_min=6)
+    check("sliding forecast detected after 3 cycles", result is True, result)
+
+
+def test_sliding_forecast_not_enough_cycles():
+    # Only 1 prior record + current = 2 total observations, need 3
+    records = make_sliding_records(1, price=9, forward_min=6)
+    result = ea._detect_sliding_forecast(records, current_price=9, current_forward_min=6)
+    check("sliding forecast needs 3 cycles minimum", result is False, result)
+
+
+def test_sliding_forecast_suppressed_when_window_arrived():
+    # Price dropped to 6c in most recent record — window arrived, not sliding
+    records = make_sliding_records(2, price=9, forward_min=6)
+    records.append({"actions": [], "price_c": 6.5,  # price reached the cheap band
+                    "ts": "2026-05-31T11:00:00+10:00",
+                    "solar_current_kw": 0.5,
+                    "computed_context": {"forward_min_c": 6}})
+    result = ea._detect_sliding_forecast(records, current_price=9, current_forward_min=6)
+    check("sliding forecast clears when window arrived", result is False, result)
+
+
+def test_sliding_forecast_drives_charge():
+    # Sliding forecast should fire charge even though forward_min < price - 2c.
+    # Use SoC=60 (above 50% solar sponge floor) and time outside sponge (9am, before 10am).
+    records = make_sliding_records(3, price=9, forward_min=6)
+    ctx = ea.compute_decision_context(
+        mk_state(60, 9, "na", 0.0, 0.0, is_peak=False, grid_target=80, price=9),
+        fc([9] * 4 + [6] * 10 + [18] * 10), records, now_at(9))
+    r = ctx["recommended"]
+    check("sliding forecast fires charge", r["action"] == "charge", r)
+    check("sliding forecast rule_fired", r["rule_fired"] == "sliding_forecast", r)
+
+
 if __name__ == "__main__":
-    for fn in [test_hours_to_cheap_end, test_detectors, test_peak_sunny_holds,
+    for fn in [test_ev_case6_negative_fit_solar_dump,
+               test_ev_case6_not_fired_when_battery_low,
+               test_historical_model_cheap_price_raises_target,
+               test_historical_model_expensive_price_lowers_target,
+               test_historical_model_falls_back_without_stats,
+               test_historical_model_flat_history_falls_back,
+               test_hours_to_cheap_end, test_detectors, test_peak_sunny_holds,
                test_peak_cloudy_10am_sponge_floor, test_peak_cloudy_1330_autonomous,
                test_peak_deferral_trap_selfcons, test_soc_gateway_divergence,
-               test_nonpeak_deferral, test_nonpeak_spread_arbitrage,
-               test_nonpeak_spread_too_small, test_demand_window_no_import]:
+               test_nonpeak_deferral, test_overnight_hold_for_cheap_window,
+               test_nonpeak_spread_arbitrage, test_nonpeak_spread_too_small,
+               test_demand_window_no_import,
+               test_ev_eco_plus_when_cheaper_incoming, test_ev_fast_at_cheapest_price,
+               test_ev_fast_when_below_min_despite_cheaper_incoming,
+               test_solar_unreliable_not_before_9am, test_solar_unreliable_after_9am,
+               test_nonpeak_solar_unreliable_escalates_autonomous,
+               test_nonpeak_solar_good_stays_selfcons,
+               test_sliding_forecast_fires, test_sliding_forecast_not_enough_cycles,
+               test_sliding_forecast_suppressed_when_window_arrived,
+               test_sliding_forecast_drives_charge]:
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'='*50}\n{_passed} passed, {_failed} failed")
