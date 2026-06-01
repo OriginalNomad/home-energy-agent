@@ -28,6 +28,32 @@ System enters first peak month. Agent must now:
 - Run 85% SoC by 2:55pm deadline maths every cycle from 9am
 - `battery_pre_demand_window_reset` fires at 2:55pm as backstop
 
+**HA configuration.yaml — two bugs fixed (session 5 continuation):**
+
+1. **`Content-Type` key was crashing HA's annotated YAML loader** — HA's custom `annotatedyaml` parser was failing to parse `Content-Type: "application/json"` as a YAML key (error: "while scanning a simple key… could not find expected ':'"). Fix: quote the key as `"Content-Type": "application/json"`. Applied to both `rest_command` blocks. The error had been silently present since at least 06:15 on June 1 (pre-dating this session); HA was loading but warning.
+
+2. **`rest_command` payload truncated** — the `configuration.yaml` payload line `{"default_real_mode": "{{ mode }}"}` was truncated in the file, ending at `{{ mode }` (missing `}}"`). Cause unclear (likely a previous partial save). Fixed by rewriting the `rest_command` section and switching both payloads from `>-` block scalar to single-quoted strings (`'{"default_real_mode": "{{ mode }}"}'`), which is the recommended format for Jinja2 templates in rest_command payloads.
+
+3. **`card-mod` installed as a frontend module** — added `extra_module_url: /hacsfiles/lovelace-card-mod/card-mod.js?hacstag=190927524421` to `frontend:` in `configuration.yaml`. card-mod confirmed loading (card background colour test passed). Attempted to use it for icon colour customisation on binary sensor entity rows; abandoned as low-priority (shadow DOM piercing complexity not worth it for cosmetic change).
+
+**Note on HA config sync:** The Docker container at `/config/` diverges from the repo copy at `config/`. The container runs HA's actual config; the repo is a separate copy maintained manually. Changes made to the container via `docker exec` (not via editing the repo file) include the `Content-Type` fix and payload rewrite.
+
+**June 1 demand window — PASSED. First live peak-month test successful.** ✅
+
+Complete cycle trace:
+- 00:00–07:30: agent held overnight (overnight_hold Rule 20 working), SoC drained 72%→50% through home load. No overnight charging at 11–16¢. Rule 20 validation: ✅
+- 09:30: Solar Sponge begins, agent raised reserve to 85%, charging started at 11¢
+- 09:30–14:30: Solar + grid charged 39%→96% at 7–11¢ (Solar Sponge window). Agent correctly used `set_reserve(85%)` and held mode at `self_consumption`.
+- 13:30: demand target (85%) reached. Agent held from 14:30 onwards.
+- 15:00: SoC = **99%** entering the demand window. No grid import needed.
+- 15:30: SoC = **100%**. Battery fully charged.
+- 15:00–17:30: agent held throughout the demand window, battery discharging naturally (100%→91%) to power home load. Zero grid imports. Rule 2 (no demand window import) maintained. ✅
+- `battery_pre_demand_window_reset` automation (2:55pm backstop): did not need to fire — agent covered it.
+
+This is the first confirmation that the full system (overnight_hold + Solar Sponge + peak-month deadline maths + demand window hold) works end-to-end on a live peak day.
+
+**LP optimiser during demand window:** correctly said `hold/mpc_solar_only` through the charging phase (solar filling battery) and `hold/mpc_hold` during the demand window (no charging needed). Agrees with LLM+rules on this well-defined scenario — promising signal for the live three-way review.
+
 **Architecture assessment → PRODUCT.md "Optimisation Engine — Depth".** Core finding: the system approximates, with an ever-growing hand-tuned rule stack, the solution to a finite-horizon optimal control problem. The deterministic shadow layer is a good *bridge* (testable) but still a rule tree needing endless edge-case patches; the right endpoint is to **compute** the optimum (LP/MPC), which is also the Sol direction. Wrote up the full target architecture: what MPC is + why receding-horizon re-planning is robust to forecast error; the forecast-uncertainty toolkit (per-site calibration → ensemble → nowcasting → distributions/robust MPC against a risk-tuned quantile → two-tier safety/opportunity); the "separate what varies from what's universal" principle (three per-user models: intent→objective, devices→dynamics, tariff→prices into one universal core); the three self-learning loops (per-site calibration / fleet-cohort priors / human-gated meta-analyst); two non-negotiables (learning never touches safety; validate fleet-wide via shadow mode); LLM repositioned to elicitation/explanation/degradation/analyst; synthesis + 5-step migration path. Roadmap gained **Phase 5 — Self-learning**. Two deterministic-layer weaknesses noted for later: `spread_too_small` ignores absolute cheapness at low SoC; no next-day peak-demand lookahead (overnight_hold/Rule 20 is the rule-side answer to the same scenario).
 
 **LP optimiser shadow prototype (`agent/optimizer.py`) — migration-path step 2.** Pure receding-horizon LP (scipy HiGHS; scipy present on the agent's `/usr/bin/python3`). Reads the *same* state + price + solar forecasts as the LLM and `compute_decision_context()` and returns a verdict in the *same* `{action, target_pct, mode, rule_fired}` shape for direct A/B.
