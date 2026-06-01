@@ -75,13 +75,18 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 ---
 
-## System architecture (as of 2026-05-31)
+## System architecture (as of 2026-06-01)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
 
 **Layer 1 — Intent**: encoded in the agent system prompt (`agent/energy_agent.py`). Goals in priority order: no demand charges, EV never from battery, minimise cost, use solar. Changes rarely.
 
 **Layer 2 — Agent** (`agent/energy_agent.py`): Claude-powered Python script. Runs every 30 min via cron. Reads HA sensor state + Amber price forecast + Solcast solar forecast, reasons about trade-offs, sets `backup_reserve_percent`, Powerwall mode, and Zappi mode. Logs decisions to `agent/agent_decisions.log` (plain text) and `agent/decisions.jsonl` (structured JSON per cycle). The agent handles all *strategic* decisions.
+
+Key agent capabilities added 2026-06-01:
+- **Overnight hold (Rule 20)**: `overnight_hold` flag — when nighttime (20:00–07:00) AND price > 10¢ AND SoC > 25%, hold and wait for Solar Sponge rather than charging at overnight rates. `SOLAR_SPONGE_PRICE_THRESHOLD = 10¢` constant controls the threshold. Fires before deferral_limit so it can't be overridden by repeated holds. 60 unit tests.
+- **Battery Forecast card fixes**: evening mode now shows charging status when active (was always showing "solar done · discharging"); goal/projected section hidden after 3pm; reserve now reads Tessie only (was showing stale agent helper value).
+- **LP optimiser shadow layer (`agent/optimizer.py`, NOT in control path)**: a third decision layer. A pure receding-horizon LP (scipy HiGHS) reads the same state + price + solar forecasts and emits a verdict in the same `{action, target_pct, mode, rule_fired}` shape as `compute_decision_context()`. Demand-window protection is a heavy import penalty 3–9 pm (peak months), not a fixed 85%/2:55pm rule, so it pre-charges exactly enough to cover the evening load. `run_agent()` computes it in a separate try/except (cannot affect control); `log_decision()` writes `optimizer_verdict`, `optimizer_context`, `optimizer_action_match` (vs LLM), `optimizer_vs_deterministic` to `decisions.jsonl` — a three-way A/B (LLM vs deterministic vs LP) per cycle. Guarded by `_HAVE_OPTIMIZER`. 9 tests in `agent/test_optimizer.py`. Rationale: PRODUCT.md "Optimisation Engine — Depth".
 
 Key agent capabilities added 2026-05-31:
 - **Historical price model (Rule 15)**: `HISTORICAL_PRICE_MODEL = True`. Grid charge target now computed from rolling 7-day price percentiles (p25/p75) — at cheap prices, discounts solar forecast and adds insurance floor. Self-calibrating. Rollback: set flag to False.
@@ -94,14 +99,14 @@ Key agent capabilities added 2026-05-31:
 - **Solar zero threshold raised 8am → 9am**: flat-roof panels don't produce before ~9am; zero output at 8am is expected, not a forecast failure.
 - **`battery_autonomous_revert_target_reached` automation fixed**: changed from Tessie OR gateway to Tessie only — gateway floors at reserve level, causing premature revert when reserve=100%.
 - **New HA sliders**: `ev_ultra_cheap_threshold_c`, `ev_eco_gap_c`, `battery_charge_price_threshold_c`, `battery_max_insurance_floor_pct`.
-- **55 unit tests** in `agent/test_decision.py`.
+- **60 unit tests** in `agent/test_decision.py`.
 
 Key agent capabilities added 2026-05-29:
 - **Short-term memory**: last 3 decisions from `decisions.jsonl` injected into every cycle. Agent can detect stateless deferral (holding 2+ cycles for a cheap window that never arrives).
 - **Deferral limit**: if 2+ consecutive holds + price within 2¢ of prior cycles → flat-then-spike, charge now.
 - **Time-based escalation (Rule 13)**: peak month hard deadline maths every cycle from 9am; non-peak soft deadline via `hours_to_cheap_end`.
 - **`hours_to_cheap_end`**: replaces `hours_to_spike` (first price > 30¢). LLM-facing definition (system prompt) is the first *sustained* +4¢ rise. The deterministic shadow layer now uses an improved **scale-free daily-shape** version (bottom-30% band of the day's trough→evening-peak swing, with a 5¢ flat-day guard) — fixes under-reporting on gradual ramps (see below).
-- **Deterministic decision layer + shadow mode (added 2026-05-29, NOT in control path)**: `compute_decision_context()` is a pure function that reproduces the agent's arithmetic (deadline maths, fill times, spread, zero-solar/deferral detectors, effective cost target) and emits a recommended verdict `{action, target_pct, mode, rule_fired}` via an ordered decision tree. Each live cycle it's computed and injected into the prompt as a *reference only* block; both the LLM's actual decision and the computed verdict are logged to `decisions.jsonl` (`computed_verdict`, `shadow_action_match`, `shadow_mode_match`) for divergence measurement. Covered by `agent/test_decision.py` (28 unit tests). Plan: collect divergence through the first June peak week → cutover with kill-switch → slim the prompt.
+- **Deterministic decision layer + shadow mode (added 2026-05-29, NOT in control path)**: `compute_decision_context()` is a pure function that reproduces the agent's arithmetic (deadline maths, fill times, spread, zero-solar/deferral detectors, effective cost target) and emits a recommended verdict `{action, target_pct, mode, rule_fired}` via an ordered decision tree. Each live cycle it's computed and injected into the prompt as a *reference only* block; both the LLM's actual decision and the computed verdict are logged to `decisions.jsonl` (`computed_verdict`, `shadow_action_match`, `shadow_mode_match`) for divergence measurement. Covered by `agent/test_decision.py` (60 unit tests). Plan: collect divergence through the first June peak week → cutover with kill-switch → slim the prompt.
 - **Solar zero-override**: if actual solar = 0 kW in 2+ of last 3 daylight cycles, treat as zero-solar day regardless of Solcast/Open-Meteo forecasts. Evidence beats model predictions.
 - **Solar Sponge minimum floor (Rule 14)**: 10am–1pm, SoC < 50% → always charge to 50%, spread table irrelevant.
 - **Price risk asymmetry**: evening prices have fat right tail — Solar Sponge charging is insurance, not arbitrage.
@@ -110,7 +115,7 @@ Key agent capabilities added 2026-05-29:
 
 ---
 
-## Current automation status (as of 2026-05-31)
+## Current automation status (as of 2026-06-01)
 
 **24 automations** in `config/automations.yaml` — **12 active (safety/monitoring), 12 disabled (agent handles)**
 
@@ -208,7 +213,9 @@ Key agent capabilities added 2026-05-29:
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before June 1 |
-| `agent/test_decision.py` | 28 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/test_decision.py` | 60 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. See PRODUCT.md "Optimisation Engine — Depth" |
+| `agent/test_optimizer.py` | 9 unit tests for the LP optimiser — pure, no API calls |
 | `agent/.env` | API keys (gitignored — not in repo) |
 | `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
 | `agent/decisions.jsonl` | Structured JSON decision log — full context per cycle, foundation for analyst agent and accuracy tracking |
@@ -217,7 +224,7 @@ Key agent capabilities added 2026-05-29:
 
 ## What to watch for
 
-**June 1 is tomorrow** — demand window logic activates for the first time live. Watch:
+**June 1 is TODAY** — demand window logic activates for the first time live. Watch:
 - Does agent read `is_peak_month = True` from the first cycle?
 - Does it apply 85% SoC target by 2:55pm deadline maths?
 - Does `battery_pre_demand_window_reset` fire at 2:55pm as backstop?

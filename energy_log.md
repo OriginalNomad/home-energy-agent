@@ -1,5 +1,73 @@
 # Energy System Control Log
 
+## 2026-06-01 (session 5 — overnight hold rule, card fixes, June 1 peak month starts)
+
+**Overnight hold rule added (Rule 20):**
+
+Observed 2026-05-31 20:30: agent charged battery to 95% overnight at 14-15¢ despite Solar Sponge at 6-8¢ being 8-12h away. Root cause: the Amber 12h forecast didn't reach tomorrow's Solar Sponge prices, so `forward_min` showed 13¢ (not 6¢), and the deferral_limit fired — "no cheaper window visible, charge now."
+
+Fix: added `overnight_hold` flag — when nighttime (20:00–07:00) AND price > `SOLAR_SPONGE_PRICE_THRESHOLD` (10¢) AND SoC > 25%, hold and wait for Solar Sponge. Solar Sponge is a structural tariff feature, not a forecast — it's always there. The demand window only applies 3–9pm; Rule 13 morning deadline maths handles peak months from 9am. No pre-charge needed.
+
+`overnight_hold` inserted into decision tree BEFORE `deferral_limit` so it can't be overridden by repeated holds. Peak month exception: if tomorrow solar outlook is overcast AND price < 15¢, pre-charge is justified — but Rule 13 handles this during daylight cycles, not overnight. 60 unit tests pass.
+
+**Battery Forecast card fixes:**
+1. Evening mode (after 3pm): now shows charging status when active ("🔌 charging 1.65 kW → 95% in ~2h") rather than always showing "solar done · battery discharging"
+2. Goal/projected section hidden after 3pm (non-peak) — not relevant when solar is done
+3. Reserve display: removed stale `input_number.battery_decision_reserve_set` helper value; now reads `sensor.powerwall_backup_reserve` (Tessie) only — eliminates "If Consumption · Reserve: 80% (Powerwall: 5%)" confusion
+4. Goal SoC: reads agent's actual reserve target (when > 20%) rather than hardcoded 80/85%
+
+**Overnight behaviour observed (May 31 evening):**
+- 16:30: agent correctly dropped reserve to 5%, letting battery discharge
+- 17:00–19:30: correctly held, waiting for 11¢ overnight window
+- 20:30: deferral_limit incorrectly fired, charged to 95% at 14-15¢
+- This is the exact scenario overnight_hold prevents from June 1 onwards
+
+**June 1 peak month — first live demand window test:**
+System enters first peak month. Agent must now:
+- Apply `is_peak_month = True` from first morning cycle
+- Run 85% SoC by 2:55pm deadline maths every cycle from 9am
+- `battery_pre_demand_window_reset` fires at 2:55pm as backstop
+
+**Architecture assessment → PRODUCT.md "Optimisation Engine — Depth".** Core finding: the system approximates, with an ever-growing hand-tuned rule stack, the solution to a finite-horizon optimal control problem. The deterministic shadow layer is a good *bridge* (testable) but still a rule tree needing endless edge-case patches; the right endpoint is to **compute** the optimum (LP/MPC), which is also the Sol direction. Wrote up the full target architecture: what MPC is + why receding-horizon re-planning is robust to forecast error; the forecast-uncertainty toolkit (per-site calibration → ensemble → nowcasting → distributions/robust MPC against a risk-tuned quantile → two-tier safety/opportunity); the "separate what varies from what's universal" principle (three per-user models: intent→objective, devices→dynamics, tariff→prices into one universal core); the three self-learning loops (per-site calibration / fleet-cohort priors / human-gated meta-analyst); two non-negotiables (learning never touches safety; validate fleet-wide via shadow mode); LLM repositioned to elicitation/explanation/degradation/analyst; synthesis + 5-step migration path. Roadmap gained **Phase 5 — Self-learning**. Two deterministic-layer weaknesses noted for later: `spread_too_small` ignores absolute cheapness at low SoC; no next-day peak-demand lookahead (overnight_hold/Rule 20 is the rule-side answer to the same scenario).
+
+**LP optimiser shadow prototype (`agent/optimizer.py`) — migration-path step 2.** Pure receding-horizon LP (scipy HiGHS; scipy present on the agent's `/usr/bin/python3`). Reads the *same* state + price + solar forecasts as the LLM and `compute_decision_context()` and returns a verdict in the *same* `{action, target_pct, mode, rule_fired}` shape for direct A/B.
+- Per 30-min slot vars = charge/discharge/import/export/soc; minimise `Σ(price·gi − feedin·ge + wear·(c+d))·Δt` minus terminal value on stored energy; constraints = power balance, SoC recursion w/ efficiency, bounds.
+- **Demand window = heavy import penalty 3–9 pm (peak months), not a fixed 85%/2:55pm rule** — the LP pre-charges exactly enough to cover the evening load from battery (derived from forecasts). Encodes the asymmetric loss; always feasible. `risk` knob scales solar down / load up (the elicited risk-aversion → quantile hook).
+- Verdict map: grid-sourced charge slot 0 > 0.3 kW ⇒ charge (autonomous > 2.5 kW); solar-only/none ⇒ hold.
+- **`agent/test_optimizer.py` — 9 assertions, all pass** (cheap-now charges; flat+full holds; negative→autonomous; peak-month pre-charges before window; sunny→hold; risk knob never reduces protective charging). `test_decision.py` still 60/60.
+- Demo (`python3 agent/optimizer.py`) on the 10:00 June-1 cycle: optimiser said **hold/mpc_solar_only** (projected solar fills the battery) vs LLM+deterministic **charge to 85%** (`solar_sponge_floor`) — a real divergence; the optimiser trusts the solar forecast, the rules charge as cheap insurance. Exactly what robust-MPC (conservative solar quantile) resolves and what the three-way shadow exists to surface.
+- **Shadow wiring (zero control-path risk):** `run_agent()` computes the optimiser verdict in a *separate* try/except (cannot affect the deterministic shadow or control); `log_decision()` writes `optimizer_verdict`, `optimizer_context`, `optimizer_action_match` (vs LLM), `optimizer_vs_deterministic` to `decisions.jsonl`. Guarded by `_HAVE_OPTIMIZER`. `energy_agent.py` compiles + imports clean, `_HAVE_OPTIMIZER = True`. From the next cron cycle every record carries a three-way A/B.
+
+**Three-way divergence watch — tool + first findings (`agent/three_way_review.py`).** New analysis tool: reads `decisions.jsonl` and reports pairwise agreement (LLM↔rules, LLM↔optimiser, optimiser↔rules) + three-way consensus + a divergence list, highlighting cycles where the optimiser disagrees with *both* others. Live records use their logged `optimizer_verdict`; older records are **back-filled** by re-running `optimize_battery()`. **Important back-fill caveat:** the back-fill reconstructs solar from each record's `solar_this_hour_kwh`/`solar_next_hour_kwh` via `_synth_solar_from_record()` — a crude, likely *over*-stated proxy — so back-filled optimiser verdicts are biased toward "solar will cover it / hold". Live `optimizer_verdict` records (from the 11:00 cron onward) use the real solar forecast and are the trustworthy ones. `/morning` rewritten to a three-way analysis (was 2-way shadow) with the new field names and the (a) bug / (b) LLM-caution / (c) optimiser-trusts-forecast taxonomy. (Tooling note: an initial `dict | None` annotation crashed silently on the agent's Python 3.9 — fixed to `Optional[dict]`; numbers below are from the corrected run.)
+
+First run — 77 cycles, 31 May 00:00 → 1 Jun 10:30, **all back-filled** (so read with the caveat above):
+- three-way consensus 56%; **LLM↔deterministic 82%**; LLM↔optimiser 69%; optimiser↔rules 61%.
+- **Headline: the back-filled optimiser chose `hold` on all 77 cycles — it never once charged.** It under-charges relative to both LLM and rules across the board. Two co-primary causes, both expected:
+  1. **Synthetic-solar back-fill bias** — the reconstructed solar overstates generation, so the LP concludes solar covers the load and returns `mpc_solar_only`. This is a measurement artifact of back-fill, *not* the live optimiser; only live records settle it.
+  2. **Horizon length** — Amber's forecast is ~6h, so a 10–11am cycle sees only to ~4pm. On a Solar Sponge day those 3–4pm prices are still cheap (6–9¢); the expensive evening demand-window prices (5–9pm) that justify pre-charging are *beyond the horizon*, so the LP sees flat-cheap with no arbitrage incentive and holds. The rule layer compensates with structural knowledge the LP lacks (Solar Sponge always < evening; 85% by 2:55pm).
+- Risk-knob sensitivity (solar quantile): risk=0.6 flipped only ~3 good-solar afternoon cycles to charge; it did **not** materially change the picture. The solar quantile is a *second-order* fix.
+- Honest read of who was right on the divergences: mixed and not yet conclusive from back-fill. Notably at 20:30–21:00 on 31 May the optimiser held at 14–15¢ where the LLM *and* rules charged — and that charge is exactly the overnight-at-high-price mistake that motivated Rule 20 the same day, so the optimiser's hold looks *correct* there. Conversely on the midday Solar Sponge cycles the rules' "charge cheap as insurance" is the safer call on a peak day. This is precisely the (b)-vs-(c) tension the watch exists to adjudicate — needs live data.
+- LLM↔deterministic at 82% is consistent with prior reviews (the rule layer tracks the LLM well); the optimiser is the outlier and is **not yet trustworthy from back-fill alone**.
+- **Two fixes before the optimiser means anything: (1) longer price horizon** — synthesise evening/overnight prices from the historical p25/p75-by-time-of-day model, OR apply the 3–9pm import penalty to the whole block regardless of forecast length; **(2) collect live `optimizer_verdict` records** (real solar) and re-run the watch on those only, ignoring back-fill. Both added to todo.
+
+**LP horizon bug diagnosed.** The LP's `demand_penalty_c=1000` on grid import during 3–9pm is correctly applied to whichever slots in the Amber forecast fall within that window — and the 6h forecast does reach 15:00–16:00 on a morning cycle, so the penalty IS firing for those slots. The bug is more subtle: with good solar, the LP correctly sees "solar fills the battery → no grid charge needed → hold". With zero/poor solar and battery draining to 5% by 15:00, the LP should pre-charge but holds instead — likely because the load-coverage cost at the penalty rate for 1–2 demand-window slots is still smaller than the pre-charge cost in the LP's maths (since only 1–2 slots are in the demand window, not all 6). The fix (horizon extension to 24h) exposes all 4–6h of the demand window, making the penalty unavoidable and much more expensive than pre-charging. This is the confirmed priority-1 fix before any cutover. Horizon extension starts next.
+
+**Migration plan — LP-authoritative (biased for sooner):**
+
+| Date | Work |
+|------|------|
+| **Today (June 1)** | Watch 2:55pm demand window live — first validation of the whole system. LP shadow logs via cron. |
+| **June 2** | Build synthetic horizon extension in `optimizer.py` (p25/p75-by-hour beyond Amber ~6h); add test; confirm LP charges on simulated cloudy peak morning |
+| **June 3** | Monitor live `optimizer_verdict` records (real solar, not back-fill); run `three_way_review.py --live-only`; watch 2:55pm again |
+| **June 4** | If 48h of live LP data is clean on peak-day charging → flip `OPTIMIZER_AUTHORITATIVE = True`. LLM still runs but only generates narrative; deterministic layer becomes safety override |
+| **June 7–14** | Slim system prompt (remove LP-replicated arithmetic); implement selective LLM — only called on divergent cycles or emergency rules |
+
+**Architecture of the cutover:** `OPTIMIZER_AUTHORITATIVE` flag at the top of `energy_agent.py`. When True: LP verdict drives control commands; deterministic layer overrides if it fires higher urgency (`peak_deadline_autonomous`, `demand_window_active`); LLM runs only to produce the narrative summary and its `set_*` tool calls are no-op'd. Kill-switch: flip flag back to False. No git reset needed.
+
+**hours_to_cheap_end / demand window question clarified.** Discussed why the agent reported "6+ hours to cheap window end" on a peak month day. Answer: the `hours_to_cheap_end` figure is a *price-shape* metric that scans for when prices exit the cheap band — it's not the operative deadline on peak days. In peak months, `hours_to_deadline = min(hours_to_2:55pm, hours_to_cheap_end)` ([energy_agent.py:1161](agent/energy_agent.py:1161)), so the 2:55pm constraint is already capping the decision arithmetic correctly. The 6h figure is also partly a flat-day fallback artifact (MIN_DAILY_SWING guard) and is misleading-but-harmless — the decision tree uses `hours_to_2_55` directly on peak branches. Presentation fix deferred as low priority.
+
+---
+
 ## 2026-05-31 (session 4 — deferral_limit false-positive fix + morning analysis field names)
 
 **EV Eco+/Fast progression + solar zero-detection threshold fixes:**
