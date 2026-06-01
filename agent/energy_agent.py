@@ -24,6 +24,13 @@ import anthropic
 import pytz
 import requests
 
+# Optional LP optimiser (shadow mode only — never in the control path).
+try:
+    from optimizer import optimize_battery, OptParams
+    _HAVE_OPTIMIZER = True
+except Exception:                       # scipy/optimizer missing → skip cleanly
+    _HAVE_OPTIMIZER = False
+
 # ---------------------------------------------------------------------------
 # Configuration — move sensitive values to environment variables in production
 # ---------------------------------------------------------------------------
@@ -664,6 +671,19 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         # EV shadow match — only meaningful when EV is plugged in
         if ev_rec.get("rule_fired") != "ev_disconnected":
             record["shadow_ev_match"] = (zappi_set == ev_rec.get("zappi_mode"))
+
+    # LP optimiser shadow fields (three-way A/B: LLM vs deterministic vs optimiser)
+    ov = _cycle_context.get("optimizer_verdict")
+    if ov is not None:
+        record["optimizer_verdict"]  = ov
+        record["optimizer_context"]  = _cycle_context.get("optimizer_context")
+        _soc = record.get("soc")
+        _llm_charge = ((reserve_set is not None and _soc is not None and reserve_set > _soc)
+                       or mode_set == "autonomous")
+        record["optimizer_action_match"] = (_llm_charge == (ov.get("action") == "charge"))
+        _cv = record.get("computed_verdict")
+        if _cv is not None:
+            record["optimizer_vs_deterministic"] = (ov.get("action") == _cv.get("action"))
 
     with JSONL_FILE.open("a") as f:
         f.write(json.dumps(record) + "\n")
@@ -1881,6 +1901,21 @@ def run_agent(dry_run: bool = False):
         shadow_block = "\n\n" + _format_decision_context(_ctx)
     except Exception as exc:
         print(f"  Warning: shadow decision context failed: {exc}", file=sys.stderr)
+
+    # LP optimiser shadow verdict — separate try so it can never affect the
+    # deterministic shadow or the control path. Shadow only, not authoritative.
+    if _HAVE_OPTIMIZER:
+        try:
+            _opt_state  = _cycle_context.get("state")
+            _opt_prices = _cycle_context.get("price_forecast")
+            if _opt_state and _opt_prices:
+                _opt = optimize_battery(_opt_state, _opt_prices,
+                                        get_solar_forecast(), datetime.now(SYDNEY_TZ))
+                _cycle_context["optimizer_verdict"]  = _opt["verdict"]
+                _cycle_context["optimizer_context"]  = {
+                    k: v for k, v in _opt.items() if k != "verdict"}
+        except Exception as exc:
+            print(f"  Warning: optimizer shadow failed: {exc}", file=sys.stderr)
 
     initial_msg   = (
         "Run your energy optimisation cycle now.\n\n"

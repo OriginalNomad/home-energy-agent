@@ -554,6 +554,101 @@ The tariff model is a constraint input to the solver, not hardcoded into rules.
 
 ---
 
+## Optimisation Engine — Depth (target architecture)
+
+*Layer 2 above sketches the MPC objective; the Multi-Tenant section sketches the adapters. This section goes deeper on three things that are the actual hard problems: what MPC really buys us, how to survive bad forecasts, and how one engine serves every user while learning over time. It is the design the repo-root agent is converging toward.*
+
+### Why an optimiser, not a rule stack
+
+Battery optimisation under a dynamic tariff is a **textbook finite-horizon optimal control problem**, not a reasoning problem. The repo-root agent today approximates the optimum with a hand-tuned rule stack (charge in the cheapest window, 85% by 2:55pm, Solar Sponge floor, deferral limits, a percentile price model…). Every one of those rules is an *emergent output* of a cost-minimising optimiser — none should be hand-written. A rule stack accretes special cases forever: each new edge case becomes a new rule, which becomes a new ordering/interaction bug. The fix is to stop approximating the optimum and **compute it**.
+
+The problem is small and well-posed: one battery (~13.5 kWh, ±5 kW), 48 half-hour slots a day, a known price forecast, a known solar forecast, a known load profile, a demand-charge constraint. This is solvable to optimality by a small linear program in **milliseconds**.
+
+### What MPC actually is (and why it tolerates bad forecasts)
+
+**Model Predictive Control.** At each timestep you hold three things — a **model** of how the system evolves, a **forecast** of the future, and an **objective** — and you solve for the optimal action sequence over a finite horizon (next 24–48 h). You then **apply only the first action**, discard the rest, and **re-solve** at the next timestep with updated forecasts. That "receding horizon" re-planning is the whole trick.
+
+The key consequence: **MPC is inherently robust to forecast error.** Forecasts degrade with horizon — accurate for the next 30 min, vague 6 h out. Because MPC only ever *commits* to the near-term slot (the most accurate part) and re-plans before the far slots arrive, day-ahead error largely washes out. The discipline is: don't try to be right about 2 pm at 8 am — be roughly right about the next slot, and re-plan.
+
+Important: **the repo-root agent already runs the MPC loop** — it wakes every 30 min, looks ahead, acts, re-evaluates next cycle. It already has the *cadence* of MPC; it just uses an LLM + rule-stack as the "solver" in the middle. The re-architecture swaps that core for an actual optimiser; the loop structure stays. A thin **control-quantisation layer** maps the optimiser's ideal kW schedule onto whatever the hardware exposes (today: the indirect `backup_reserve_percent` hack; with Tesla Fleet API: a direct charge command), keeping the optimiser hardware-agnostic.
+
+### Handling forecast uncertainty (solar especially)
+
+On top of the structural robustness above, in priority order:
+
+1. **Learn the site's own error signature.** Log forecast-vs-actual every cycle (the agent already writes `daily_accuracy` records) and fit a running **bias/scale correction** — e.g. "Solcast over-predicts ~30% under cloud at this flat roof in Glebe." A generic vendor model can't know a site's microclimate; the site can learn it in weeks. Highest value, lowest risk.
+2. **Ensemble the sources.** Solcast + Open-Meteo + BOM, weighted by each one's *recent track record at this site* (inverse-error weighting beats trusting any single source).
+3. **Nowcast the near slots.** The best predictor of solar in 30 min is solar *now* plus recent trend. Weight live inverter readings heavily for near slots, the model for far slots. (The agent's "if actual=0 for 2 cycles, treat as zero-solar day" is a crude version of this.)
+4. **Move from point forecasts to distributions.** Instead of "solar = 18.9 kWh," produce quantiles ("p10=8 / p50=16 / p90=22") and run **robust MPC** — optimise against a *conservative* quantile for anything that hurts when you're short. The cost structure picks the quantile: being short of solar on a peak day risks a ~$100 demand charge, while over-charging from cheap grid wastes cents, so you plan against ~p25 solar (and ~p75/P90 evening load), not the mean. The agent's "insurance floor" and `price_position` model are hand-rolled approximations of this; the distribution makes it principled.
+5. **Two-tier safety/opportunity split.** A *safety* plan that survives the demand window even if solar is zero (pre-charge enough cheap grid), plus an *opportunistic* layer on top that uses expected solar to avoid over-charging.
+
+The mindset: **forecast accuracy is a product feature you build, not an input you're handed.** Every site produces its own ground truth daily — the system that learns each site's error model beats any vendor's generic forecast. That is a defensible moat, and it connects directly to the multi-tenant design below.
+
+### One engine for every user: separate what varies from what's universal
+
+Intent, devices, and tariff all differ per user. The architectural answer is a single principle: **the optimiser is universal; everything that differs between users is data fed into it.** No per-user branching logic — one general optimiser parameterised by three per-user models.
+
+**Layer 1 — Intent → Objective function** *(Sol's core differentiator).*
+The elicitation conversation translates fuzzy human values into **objective weights + hard constraints + a risk parameter**:
+
+- "minimise my bill" → cost weight
+- "battery longevity" → cycling / depth-of-discharge penalty, or a cycle budget
+- "never lose power in a blackout" → minimum-reserve hard constraint
+- "I hate exporting for free" → penalty on low-FIT export
+- the **$500-variable-vs-$300-certain calibration question elicits a risk-aversion coefficient** — and that coefficient becomes the *quantile* the robust MPC optimises against (point 4 above). This is the synthesis of the uncertainty and personalisation problems: **intent decides how conservatively the engine plans against the same forecast uncertainty.**
+
+Intent is data, not code. Same optimiser, personalised objective. (This deepens the existing `From conversation to solver weights` table — those weights *are* the objective coefficients.)
+
+**Layer 2 — Devices → System model.**
+Each device type is a plugin implementing a common interface (state, constraints, control mapping): battery (capacity, kW, efficiency, degradation, control protocol), solar (capacity, orientation, inverter limit, forecast source), EV (capacity, charge rate, departure schedule, charger modes), flexible loads (power, thermal model, comfort constraints). Adding a Sonnen battery or a heat pump is **writing a driver, not touching the optimiser.** The optimiser composes whatever devices are present into one model. (This is the "Multi-battery adapter layer" made first-class.)
+
+**Layer 3 — Tariff/grid → Price + constraint model.**
+A function `time → (import_price, export_price, structural constraints)`. Amber = real-time feed; Octopus Agile = day-ahead; flat ToU = static schedule; demand charges = a monthly-peak term. One interface, many implementations.
+
+**The universal core:** `optimise(objective, system_model, price_model) → control commands`. Identical code for every tenant. All personalisation lives in the three input models.
+
+### The self-learning loops
+
+Learning happens at three levels, kept **deliberately separate** (mixing them is how you get instability):
+
+| Loop | Scope | Cadence | What it learns |
+|------|-------|---------|----------------|
+| **Calibration** | per-site | continuous | solar bias, household load shape, real battery efficiency vs nameplate, price-error buckets — improves the *inputs* to the optimiser. ~80% of "self-learning"; mostly online regression / Bayesian updating. Highest ROI, lowest risk. |
+| **Fleet / cohort** | cross-tenant | daily/weekly | priors that transfer between similar sites. A new flat-roof Glebe Powerwall inherits similar sites' models (solves cold-start). Hierarchical: global prior → cohort (region / hardware / tariff) → individual. The **network-effect moat**: more users → better priors → better onboarding → more users. (Privacy: learn aggregate patterns without centralising raw data; federate where possible.) |
+| **Meta / analyst** | system-wide | weekly, human-gated | the "analyst agent" — reviews outcomes vs counterfactual baselines, surfaces *systemic* issues ("this cohort over-charges on cloudy days", "elicited risk looks too conservative vs outcomes"), proposes changes to objective-construction or priors → human review → deploy. Meta-learning about the system, kept out of the real-time loop so it can't destabilise live control. |
+
+### Two non-negotiable design principles
+
+1. **Learning never touches safety.** Learned components feed *forecasts and objective weights* only. The *hard constraints* — demand window, deep-discharge floor, blackout reserve — are never learned; they are guarantees the optimiser operates within. This preserves the existing three-layer split (**intent → optimiser → safety rules**): the safety layer stays deterministic and per-device-certified, and learning lives strictly above it. Learning optimises *within* a safe envelope; it can never widen it.
+
+2. **Validate learning the way you validate code: shadow mode.** The repo-root agent's shadow-then-cutover-with-kill-switch discipline (log a new decision layer's verdict alongside the incumbent, measure divergence, cut over behind a revertible flag) generalises directly to a fleet: every new model/optimiser version runs in shadow against the incumbent across tenants, you measure regret per cohort, and roll out gradually per cohort with kill-switches. The validation pattern already exists; it just runs fleet-wide.
+
+### Where the LLM lives in the target architecture
+
+The LLM is repositioned, not removed. It is genuinely good at four things the optimiser is not, and dropped from the one place it doesn't belong:
+
+- **Elicitation** — intent → objective (the differentiator). Per user, at onboarding and periodic re-check.
+- **Explanation / trust** — "we charged at 1 pm and saved you $34 this week, here's how." What makes a paid service feel worth it (see the savings-dashboard work in `todo.md`).
+- **Graceful degradation** — on sensor/API failure it holds safely and explains, where a bare optimiser needs explicit fallback logic.
+- **Meta / analyst loop** — reading logs and proposing hypotheses for human review.
+- **Not** the per-cycle optimiser — that is the LP / MPC.
+
+### The synthesis
+
+> A **universal robust-MPC core**, fed by **three per-user models** (intent→objective, devices→dynamics, tariff→prices), where **per-site calibration** continuously learns each system's forecast-error signature, **the user's elicited risk tolerance sets how conservatively the MPC plans against that uncertainty**, and **fleet learning** supplies priors for cold-start — all validated in shadow and operating strictly inside a non-learned safety envelope.
+
+The solar-inaccuracy problem and the multi-tenant problem are the same problem at two scales: **each site learns its own truth, and intent decides how much to trust it.**
+
+### Migration path (from today's repo-root agent)
+
+1. **Now — improve the current rule layer** (low risk): give the deterministic layer an absolute-cheap floor at low SoC, next-day peak-demand lookahead, control-write hysteresis to stop reserve thrashing, and a load-forecast-derived demand-window target instead of a fixed 85%.
+2. **Next — prototype the optimiser** (`agent/optimizer.py`): a small LP/MPC reading the same state + forecasts, logging an `optimizer_verdict` alongside the existing `computed_verdict` and the LLM's decision. Run all three in shadow on live June peak-week data — zero control-path risk.
+3. **Cut over** the optimiser behind a kill-switch once shadow data supports it; it subsumes the entire rule stack (cheap-window, demand deadline, Solar Sponge floor, spread table, historical price model) in one stroke.
+4. **Foundational — Tesla Fleet API** to replace the `backup_reserve_percent` hack with direct charge/export commands, deleting the export safety-net and the control-quantisation layer (and the Tessie fee).
+5. **Productise** the three-model separation and the three learning loops into the multi-tenant Sol service.
+
+---
+
 ## Roadmap
 
 ### Phase 1 — Personal system (current)
@@ -577,10 +672,17 @@ The tariff model is a constraint input to the solver, not hardcoded into rules.
 
 ### Phase 4 — Multi-tenant platform
 - [ ] Tesla Fleet API (direct, no Tessie dependency)
-- [ ] Multi-battery adapter layer
-- [ ] Multi-tariff constraint model
-- [ ] User goal elicitation UI
+- [ ] Multi-battery adapter layer (devices → system model)
+- [ ] Multi-tariff constraint model (tariff → price model)
+- [ ] User goal elicitation UI (intent → objective)
 - [ ] Savings reporting and verification
+
+### Phase 5 — Self-learning (see Optimisation Engine — Depth)
+- [ ] Per-site calibration: solar bias / load shape / battery efficiency / price-error buckets from logged actuals
+- [ ] Robust MPC: quantile forecasts + risk-tuned objective (intent sets the quantile)
+- [ ] Fleet/cohort priors for cold-start onboarding
+- [ ] Meta/analyst loop: human-gated systemic improvement
+- [ ] Fleet-wide shadow validation + per-cohort kill-switch rollout
 
 ---
 

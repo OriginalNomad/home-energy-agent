@@ -1,10 +1,12 @@
 # Energy Automation Rules
 
-## Implementation note (as of 2026-05-26)
+## Implementation note (as of 2026-06-01)
 
 These rules are now implemented by a **Claude-powered agent** (`agent/energy_agent.py`) rather than HA automations. The agent reads this rule-set's intent via its system prompt and applies it to real-time sensor data + price/solar forecasts every 30 minutes.
 
 Hard constraints (Rule 2 demand window, export guard) remain as HA automations that fire independently of the agent. The agent handles all strategic decisions (when to charge, which mode, how much, EV Zappi mode).
+
+**Re-architecture in progress (June 2026):** A receding-horizon LP optimiser (`agent/optimizer.py`) is being built to replace the LLM as the primary decision-maker. The rules in this document remain the safety envelope — the LP *derives* the optimal schedule from the objective function, rather than approximating these rules as heuristics. The LP runs in shadow (not in the control path) alongside the LLM and the deterministic rule layer (`compute_decision_context()`). Target cutover: June 4 behind a kill-switch flag. See `PRODUCT.md` "Optimisation Engine — Depth" for the full architecture and migration plan.
 
 See `CONTEXT.md` for the current automation status and which rules are agent-handled vs HA-enforced.
 
@@ -432,6 +434,30 @@ When FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%:
 - Eco+ draws only from actual solar export, so no grid import occurs — the goal is to avoid paying to export, not to buy grid power
 - Battery threshold 85% ensures this only activates when the battery is genuinely near full
 - Overrides the user-set EV charge target — treats 100% as the effective target while FIT is negative
+
+### Rule 20 — Overnight Hold: Wait for Solar Sponge
+
+Solar Sponge (10am–3pm) is a structural tariff feature — always cheaper than evening/overnight prices. The demand window is only 3–9pm; the battery just needs 85% by 2:55pm, not by midnight.
+
+**Default overnight behaviour: hold. Do not charge overnight when Solar Sponge will be cheaper.**
+
+`overnight_hold` fires when:
+- Time is 20:00–07:00 (nighttime)
+- Current price > 10¢ (`SOLAR_SPONGE_PRICE_THRESHOLD`)
+- SoC > 25% (battery not critically low)
+
+When `overnight_hold = True`, the deterministic layer returns `hold / overnight_hold_wait_for_sponge` regardless of `deferral_detected`.
+
+**Why:** Charging overnight at 13–17¢ when Solar Sponge at 6–8¢ is 8–12h away wastes ~55¢/night unnecessarily. Rule 13 morning deadline maths handles peak months from 9am — no pre-charge needed.
+
+**Exceptions where overnight charging IS appropriate:**
+1. Price ≤ 10¢ overnight — genuinely cheap, charging justified
+2. SoC ≤ 25% — emergency floor; handled by automation or deferral fallback
+3. Peak month + tomorrow solar outlook is overcast (< 150 W/m²) AND price < 15¢ — Solar Sponge alone may not fill battery; pre-charge justified
+
+**Rollback:** set `SOLAR_SPONGE_PRICE_THRESHOLD = 0` to disable, or set it very high (e.g. 30) to always apply.
+
+---
 
 ### Rule 13 — Time-Based Escalation: "Enough Waiting, Go Hard"
 

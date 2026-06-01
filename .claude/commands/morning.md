@@ -9,13 +9,17 @@ Then give me a 4-part summary:
 - **System status** — agent, automations, anything to watch today
 - **App status** — Sol prototype, where it's up to
 - **Today's priorities** — from todo.md and anything flagged in the log
-- **Shadow-layer analysis** — LLM vs deterministic decision layer (see below)
+- **Three-way decision analysis** — LLM vs deterministic vs LP optimiser (see below)
 
-## Shadow-layer analysis
+## Three-way decision analysis
 
-The agent runs in shadow mode: each cycle logs both the LLM's actual decision and the
-deterministic `compute_decision_context()` recommendation to `agent/decisions.jsonl`
-(fields `computed_verdict`, `computed_context`, `shadow_action_match`, `shadow_mode_match`).
+The agent runs three decision layers in parallel; only the LLM is in the control path.
+Each cycle logs all three to `agent/decisions.jsonl`:
+1. **LLM** — what the agent actually did (the control path).
+2. **Deterministic** — `compute_decision_context()`, the rule-tree shadow layer.
+3. **LP optimiser** — `optimizer.py`, the receding-horizon linear program (shadow,
+   added 2026-06-01). Fields appear only on cycles run after the optimiser was wired in,
+   so older records will lack them — that's expected.
 
 For this section, read recent records from `agent/decisions.jsonl` (skip `daily_accuracy`
 rows; focus on roughly the last day or two of cycles, and any records that carry the
@@ -24,22 +28,37 @@ rows; focus on roughly the last day or two of cycles, and any records that carry
 **Key JSONL field names** (use these exactly — wrong names silently return null):
 - LLM action: `actions` (list, empty = hold), `reserve_set` (int or null), `mode_set` (str or null)
 - State: `soc` (not `soc_pct`), `price_c` (not `price_now_c`), `mode_before`
-- Shadow: `shadow_action_match`, `shadow_mode_match`, `computed_verdict` (dict with `action/mode/rule_fired`), `computed_context` (dict with `spread_c`, `forward_min_c`, `hours_to_cheap_end`, `deferral_detected`)
+- Deterministic: `shadow_action_match`, `shadow_mode_match`, `computed_verdict` (dict with `action/mode/rule_fired`), `computed_context` (dict with `spread_c`, `forward_min_c`, `hours_to_cheap_end`, `hours_to_deadline`, `deferral_detected`)
+- LP optimiser: `optimizer_verdict` (dict with `action/target_pct/mode/rule_fired`), `optimizer_context` (dict with `grid_charge_now_kw`, `projected_import_kwh`, `soc_trajectory_pct`, `projected_cost_c`, `horizon_slots`), `optimizer_action_match` (optimiser vs LLM), `optimizer_vs_deterministic` (optimiser vs rule layer)
 - LLM held = `actions == []` (no set_reserve or set_mode calls made)
+- Optimiser rule_fired values: `mpc_charge_grid` / `mpc_solar_only` / `mpc_hold` / `mpc_infeasible_fallback` / `insufficient_forecast` / `no_solver`
 
-- **Agreement rate** — % of cycles where action matched (`shadow_action_match`) and, among
-  charge cycles, where mode matched (`shadow_mode_match`).
-- **Divergences** — for each disagreement: timestamp, what the LLM did vs what the
-  deterministic layer recommended (`rule_fired`), and a one-line read on *which was right*
-  given the prices/SoC/solar in that record. Call out any that look like a real bug in the
-  deterministic layer (e.g. a metric mis-firing) vs the LLM being over/under-cautious.
+Report:
+
+- **Agreement rates** — three pairwise numbers over the cycles that carry all fields:
+  LLM↔deterministic (`shadow_action_match`, plus `shadow_mode_match` among charge cycles),
+  LLM↔optimiser (`optimizer_action_match`), and optimiser↔deterministic
+  (`optimizer_vs_deterministic`). A handy headline is the **three-way consensus rate** —
+  % of cycles where all three agree on charge-vs-hold.
+- **Divergences** — focus on cycles where the optimiser disagrees with the other two (the
+  new signal), then any LLM↔deterministic disagreements as before. For each: timestamp,
+  what each layer did (`rule_fired`), and a one-line read on *which was right* given the
+  prices/SoC/solar in that record. Distinguish three causes:
+  (a) a real bug in a layer (a metric mis-firing),
+  (b) the LLM being over/under-cautious, and
+  (c) the optimiser trusting a point forecast the others hedge against (e.g. it picks
+      `mpc_solar_only`/hold while the rules charge as cheap insurance) — these are the
+      robust-MPC cases that motivate a conservative solar quantile, not bugs.
 - **Recommendation on next steps** — where we are on the re-architecture path and what's
   needed to advance: Phase 4 (collect divergence data through the first June peak-month
-  week) → Phase 5 (cutover with kill-switch) → Phase 6 (slim the prompt). State whether
-  the data so far supports trusting the deterministic layer yet, or what to fix/watch first.
+  week — now three-way) → Phase 5 (cutover with kill-switch) → Phase 6 (slim the prompt).
+  State whether the data yet supports trusting *either* shadow layer, which one tracks
+  reality better, and what to fix/watch first. If the optimiser keeps diverging via cause
+  (c), note whether the `risk` knob / a conservative solar quantile would close the gap.
 
 If there are too few shadow records to be meaningful yet, say so and note how many cycles
-have accumulated.
+have accumulated — separately for the deterministic layer and the (newer) optimiser, since
+the optimiser only began logging from its wire-in cycle.
 
 ## Standing instructions for the session
 
