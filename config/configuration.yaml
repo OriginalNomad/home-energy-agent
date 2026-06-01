@@ -25,6 +25,8 @@ logbook:
 # Load frontend themes from the themes folder
 frontend:
   themes: !include_dir_merge_named themes
+  extra_module_url:
+    - /hacsfiles/lovelace-card-mod/card-mod.js?hacstag=190927524421
 
 automation: !include automations.yaml
 script: !include scripts.yaml
@@ -310,15 +312,13 @@ rest_command:
     method: POST
     headers:
       Authorization: "Bearer REDACTED_TOKEN"
-      Content-Type: "application/json"
-    payload: >-
-      {"backup_reserve_percent": {{ percent | int }}}
+      "Content-Type": "application/json"
+    payload: '{"backup_reserve_percent": {{ percent | int }}}'
 
   powerwall_set_mode:
     url: "https://api.tessie.com/api/1/energy_sites/2252120180790091/operation"
     method: POST
     headers:
       Authorization: "Bearer REDACTED_TOKEN"
-      Content-Type: "application/json"
-    payload: >-
-      {"default_real_mode": "{{ mode }}"}
+      "Content-Type": "application/json"
+    payload: '{"default_real_mode": "{{ mode }}"}'

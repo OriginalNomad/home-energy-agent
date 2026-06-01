@@ -224,24 +224,21 @@ Key agent capabilities added 2026-05-29:
 
 ## What to watch for
 
-**June 1 is TODAY** — demand window logic activates for the first time live. Watch:
-- Does agent read `is_peak_month = True` from the first cycle?
-- Does it apply 85% SoC target by 2:55pm deadline maths?
-- Does `battery_pre_demand_window_reset` fire at 2:55pm as backstop?
-- Does `battery_autonomous_revert_target_reached` (now Tessie-only) hold correctly until target is genuinely reached?
+**June 1 demand window — PASSED ✅ (2026-06-01).** Agent correctly held overnight (Rule 20), charged via Solar Sponge 09:30–14:30 (39%→96% at 7–11¢), entered demand window at 99% SoC, zero grid imports 3–9pm. Rule 2 maintained. Backstop automation did not need to fire.
 
-**Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate (larger swings expected). May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
+**LP optimiser horizon extension (June 2 — next priority).** `agent/optimizer.py` needs synthetic prices appended beyond Amber's ~6h horizon (p25/p75-by-hour from `load_price_history()`). Without this the LP under-charges on peak mornings because it never sees the 17:00–21:00 demand penalty. This is the blocker before any cutover to LP-authoritative.
 
-**June 1 is critical** — demand window logic activates. Any grid import 3–9pm sets the monthly demand charge. The agent must ensure battery ≥85% SoC by 2:55pm on peak month days. The `battery_pre_demand_window_reset` automation is the last-resort backstop at 2:55pm.
+**Three-way divergence watch** — `/morning` now reports LLM vs deterministic vs LP. Live `optimizer_verdict` accumulates from June 1 11:00 cron. Target: 48h of live data showing LP correctly pre-charges on peak days → flip `OPTIMIZER_AUTHORITATIVE = True` (target June 4). See todo.md Phase 4b/5.
 
-**On rainy/cloudy days in peak months**: Solar won't cover the deficit. Agent must use autonomous mode during the cheap window (typically 10am–2pm) to charge fast enough. At 1.7kW self_consumption rate, there may not be enough time — autonomous (5kW) is needed.
+**Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
+
+**On rainy/cloudy peak days**: Solar won't cover the deficit. Agent must escalate to autonomous during the cheap window (10am–2pm). At 1.7kW self_consumption rate there may not be enough time — autonomous (5kW) is needed. Watch Rule 16 (`nonpeak_solar_unreliable_autonomous`) firing correctly.
 
 **Monitoring questions:**
-- Does agent correctly use autonomous mode on cloudy peak-month mornings?
+- Does overnight_hold (Rule 20) prevent high-price overnight charging each night?
+- Does agent correctly escalate to autonomous on a cloudy peak morning?
 - Does `battery_autonomous_export_safety_net` catch any misbehaviour within 30s?
-- Does overnight agent cycle correctly identify cheap windows and defer charging to them?
-- June 1: does the agent recognise peak month and apply 2:55pm target from day one?
-- **Shadow divergence**: each `/morning` review now reports LLM-vs-deterministic agreement rate and divergences. Collect through the first June peak week before deciding on cutover (Phase 5). Watch whether divergences are deterministic-layer bugs vs the LLM being over/under-cautious.
+- **Three-way shadow**: does the LP (once horizon is fixed) agree with LLM+rules on peak-day pre-charge decisions? Review via `/morning`.
 
 ---
 
