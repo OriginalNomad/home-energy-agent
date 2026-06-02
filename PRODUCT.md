@@ -554,6 +554,128 @@ The tariff model is a constraint input to the solver, not hardcoded into rules.
 
 ---
 
+## Cloud-Native Deployment (no on-site hardware)
+
+*A consumer service cannot require customers to install a local device. This section works through the constraints, the key insight that resolves them, and the resulting architecture.*
+
+### The problem: safety latency
+
+The personal system today runs 12 active HA automations on-site, including safety rules that must fire in seconds:
+
+| Rule | Response time | Why |
+|------|---------------|-----|
+| Export safety net (autonomous mode) | <30 seconds | Battery exporting at a loss to grid — revert immediately |
+| Demand window reset (2:55pm) | Exact time | Must fire before 3pm demand window opens |
+| Negative price charge | ~1 minute | Opportunistic, not safety-critical |
+| Low SoC emergency | ~1 minute | Need grid import before battery hits 0% |
+
+A cloud-only system stacks API latency (2–5s per call to Tessie/device API), polling intervals, and internet reliability. The export safety net — the tightest constraint — becomes marginal at best.
+
+### The key insight: lean on battery firmware, not software
+
+Every modern residential battery has **local firmware that enforces safety regardless of cloud connectivity**:
+
+| Guarantee | Source | Cloud dependency |
+|-----------|--------|------------------|
+| Never discharge below reserve | Battery firmware (Tesla, Sonnen, BYD) | None |
+| Never export in `self_consumption` mode | Battery firmware | None |
+| Default to safe state on comms loss | Battery firmware — holds current mode | None |
+| Charge rate within hardware limits | Battery firmware / inverter | None |
+
+**The safety layer isn't "our code running locally" — it's "only issue commands the battery's own firmware handles safely."** This is a constraint on the optimiser's *action space*, not a separate system to deploy on-site.
+
+### The sacrifice: no autonomous mode
+
+`autonomous` / `time_based_control` mode allows ~5 kW fast grid charging but also allows the battery to export — hence the export safety net. In `self_consumption` mode, the firmware itself prevents battery-to-grid export at the hardware level. No software safety net needed.
+
+Dropping autonomous mode means:
+- **Stuck at ~1.7 kW charge rate** (Tesla self_consumption grid supplementation)
+- **Need to start charging earlier** on tight peak days to reach target SoC by the demand window
+- **The LP optimiser already handles this** — it just schedules earlier, using more of the Solar Sponge window
+
+For most sites and most days, this is fine. The LP's job is to plan within the hardware's real constraints, and 1.7 kW over a 5-hour Solar Sponge window (10am–3pm) delivers ~8.5 kWh — enough to fill a Powerwall from 30% to 93%. On a cloudy day with zero solar, that's still sufficient if the optimiser starts at 10am.
+
+Edge cases where it's not enough (e.g. battery at 10% with 3 hours to demand window, zero solar) can be handled by:
+1. **Bounded commercial risk.** Brief autonomous-mode use with cloud-based monitoring. The worst case from a 30-second cloud response vs a 2-second local response is ~60 seconds of unintended export at ~3 kW, costing ~0.25¢ per incident. Guarantee "we credit any export during autonomous mode" — negligible cost.
+2. **Tesla Fleet API direct charge commands** (future). Tesla Fleet API can set a specific charge rate without entering autonomous mode, eliminating the export risk entirely.
+
+### The cloud-native architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│                   SOL WEB APP                         │
+│    Onboarding conversation · Dashboard · Alerts       │
+│    Savings reporting · Goal adjustment                │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│              CLOUD OPTIMISER (per-site)               │
+│  LP/MPC solver every 15–30 min                       │
+│  Calls device APIs directly (no local relay)          │
+│  Issues only firmware-safe commands                   │
+│  Daily energy journal + decision log                  │
+└──────┬──────────┬──────────────┬─────────────────────┘
+       │          │              │
+┌──────▼──────┐ ┌─▼────────────┐ ┌▼─────────────────────┐
+│  FORECAST   │ │ DEVICE APIs  │ │  DATA STORE           │
+│  SERVICES   │ │ (cloud-to-   │ │  daily_energy.jsonl   │
+│             │ │  cloud)      │ │  decisions.jsonl      │
+│  Solcast    │ │              │ │  (or Postgres/        │
+│  Amber /    │ │ Tesla Fleet  │ │   TimescaleDB)        │
+│  Octopus /  │ │ Sonnen       │ │                       │
+│  Tibber     │ │ myenergi     │ │  Per-site calibration │
+│  BOM weather│ │ Daikin       │ │  Fleet cohort priors  │
+└─────────────┘ └──────────────┘ └───────────────────────┘
+```
+
+**What's absent:** any local device, HA instance, tunnel, or on-site compute.
+
+**What enforces safety:** the battery's own firmware, constrained by the optimiser never issuing commands the firmware can't locally enforce. The command vocabulary is:
+- `set_reserve(N%)` — firmware holds this floor
+- `set_mode(self_consumption)` — firmware prevents battery export
+- Zappi mode changes — myenergi firmware handles locally
+
+None of these require sub-second cloud response. If the cloud is unreachable, the battery continues in its current mode — which is always safe by construction.
+
+### What this requires that doesn't exist yet
+
+| Dependency | Status | Path |
+|------------|--------|------|
+| **Tesla Fleet API** | On todo — requires developer registration | Eliminates Tessie ($10/mo), enables direct charge commands, potential LAN-direct mode |
+| **Solcast direct API** | Already have credentials + API | Move from HA integration to direct cloud call |
+| **Amber direct API** | Agent already calls it directly | Already solved |
+| **myenergi cloud API** | Available, not yet integrated | Standard REST API, well-documented |
+| **SolarEdge monitoring API** | Available, not yet integrated | For actual-vs-forecast comparison (calibration loop) |
+| **Persistent data store** | `daily_energy.jsonl` + `decisions.jsonl` exist | Move from flat files to Supabase/TimescaleDB for multi-tenant |
+
+### Advantages over the current architecture
+
+- **No on-site hardware** — pure SaaS, nothing to install or maintain
+- **No HA** — eliminates Docker, YAML, recorder rolloff, config divergence, update breakage
+- **Multi-tenant from day one** — same cloud stack serves every customer
+- **Better reliability** — cloud compute doesn't sleep, doesn't need cron, auto-restarts
+- **Simpler onboarding** — "sign in, connect your Tesla/Amber/Solcast accounts, have a conversation about your goals, done"
+- **The daily energy journal becomes the product's core data asset** — per-site learning from day one
+
+### Disadvantages and risks
+
+- **Device API reliability** — Tessie/Tesla Fleet goes down → no control. Mitigated: battery holds safe state; retry on next cycle. Monitor API health as an SLA metric.
+- **API rate limits** — Tesla Fleet limits polling to ~200 requests/day per vehicle. Must be efficient: poll every 2–5 min (not 2 seconds), batch reads. The optimiser's 30-min cycle fits well within limits.
+- **Latency for opportunistic actions** — negative price spikes, sudden solar surplus. 1–2 min response is fine for most; truly sub-minute reactions would need a local agent. Price this as a known limitation, not a failure.
+- **Internet dependency** — if customer's internet is down, no optimisation. Battery defaults to self_consumption with its last reserve setting — safe, just not optimal. This is also true of every smart thermostat, every cloud-controlled device. Acceptable for a consumer product.
+- **HA ecosystem loss** — Daikin AC, SolarEdge local monitoring, community integrations. For Sol as a product, build direct API integrations for supported devices rather than depending on HA's (brittle, update-breaking) integration layer.
+
+### Migration path from the current system
+
+1. **Now (Phase 4):** finish LP optimiser cutover on the personal system (still on HA + Mac Studio)
+2. **Next:** replace Tessie with Tesla Fleet API (direct control, no middleman)
+3. **Then:** move the optimiser to cloud (Supabase Edge Functions / fly.io / Lambda), calling Tesla Fleet + Amber + Solcast directly. HA stays for dashboard/monitoring but is no longer in the control path.
+4. **Finally:** remove HA entirely. Sol web app replaces the dashboard. The daily energy journal replaces the recorder. Direct device APIs replace HA integrations.
+
+The personal system becomes the first Sol customer. Same cloud stack, same onboarding, same optimiser — just with the full history already captured in `daily_energy.jsonl`.
+
+---
+
 ## Optimisation Engine — Depth (target architecture)
 
 *Layer 2 above sketches the MPC objective; the Multi-Tenant section sketches the adapters. This section goes deeper on three things that are the actual hard problems: what MPC really buys us, how to survive bad forecasts, and how one engine serves every user while learning over time. It is the design the repo-root agent is converging toward.*

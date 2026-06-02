@@ -1882,6 +1882,41 @@ def run_agent(dry_run: bool = False):
     client        = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     recent        = get_recent_decisions(3)
 
+    # --- Pre-flight safety checks (run before LLM, independent of shadow layer) ------
+
+    # 1. Demand-window reserve guard (Rule 2 backstop).
+    # If we're inside the 3–9pm demand window on a peak month and the reserve is
+    # stranded above 10%, the Powerwall can't discharge — grid covers home load and
+    # sets a demand ratchet charge. Drop it to 5% via Tessie directly, bypassing HA
+    # rest_commands entirely (those may be broken on an HA restart, as happened June 2).
+    try:
+        _now_pre = datetime.now(SYDNEY_TZ)
+        _is_peak_pre = _now_pre.month in PEAK_MONTHS
+        _in_demand_pre = _is_peak_pre and 15 <= _now_pre.hour < 21
+        if _in_demand_pre and not dry_run:
+            _reserve_pre = _int(ha_state(ENTITIES["battery_reserve"]))
+            _soc_pre     = _int(ha_state(ENTITIES["battery_soc"]))
+            if _reserve_pre is not None and _reserve_pre > 10:
+                print(f"  ⚠️  DEMAND WINDOW RESERVE GUARD: reserve={_reserve_pre}% during demand"
+                      f" window (soc={_soc_pre}%) — dropping to 5% via Tessie directly",
+                      file=sys.stderr)
+                set_powerwall_reserve(5)
+    except Exception as _exc:
+        print(f"  Warning: demand-window reserve guard failed: {_exc}", file=sys.stderr)
+
+    # 2. HA rest_command health check — warn if the safety automations are broken.
+    try:
+        _svc_r = requests.get(f"{HA_URL}/api/services", headers=HA_HEADERS, timeout=10)
+        if _svc_r.status_code == 200:
+            _domains = {d["domain"] for d in _svc_r.json()}
+            if "rest_command" not in _domains:
+                print("  ⚠️  HA rest_command NOT LOADED — safety automations (2:55pm reset,"
+                      " startup floor) are broken. Restart HA to fix.", file=sys.stderr)
+    except Exception as _exc:
+        print(f"  Warning: HA health check failed: {_exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------------------------
+
     # Shadow decision layer (Phase 3): precompute the deterministic verdict from the
     # same state + forecast the LLM will read, inject it as REFERENCE ONLY, and log
     # it alongside the LLM's actual decision so we can measure divergence over time.

@@ -1,5 +1,50 @@
 # Energy System Control Log
 
+## 2026-06-02 (session 6 continued — demand window incident + HA rest_command fix)
+
+**Demand window breach incident — 7pm grid import during cooking**
+
+At ~7pm user noticed grid was powering cooking load instead of the battery, during the demand window (3–9pm peak month). Root cause chain:
+
+1. Agent charged battery to 81% today (target was 85%) — SoC stalled at 81%, reserve stayed at 80% (the charging floor)
+2. At 2:55pm, `battery_pre_demand_window_reset` automation fired but **immediately errored**: `Action rest_command.powerwall_set_mode not found`
+3. Reserve stayed at 80% through the entire demand window — battery pinned at its own floor, unable to discharge
+4. When cooking spike hit at 7pm, Powerwall had nowhere to go → grid import
+
+**Root cause: `rest_command` integration had been broken since HA restart on June 1 06:23.** The `powerwall_set_mode` payload was truncated in the container config at startup (`{{ mode }` instead of `{{ mode }}"}`). The session 5 fix corrected the file at 17:06 that day, but HA does not retry integrations that failed at startup — `reload_all` doesn't help. The integration was silently dead for ~36 hours.
+
+**Immediate fix:** called Tessie API directly to drop reserve to 5% (`{"backup_reserve_percent": 5}` → 200 OK). Battery resumed discharging; grid import dropped to ~0W. SoC was 62% with reserve now 5%.
+
+**Permanent fix:** restarted HA via `POST /api/services/homeassistant/restart`. After restart both `rest_command.powerwall_set_backup_reserve` and `rest_command.powerwall_set_mode` loaded cleanly. `battery_pre_demand_window_reset` will work correctly from tomorrow.
+
+**Verified post-restart state:** SoC=62%, reserve=5%, mode=self_consumption, grid=0.001kW — battery discharging normally, demand window safe for remainder of evening.
+
+**Agent pre-flight guard implemented** (`agent/energy_agent.py`, `run_agent()` — added same session):
+- **Demand-window reserve guard**: at cycle start, before LLM runs — if peak month AND 15:00–21:00 AND `reserve > 10%`, calls `set_powerwall_reserve(5)` via Tessie directly. Bypasses HA rest_commands entirely. Logs warning to stderr. Would have caught tonight's breach at the 15:00 cycle instead of 19:00.
+- **HA rest_command health check**: each cycle checks `/api/services` for `rest_command` domain; warns loudly if missing. Would have surfaced the June 1 failure immediately rather than 36h later.
+- Both additions are in a `try/except` so failures are non-fatal to the main cycle.
+
+## 2026-06-02 (session 6 — demand-window outcome logging + HA monitor cards)
+
+**Built comprehensive daily energy journal** — a per-day record of everything a learning agent needs to reconstruct what happened and why, persisted to `daily_energy.jsonl` (survives HA recorder's ~10-day rolloff) and surfaced in HA via two dashboard cards.
+
+- **`agent/log_daily_energy.py`** — comprehensive daily energy journal, cron at 21:05. Queries HA history API for the full day + reads `decisions.jsonl`. One JSON record per day to `agent/daily_energy.jsonl`, capturing:
+  - **Solar**: Solcast forecast vs actual inverter output, accuracy ratio
+  - **Battery**: SoC at midnight / 9am / 3pm / 9pm, min SoC during demand window
+  - **Load**: total home consumption, demand-window load
+  - **Grid**: total import/export, import during Solar Sponge and demand window separately
+  - **Price**: min/max/mean for overnight, Solar Sponge, demand window, full day, and FIT
+  - **Demand window**: billing-accurate pass/fail (EA116 peak 30-min avg kW, threshold 0.10 kW)
+  - **Agent**: total/charge cycles, modes used, rules fired (deterministic + optimiser), shadow match rates, forecast unreliable count, 3pm SoC goal vs projected, daily API cost
+- **Supersedes `log_demand_window.py`** — the old file only tracked demand window pass/fail. The new journal captures the full context so a future analyst/learning agent can answer "why did this day pass or fail?" without any other data source.
+- **Metric correction (important):** first cut measured kWh imported and flagged June 1 as FAIL on 0.058 kWh. But per `ea116_tariff.md` §1 / Rule 2, the bill is set by the **single highest 30-minute *average* import (kW)** in the month — not kWh, not instantaneous peak. Reworked to compute the peak clock-aligned 30-min-average import. June 1 → **PASS at 0.038 kW** (38 W avg, worst block 20:30). Pass threshold = 0.10 kW.
+- **`agent/demand_window_summary.py`** — reads `daily_energy.jsonl` and **pushes `sensor.demand_window_monitor` into HA via the REST API** (state = this month's peak 30-min import kW = the billed number; attributes = rolling 30-day per-day history). Crons: daily 21:05 (after recompute) + hourly (keeps the sensor alive across HA restarts, since `/api/states` is non-persistent).
+- **Why REST-push, not a template/utility_meter sensor:** the agent runs on the host; HA runs isolated in Docker and its `/config` has diverged from both the repo and the docker-compose host-mount path. Pushing state from the host sidesteps the divergence entirely and keeps the JSON as the single source of truth.
+- **Two Markdown dashboard cards** (native, no custom-card dependency) driven by that sensor's attributes: (1) peak-30min-import bars per day + month headline; (2) pass/fail timeline with worst 30-min block and min SoC. Both Jinja templates validated against live HA via `/api/template`.
+- **Backfill patterns visible in first 7 days**: May 29 hit SoC 5% at 9am with 17 kWh grid import and Solcast accuracy 0.45; June 1 had Solcast accuracy only 0.41 (worse forecast) but reached 99% by 3pm — the difference: June is peak month so the agent prioritised the deadline.
+
+**Config-divergence finding (flagged for follow-up):** the running HA is the Docker container (up 7 days, serving :8123); its `/config/configuration.yaml` (Jun 1 17:06) matches the repo copy but is ~50 min ahead of the docker-compose bind-mount path `/Users/simonmonk/homeassistant/config` (Jun 1 16:17). So edits to the repo `config/` do not reliably reach the running HA. Also seen in the live log: `rest_command.powerwall_set_backup_reserve not found` at 2026-06-01 11:00 — the agent's reserve command had been failing to load that morning (the Content-Type/payload bug); container config mtime is after the fix, so likely resolved, but worth confirming the rest_commands now load cleanly.
+
 ## 2026-06-01 (session 5 — overnight hold rule, card fixes, June 1 peak month starts)
 
 **Overnight hold rule added (Rule 20):**
