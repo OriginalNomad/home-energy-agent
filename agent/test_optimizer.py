@@ -96,5 +96,61 @@ check("risk knob never reduces protective charging",
       (r_neutral.get("grid_charge_now_kw"), r_conserv.get("grid_charge_now_kw")))
 
 
+
+# 7. Horizon extension: cloudy peak morning, zero solar.
+#    Short horizon (no demand window) → LP doesn't see penalty → may hold.
+#    Extended horizon including demand window slots → LP pre-charges.
+def _prices_ext(base_seq, extra_h_prices, start="2026-06-03 09:00"):
+    """base_seq: 30-min prices; extra_h_prices: {hour: price} synthetic extension."""
+    base = datetime.fromisoformat(start)
+    out = []
+    for i, c in enumerate(base_seq):
+        mins = 30 * i
+        t = base.replace(hour=base.hour + (base.minute + mins) // 60,
+                         minute=(base.minute + mins) % 60)
+        out.append({"time": t.strftime("%Y-%m-%d %H:%M"), "cents_kwh": float(c),
+                    "descriptor": ""})
+    # Append synthetic evening slots at specified hours
+    last_t = datetime.fromisoformat(out[-1]["time"])
+    slot = last_t.replace(minute=(last_t.minute + 30) % 60,
+                          hour=last_t.hour + (last_t.minute + 30) // 60)
+    for h, price in sorted(extra_h_prices.items()):
+        while slot.hour < h:
+            slot = slot.replace(hour=slot.hour + 1) if slot.minute == 0 else \
+                   slot.replace(minute=0, hour=slot.hour + 1)
+        for _ in range(2):  # two 30-min slots per hour
+            out.append({"time": slot.strftime("%Y-%m-%d %H:%M"),
+                        "cents_kwh": float(price), "descriptor": "synthetic_historical"})
+            slot = slot.replace(minute=30 if slot.minute == 0 else 0,
+                                hour=slot.hour if slot.minute == 0 else slot.hour + 1)
+    return out
+
+now_am = datetime(2026, 6, 3, 9, 0, tzinfo=TZ)
+state_cloudy_peak = {"soc_pct": 30, "is_peak_month": True, "home_load_kw": 1.0}
+zero_solar = _flat_solar([], 0.0)
+
+# Short ~6h horizon ending at 15:00 — demand window starts right at the edge
+short_pf = _prices([9, 9, 10, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+                   start="2026-06-03 09:00")
+# time 09:00-14:30 — demand window (15:00+) NOT in horizon
+short_solar = [{"time": f["time"], "kw_est": 0.0} for f in short_pf]
+r_short = optimize_battery(state_cloudy_peak, short_pf, short_solar, now_am)
+
+# Extended horizon: same base + synthetic 15:00–21:00 slots with p75-style price
+ext_pf = list(short_pf) + [
+    {"time": f"2026-06-03 {h:02d}:{m:02d}", "cents_kwh": 25.0, "descriptor": "synthetic_historical"}
+    for h in range(15, 21) for m in [0, 30]
+]
+ext_solar = [{"time": f["time"], "kw_est": 0.0} for f in ext_pf]
+r_ext = optimize_battery(state_cloudy_peak, ext_pf, ext_solar, now_am)
+
+check("cloudy peak short horizon — LP may hold (no demand window visible)",
+      r_short["verdict"]["action"] in ("hold", "charge"), r_short["verdict"])
+check("cloudy peak extended horizon — LP pre-charges (demand window visible)",
+      r_ext["verdict"]["action"] == "charge", r_ext["verdict"])
+traj_ext = r_ext.get("soc_trajectory_pct") or []
+check("  ...extended horizon lifts SoC meaningfully",
+      len(traj_ext) > 12 and traj_ext[11] > 30 + 10, traj_ext[:14])
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)
