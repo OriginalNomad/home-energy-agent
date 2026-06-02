@@ -1051,6 +1051,87 @@ def _price_stats(prices: list[float]):
     return {"p25": p25, "p75": p75, "pmin": pmin, "pmax": pmax, "n": n}
 
 
+def _build_hourly_price_model() -> dict[int, float]:
+    """Per-hour-of-day median price from the last PRICE_HISTORY_DAYS of decisions.jsonl.
+    Returns {hour: median_price_c}; only hours with ≥3 samples are included.
+    Used to extend the LP forecast horizon beyond Amber's ~6h window."""
+    if not JSONL_FILE.exists():
+        return {}
+    cutoff = datetime.now(SYDNEY_TZ) - timedelta(days=PRICE_HISTORY_DAYS)
+    by_hour: dict[int, list[float]] = {}
+    try:
+        for line in JSONL_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("type") == "daily_accuracy":
+                continue
+            price = r.get("price_c")
+            ts    = r.get("ts", "")
+            if price is None or not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = SYDNEY_TZ.localize(dt)
+                if dt >= cutoff:
+                    h = dt.hour
+                    by_hour.setdefault(h, []).append(float(price))
+            except (ValueError, TypeError):
+                continue
+    except Exception:
+        return {}
+    result = {}
+    for h, p_list in by_hour.items():
+        if len(p_list) >= 3:
+            s = sorted(p_list)
+            result[h] = s[len(s) // 2]
+    return result
+
+
+def _extend_forecast_to_demand_window(
+    price_forecast: list[dict],
+    now: datetime,
+    hourly_model: dict[int, float],
+) -> list[dict]:
+    """Extend the Amber ~6h price forecast with synthetic 30-min slots until 22:00.
+
+    Fills the 15:00–21:00 demand-window block so the LP can see the
+    demand_penalty_c on those slots and pre-charge earlier in the day.
+    Uses per-hour historical medians from the last 7 days; falls back to
+    p75 of the existing forecast for hours with insufficient history.
+    """
+    if not price_forecast:
+        return price_forecast
+    last_time_str = price_forecast[-1].get("time", "")
+    try:
+        last_dt = datetime.fromisoformat(last_time_str.replace("T", " "))
+        if last_dt.tzinfo is None:
+            last_dt = SYDNEY_TZ.localize(last_dt)
+    except (ValueError, TypeError):
+        return price_forecast
+    target_end = last_dt.replace(hour=22, minute=0, second=0, microsecond=0)
+    if target_end <= last_dt:
+        return price_forecast  # already reaches 22:00+
+    existing_prices = sorted(f.get("cents_kwh", 15.0) for f in price_forecast)
+    fallback = existing_prices[int(len(existing_prices) * 0.75)] if existing_prices else 15.0
+    extended = list(price_forecast)
+    slot_dt = last_dt + timedelta(minutes=30)
+    while slot_dt <= target_end:
+        h = slot_dt.hour
+        extended.append({
+            "time": slot_dt.strftime("%Y-%m-%d %H:%M"),
+            "cents_kwh": hourly_model.get(h, fallback),
+            "descriptor": "synthetic_historical",
+        })
+        slot_dt += timedelta(minutes=30)
+    return extended
+
+
 def _historical_grid_target(soc: float, solar_forecast_kwh: float,
                              confidence: float, p_now: float,
                              stats: dict, max_floor: float = DEFAULT_MAX_INSURANCE_FLOOR) -> float:
@@ -1160,8 +1241,16 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     hours_to_2_55      = max(DEMAND_DEADLINE - now_h, 0.0)
     hours_to_deadline  = min(hours_to_2_55, hours_to_cheap_end) if is_peak else hours_to_cheap_end
 
+    # Net solar available for battery = gross remaining minus home load consumed over the window.
+    # Solar goes to loads first; only the surplus reaches the battery.
+    # Peak: window is hours until 2:55pm. Non-peak: cap at 7h (full solar day).
+    home_load_kw = state.get("home_load_kw", 0.5) or 0.5
+    _solar_window_h = hours_to_2_55 if is_peak else min(hours_to_deadline, 7.0)
+    net_expected_solar = max(expected_solar - home_load_kw * _solar_window_h, 0.0)
+
     # Peak-month demand fill maths (toward 85% by 2:55pm)
-    kwh_needed_85   = max((0.85 - soc / 100) * USABLE_KWH - expected_solar, 0.0)
+    # Uses net solar so we don't mistakenly hold when home load will consume most of the forecast.
+    kwh_needed_85   = max((0.85 - soc / 100) * USABLE_KWH - net_expected_solar, 0.0)
     fill_slow_85    = kwh_needed_85 / SLOW_KW
     fill_fast_85    = kwh_needed_85 / FAST_KW
 
@@ -1169,6 +1258,17 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     kwh_needed   = max((cost_target / 100 - soc / 100) * USABLE_KWH, 0.0)
     fill_slow    = kwh_needed / SLOW_KW
     fill_fast    = kwh_needed / FAST_KW
+
+    # Non-peak: will solar alone (net of home load) cover the gap to cost_target?
+    # Only fires before 1pm when solar still has time to deliver, and when forecast is reliable.
+    _kwh_gap = max((cost_target / 100 - soc / 100) * USABLE_KWH, 0.0)
+    solar_can_cover = (
+        not solar_unreliable
+        and not is_peak
+        and now_h < 13
+        and _kwh_gap > 0
+        and net_expected_solar >= _kwh_gap
+    )
 
     # Spread: most expensive upcoming slot (next 6h) vs current price
     upcoming       = [f.get("cents_kwh", 0.0) for f in price_forecast[:12]]
@@ -1233,7 +1333,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     elif is_peak and now_h < DEMAND_DEADLINE and soc < 85:
         # Peak-month hard deadline escalation (Rule 13)
         if kwh_needed_85 <= 0:
-            rec = verdict("hold", None, None, "peak_target_met")
+            # net solar (after home load) covers the remaining gap — no grid charge needed yet.
+            # "peak_target_met" only when SoC has actually reached 85%.
+            rule_name = "peak_target_met" if soc >= 85 else "peak_solar_will_cover"
+            rec = verdict("hold", None, None, rule_name)
         elif fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55:
             rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
         elif (now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70):
@@ -1249,6 +1352,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
     elif cost_target <= soc:
         rec = verdict("hold", None, None, "target_met")
+    elif solar_can_cover:
+        # Solar forecast (net of home load) will cover the gap — hold, don't trickle from grid.
+        # Escalation logic below will fire if solar underdelivers as the day progresses.
+        rec = verdict("hold", None, None, "solar_will_cover")
     elif overnight_hold:
         # Solar Sponge tomorrow will be cheaper — don't charge overnight at high prices.
         # Rule 13 morning deadline maths will escalate if peak month demands it.
@@ -1288,7 +1395,9 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "solar_unreliable":    solar_unreliable,
         "cost_target_pct":     cost_target,
         "cost_target_method":  cost_target_method,
-        "expected_solar_kwh":  round(expected_solar, 2),
+        "expected_solar_kwh":      round(expected_solar, 2),
+        "net_expected_solar_kwh":  round(net_expected_solar, 2),
+        "solar_can_cover":         solar_can_cover,
         "hours_to_cheap_end":  round(hours_to_cheap_end, 2),
         "hours_to_2_55pm":     round(hours_to_2_55, 2),
         "hours_to_deadline":   round(hours_to_deadline, 2),
@@ -1944,7 +2053,12 @@ def run_agent(dry_run: bool = False):
             _opt_state  = _cycle_context.get("state")
             _opt_prices = _cycle_context.get("price_forecast")
             if _opt_state and _opt_prices:
-                _opt = optimize_battery(_opt_state, _opt_prices,
+                # Extend the ~6h Amber forecast with synthetic historical prices so the LP
+                # can see the 15:00–21:00 demand-window block and apply its demand_penalty.
+                _hourly_model = _build_hourly_price_model()
+                _opt_prices_ext = _extend_forecast_to_demand_window(
+                    _opt_prices, datetime.now(SYDNEY_TZ), _hourly_model)
+                _opt = optimize_battery(_opt_state, _opt_prices_ext,
                                         get_solar_forecast(), datetime.now(SYDNEY_TZ))
                 _cycle_context["optimizer_verdict"]  = _opt["verdict"]
                 _cycle_context["optimizer_context"]  = {

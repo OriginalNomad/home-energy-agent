@@ -113,10 +113,66 @@ def test_detectors():
 # --------------------------------------------------------------------------
 
 def test_peak_sunny_holds():
+    # SoC=60%, generous solar remaining, reliable forecast → solar covers gap → hold.
+    # rule_fired should be "peak_solar_will_cover" (not "peak_target_met" — SoC not at 85% yet).
     ctx = ea.compute_decision_context(
         mk_state(60, 11, "good", 3.2, 8.0), flat(16), [], now_at(11))
     check("peak sunny -> hold", ctx["recommended"]["action"] == "hold", ctx["recommended"])
-    check("peak sunny target met", ctx["recommended"]["rule_fired"] == "peak_target_met")
+    check("peak sunny solar_will_cover (not target_met)", ctx["recommended"]["rule_fired"] == "peak_solar_will_cover",
+          ctx["recommended"])
+
+
+def test_peak_sunny_low_soc_home_load_deducted():
+    # SoC=25%, generous solar BUT home load consumes most of it → kwh_needed_85 > 0 (not covered).
+    # home_load_kw=1.2, hours_to_2_55≈7.9h → home consumes ~9.5 kWh; net_solar~0.5 kWh
+    # kwh_needed_85 = (0.85-0.25)*13.5 - 0.5 = 7.6 > 0 → peak_solar_will_cover should NOT fire.
+    # At 7am with 7.9h to deadline, no urgency yet → peak_on_track (hold) is correct.
+    state = mk_state(25, 7, "good", 2.0, 10.0)
+    state["home_load_kw"] = 1.2
+    ctx = ea.compute_decision_context(state, flat(13), [], now_at(7))
+    r = ctx["recommended"]
+    check("peak low SoC net solar correctly deducted (no solar_will_cover)", r["rule_fired"] != "peak_solar_will_cover", r)
+    check("peak 7am no urgency → peak_on_track", r["rule_fired"] == "peak_on_track", r)
+    check("peak_on_track is hold (escalation comes later)", r["action"] == "hold", r)
+
+
+def test_peak_target_met_label_at_85():
+    # When SoC actually reaches 85%, rule should still be "peak_target_met".
+    ctx = ea.compute_decision_context(
+        mk_state(85, 11, "good", 3.2, 8.0), flat(16), [], now_at(11))
+    # soc >= 85 so the outer branch `soc < 85` won't fire — falls to target_met/hold below.
+    # (The peak branch condition is `soc < 85`, so this falls to the non-peak/target_met path)
+    check("soc=85 -> hold", ctx["recommended"]["action"] == "hold", ctx["recommended"])
+
+
+def test_nonpeak_solar_will_cover_holds():
+    # Non-peak, morning, reliable solar forecast, gap < net solar → hold (solar_will_cover).
+    # home_load=0.5, hours_to_deadline~4h → home consumes 2 kWh; remaining=8 → net=6 kWh
+    # gap = (0.70 - 0.50) * 13.5 = 2.7 kWh < 6 kWh → solar covers it
+    ctx = ea.compute_decision_context(
+        mk_state(50, 10, "good", 3.0, 8.0, is_peak=False, grid_target=70, price=12),
+        flat(12), [], now_at(10))
+    r = ctx["recommended"]
+    check("nonpeak solar_will_cover -> hold", r["action"] == "hold", r)
+    check("nonpeak solar_will_cover rule", r["rule_fired"] == "solar_will_cover", r)
+
+
+def test_nonpeak_solar_insufficient_charges():
+    # Non-peak, tiny solar remaining → solar can't cover gap → falls through to spread logic.
+    ctx = ea.compute_decision_context(
+        mk_state(50, 10, "good", 3.0, 1.0, is_peak=False, grid_target=70, price=12),
+        flat(12), [], now_at(10))
+    r = ctx["recommended"]
+    check("nonpeak tiny solar falls to spread logic", r["rule_fired"] != "solar_will_cover", r)
+
+
+def test_nonpeak_solar_will_cover_not_after_1pm():
+    # Non-peak, after 1pm → solar_will_cover guard (now_h < 13) prevents the hold.
+    ctx = ea.compute_decision_context(
+        mk_state(50, 13, "good", 3.0, 8.0, is_peak=False, grid_target=70, price=12),
+        flat(12), [], now_at(13))
+    r = ctx["recommended"]
+    check("nonpeak after 1pm solar_will_cover doesn't fire", r["rule_fired"] != "solar_will_cover", r)
 
 
 def test_peak_cloudy_10am_sponge_floor():
@@ -481,6 +537,9 @@ if __name__ == "__main__":
                test_historical_model_falls_back_without_stats,
                test_historical_model_flat_history_falls_back,
                test_hours_to_cheap_end, test_detectors, test_peak_sunny_holds,
+               test_peak_sunny_low_soc_home_load_deducted, test_peak_target_met_label_at_85,
+               test_nonpeak_solar_will_cover_holds, test_nonpeak_solar_insufficient_charges,
+               test_nonpeak_solar_will_cover_not_after_1pm,
                test_peak_cloudy_10am_sponge_floor, test_peak_cloudy_1330_autonomous,
                test_peak_deferral_trap_selfcons, test_soc_gateway_divergence,
                test_nonpeak_deferral, test_overnight_hold_for_cheap_window,

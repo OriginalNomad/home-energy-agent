@@ -243,6 +243,18 @@ def agent_summary(cycles: list) -> dict:
 
     costs = [c.get('est_cost_usd', 0) for c in cycles if c.get('est_cost_usd')]
 
+    # Forecast accuracy category: what fraction of daytime cycles had unreliable solar?
+    daytime_cycles = [c for c in cycles if 9 <= int((c.get("ts", "") or "")[11:13] or 0) < 20]
+    if daytime_cycles and len(daytime_cycles) >= 3:
+        unreliable_rate = unreliable_count / len(daytime_cycles)
+        forecast_accuracy_category = (
+            "unreliable" if unreliable_rate > 0.5 else
+            "poor"       if unreliable_rate > 0.2 else
+            "good"
+        )
+    else:
+        forecast_accuracy_category = None
+
     return {
         "total_cycles": len(cycles),
         "charge_cycles": len(charge_cycles),
@@ -252,6 +264,7 @@ def agent_summary(cycles: list) -> dict:
         "shadow_action_match_rate": f"{shadow_matches}/{len(shadow_checks)}" if shadow_checks else None,
         "optimizer_action_match_rate": f"{opt_matches}/{len(opt_checks)}" if opt_checks else None,
         "forecast_unreliable_cycles": unreliable_count,
+        "forecast_accuracy_category": forecast_accuracy_category,
         "goal_3pm_soc": goal,
         "projected_3pm_soc_at_midday": projected,
         "agent_cost_usd": round(sum(costs), 3) if costs else None,
@@ -357,7 +370,7 @@ def compute_day(day) -> dict:
         "solar": {
             "forecast_kwh": solcast_forecast_kwh,
             "actual_kwh": solar_actual_kwh,
-            "accuracy": solar_accuracy,
+            "forecast_vs_actual_ratio": solar_accuracy,
         },
 
         # --- Battery ---
