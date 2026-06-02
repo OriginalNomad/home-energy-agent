@@ -75,7 +75,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 ---
 
-## System architecture (as of 2026-06-01)
+## System architecture (as of 2026-06-03)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
 
@@ -89,6 +89,14 @@ Key agent capabilities added 2026-06-02:
 - **Daily energy journal** (`agent/log_daily_energy.py`, cron 21:05): comprehensive per-day record — solar forecast/actual, battery SoC trajectory, grid import/export by window, price profiles, demand window pass/fail (billing-accurate: peak 30-min avg kW), agent decision rollup. Persisted to `agent/daily_energy.jsonl`. Supersedes the narrower `log_demand_window.py`.
 - **`sensor.demand_window_monitor`** pushed to HA via REST API (no config change) each hour + after daily recompute. Feeds two Markdown dashboard cards: (1) peak 30-min import bars per day, (2) pass/fail timeline with min SoC.
 - **June 2 demand window breach**: SoC reached only 81% (target 85%), reserve stuck at 80%. `battery_pre_demand_window_reset` automation fired at 2:55pm but errored — `rest_command` had failed to load at HA startup on June 1 (truncated payload, fixed but HA never restarted). Grid covered cooking load at 7pm. Fixed: Tessie API direct call to drop reserve → HA restart → rest_commands now loading cleanly.
+
+Key agent capabilities added 2026-06-03:
+- **Home load deduction in solar sufficiency check**: `compute_decision_context()` now computes `net_expected_solar = max(expected_solar - home_load_kw * window_h, 0)` and uses it in `kwh_needed_85`. Fixes the bug where `peak_target_met` fired at 25% SoC on sunny-forecast days because raw Solcast remaining was used without deducting home consumption.
+- **`peak_solar_will_cover` rule**: renamed from `peak_target_met` when SoC < 85%. The two cases are semantically distinct: one means the battery actually reached target; the other means the solar projection covers the remaining gap.
+- **`solar_will_cover` rule (non-peak)**: if reliable solar forecast (net of home load) covers the gap to cost_target before 1pm, the deterministic layer holds. Encodes the correct default: on a sunny forecast day, hold-until-you-must rather than trickle-charge. Escalation fires if solar underdelivers as the day progresses.
+- **LP horizon extension**: `_build_hourly_price_model()` computes per-hour-of-day median prices from the last 7 days of decisions.jsonl. `_extend_forecast_to_demand_window()` appends synthetic 30-min slots from the end of the Amber ~6h forecast to 22:00. The LP now sees the 15:00–21:00 demand-window block and applies `demand_penalty_c = 1000 ¢/kWh` on those slots — fixing the systematic `mpc_solar_only` divergence on peak mornings where the demand window was beyond the Amber horizon.
+- **`daily_energy.jsonl` schema**: `solar.accuracy` renamed to `solar.forecast_vs_actual_ratio`; `agent.forecast_accuracy_category` added ("good"/"poor"/"unreliable") — key predictor for learning agent of demand-window breach risk.
+- **68 decision tests, 12 optimizer tests** — all pass.
 
 Key agent capabilities added 2026-06-01:
 - **Overnight hold (Rule 20)**: `overnight_hold` flag — when nighttime (20:00–07:00) AND price > 10¢ AND SoC > 25%, hold and wait for Solar Sponge rather than charging at overnight rates. `SOLAR_SPONGE_PRICE_THRESHOLD = 10¢` constant controls the threshold. Fires before deferral_limit so it can't be overridden by repeated holds. 60 unit tests.

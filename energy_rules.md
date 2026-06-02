@@ -405,6 +405,22 @@ Replaces fixed thresholds with a self-calibrating model based on rolling 7-day p
 
 **Why**: a cheap-window that closes 1.5h early (as observed 2026-05-31) causes under-charging when relying on solar forecast alone. The insurance floor ensures a meaningful minimum SoC is locked in while prices are cheap, independent of the solar forecast.
 
+### Rule 21 — Solar-Sufficient Hold (non-peak, sunny-forecast days)
+
+**Added 2026-06-03.** On a sunny-forecast day (reliable solar accuracy) before 1pm, if net solar can cover the remaining gap to `cost_target` without any grid charging, hold and let solar do the work.
+
+```
+net_solar = max(expected_solar_remaining − home_load_kw × min(hours_to_deadline, 7h), 0)
+gap       = max((cost_target − soc) / 100 × 13.5, 0)
+if net_solar ≥ gap AND solar_reliable AND now < 1pm: hold ("solar_will_cover")
+```
+
+Rule fires before overnight_hold and deferral logic in the non-peak path. After 1pm, escalation rules take over regardless.
+
+**Why this matters**: on a sunny forecast day, the human default is hold-until-you-must. Unnecessary trickle-charging from grid (a) costs money, (b) crowds out incoming solar (battery partially full is less able to absorb a solar surge). The risk asymmetry (demand charge) only pushes toward earlier charging when the solar forecast is uncertain. When it's confident, hold is the efficient choice.
+
+**If solar underdelivers**: the accuracy checks (`forecast_accuracy = poor/unreliable`) will flip `solar_unreliable = True`, `solar_can_cover = False`, and the deadline escalation rules will take over. The design is: optimistic hold → monitor actuals → escalate if needed.
+
 ### Rule 16 — Solar-Unreliable Autonomous Escalation (non-peak)
 
 When `solar_unreliable = True`, self_consumption at 1.7 kW cannot be supplemented by uncertain solar. Apply a tighter autonomous escalation buffer:
@@ -477,12 +493,17 @@ Recognising this pattern is as important as recognising a genuine cheap window. 
 
 Every cycle from 9am, the agent calculates:
 ```
-kWh_needed = (0.85 − soc/100) × 13.5 − expected_solar_to_2:55pm
-             (use 0 for solar if forecast is poor or unreliable)
+net_solar = max(expected_solar_remaining − home_load_kw × hours_to_2:55pm, 0)
+            (use 0 for solar if forecast is poor or unreliable)
+kWh_needed = max((0.85 − soc/100) × 13.5 − net_solar, 0)
 hours_to_fill_fast = kWh_needed / 5.0   (autonomous)
 hours_to_fill_slow = kWh_needed / 1.7   (self_consumption)
 hours_remaining    = hours until 14:55
 ```
+
+**Home load deduction is critical**: raw Solcast `remaining_today` is gross solar generation. Home loads consume solar first; only the surplus charges the battery. Failing to deduct home load makes the battery appear "covered" on a sunny day at 25% SoC (e.g. 10 kWh remaining − 8 kWh home load = 2 kWh net; kwh_needed = 7.6, not 0).
+
+If `kWh_needed ≤ 0`: fire `peak_solar_will_cover` (hold — net solar covers the gap). Note: this is distinct from `peak_target_met` (SoC actually at 85%). The solar projection may be wrong — escalation rules below will fire if solar underdelivers as the day progresses.
 
 | Condition | Action |
 |-----------|--------|
