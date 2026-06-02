@@ -5,11 +5,12 @@ Read the following files in order:
 4. todo.md
 5. The last 50 lines of energy_log.md
 
-Then give me a 4-part summary:
+Then give me a 5-part summary:
 - **System status** — agent, automations, anything to watch today
 - **App status** — Sol prototype, where it's up to
 - **Today's priorities** — from todo.md and anything flagged in the log
 - **Three-way decision analysis** — LLM vs deterministic vs LP optimiser (see below)
+- **Daily energy journal review** — schema completeness check (see below)
 
 ## Three-way decision analysis
 
@@ -59,6 +60,37 @@ Report:
 If there are too few shadow records to be meaningful yet, say so and note how many cycles
 have accumulated — separately for the deterministic layer and the (newer) optimiser, since
 the optimiser only began logging from its wire-in cycle.
+
+## Daily energy journal review
+
+`agent/daily_energy.jsonl` is the durable daily record that outlives HA's recorder and will
+feed a future learning/analyst agent. Each morning, read the most recent record(s) and think
+about whether the schema captures everything a learning agent would need to answer:
+
+- "Why did this day pass or fail the demand window?"
+- "Was the agent's charging strategy optimal given what actually happened?"
+- "What patterns predict bad outcomes (cloudy + peak + low overnight SoC)?"
+
+Specifically, check whether the current schema is missing any data that was **actually
+available and relevant** in yesterday's decisions.jsonl cycles or HA sensor history. Examples
+of things that might be worth adding as the system evolves:
+
+- **Weather**: cloud cover, temperature (drives AC load), rain (drives solar accuracy)
+- **EV**: was it plugged in, did it charge, how much energy did it take, what mode was used
+- **AC/HVAC**: was the Daikin running during the demand window, what was the load contribution
+- **Autonomous mode events**: did the agent escalate to autonomous, when, for how long
+- **Forecast evolution**: how much did the Solcast/Amber forecasts shift during the day
+- **Battery degradation signals**: charge/discharge cycles, depth of discharge
+- **Cost**: estimated daily electricity cost (import×price − export×FIT)
+
+Report one of:
+- **Schema is complete** — no gaps found for the data currently available
+- **Suggested additions** — list specific fields, where the data comes from (which sensor or
+  JSONL field), and why a learning agent would need them. Don't suggest fields for data sources
+  that don't exist yet (e.g. weather sensors not installed).
+
+If you recommend additions, don't implement them automatically — just flag them. The user
+decides whether to expand the schema.
 
 ## Standing instructions for the session
 

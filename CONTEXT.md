@@ -83,6 +83,13 @@ Three layers control the system. Read this before assuming any automation is "in
 
 **Layer 2 — Agent** (`agent/energy_agent.py`): Claude-powered Python script. Runs every 30 min via cron. Reads HA sensor state + Amber price forecast + Solcast solar forecast, reasons about trade-offs, sets `backup_reserve_percent`, Powerwall mode, and Zappi mode. Logs decisions to `agent/agent_decisions.log` (plain text) and `agent/decisions.jsonl` (structured JSON per cycle). The agent handles all *strategic* decisions.
 
+Key agent capabilities added 2026-06-02:
+- **Demand-window reserve guard (Rule 2 backstop)**: at the start of every `run_agent()` cycle, before the LLM runs — if peak month AND 15:00–21:00 AND `reserve > 10%`, immediately calls Tessie API to set reserve=5%, bypassing HA rest_commands entirely. Prevents the June 2 failure mode (reserve stranded at charging floor during demand window, battery unable to discharge).
+- **HA rest_command health check**: each cycle checks `/api/services` for the `rest_command` domain; warns loudly if missing so config failures surface immediately rather than silently for 36h.
+- **Daily energy journal** (`agent/log_daily_energy.py`, cron 21:05): comprehensive per-day record — solar forecast/actual, battery SoC trajectory, grid import/export by window, price profiles, demand window pass/fail (billing-accurate: peak 30-min avg kW), agent decision rollup. Persisted to `agent/daily_energy.jsonl`. Supersedes the narrower `log_demand_window.py`.
+- **`sensor.demand_window_monitor`** pushed to HA via REST API (no config change) each hour + after daily recompute. Feeds two Markdown dashboard cards: (1) peak 30-min import bars per day, (2) pass/fail timeline with min SoC.
+- **June 2 demand window breach**: SoC reached only 81% (target 85%), reserve stuck at 80%. `battery_pre_demand_window_reset` automation fired at 2:55pm but errored — `rest_command` had failed to load at HA startup on June 1 (truncated payload, fixed but HA never restarted). Grid covered cooking load at 7pm. Fixed: Tessie API direct call to drop reserve → HA restart → rest_commands now loading cleanly.
+
 Key agent capabilities added 2026-06-01:
 - **Overnight hold (Rule 20)**: `overnight_hold` flag — when nighttime (20:00–07:00) AND price > 10¢ AND SoC > 25%, hold and wait for Solar Sponge rather than charging at overnight rates. `SOLAR_SPONGE_PRICE_THRESHOLD = 10¢` constant controls the threshold. Fires before deferral_limit so it can't be overridden by repeated holds. 60 unit tests.
 - **Battery Forecast card fixes**: evening mode now shows charging status when active (was always showing "solar done · discharging"); goal/projected section hidden after 3pm; reserve now reads Tessie only (was showing stale agent helper value).
@@ -219,6 +226,9 @@ Key agent capabilities added 2026-05-29:
 | `agent/.env` | API keys (gitignored — not in repo) |
 | `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
 | `agent/decisions.jsonl` | Structured JSON decision log — full context per cycle, foundation for analyst agent and accuracy tracking |
+| `agent/log_daily_energy.py` | Daily (21:05 cron) energy journal → `daily_energy.jsonl`. Comprehensive: solar forecast/actual, price by window, battery trajectory, grid import/export, demand window pass/fail (billing-accurate), agent decision rollup. Reads HA history API + decisions.jsonl, no HA config change |
+| `agent/daily_energy.jsonl` | Durable per-day energy record (survives HA recorder rolloff) — source of truth for dashboard cards and future learning agent |
+| `agent/demand_window_summary.py` | Pushes `sensor.demand_window_monitor` into HA via REST API (month peak kW + rolling per-day history). Reads daily_energy.jsonl. Crons: 21:05 + hourly. Feeds two Markdown dashboard cards |
 
 ---
 
@@ -226,7 +236,9 @@ Key agent capabilities added 2026-05-29:
 
 **June 1 demand window — PASSED ✅ (2026-06-01).** Agent correctly held overnight (Rule 20), charged via Solar Sponge 09:30–14:30 (39%→96% at 7–11¢), entered demand window at 99% SoC, zero grid imports 3–9pm. Rule 2 maintained. Backstop automation did not need to fire.
 
-**LP optimiser horizon extension (June 2 — next priority).** `agent/optimizer.py` needs synthetic prices appended beyond Amber's ~6h horizon (p25/p75-by-hour from `load_price_history()`). Without this the LP under-charges on peak mornings because it never sees the 17:00–21:00 demand penalty. This is the blocker before any cutover to LP-authoritative.
+**June 2 demand window — PARTIAL BREACH ⚠️ (2026-06-02).** SoC reached 81% (target 85%). `battery_pre_demand_window_reset` (2:55pm automation) errored silently — `rest_command` had failed to load at the June 1 HA restart due to a truncated payload. Reserve stuck at 80% all evening; battery couldn't discharge; grid covered cooking load at 7pm (~2.7 kW peak 30-min import). Fixed: Tessie API direct call + HA restart. **Agent pre-flight demand-window reserve guard now prevents recurrence** — drops reserve to 5% via Tessie directly at the start of every demand-window cycle, independent of HA.
+
+**LP optimiser horizon extension (next priority, was June 2 — carried over).** `agent/optimizer.py` needs synthetic prices appended beyond Amber's ~6h horizon (p25/p75-by-hour from `load_price_history()`). Without this the LP under-charges on peak mornings because it never sees the 17:00–21:00 demand penalty. This is the blocker before any cutover to LP-authoritative.
 
 **Three-way divergence watch** — `/morning` now reports LLM vs deterministic vs LP. Live `optimizer_verdict` accumulates from June 1 11:00 cron. Target: 48h of live data showing LP correctly pre-charges on peak days → flip `OPTIMIZER_AUTHORITATIVE = True` (target June 4). See todo.md Phase 4b/5.
 

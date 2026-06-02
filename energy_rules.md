@@ -174,6 +174,9 @@ The old logic found the first interval exceeding 30¢ — which means it found n
 - If battery SoC is dangerously low during the demand window, shed non-essential loads rather than import from grid
 - Rule 2 overrides everything — no exception, no matter the price or circumstance
 - During **off-peak months** (Apr, May, Sep, Oct): demand charge does not apply; revert to price-only decisions
+- **Agent pre-flight guard (added 2026-06-02):** at the start of every `run_agent()` cycle, before the LLM runs, the agent checks: if peak month AND 15:00–21:00 AND `reserve > 10%`, it immediately calls Tessie API directly to set reserve=5%. This is a hard override that bypasses HA rest_commands entirely — it fires even if HA has failed to load the rest_command integration (the June 2 failure mode). Logged to stderr as a warning when it fires.
+- **HA rest_command health check (added 2026-06-02):** each cycle also checks `/api/services` for the `rest_command` domain and warns loudly if it's missing — surfaces HA config failures immediately rather than silently for 36h.
+- **Verification (added 2026-06-02):** `agent/log_daily_energy.py` records each peak day's outcome to `agent/daily_energy.jsonl`. The pass/fail metric matches the bill exactly — the **peak clock-aligned 30-minute average import (kW)** over 3–9pm, *not* kWh or instantaneous peak. A day passes if that stays below 0.10 kW (sub-30-min transients the battery covers don't count). The monthly bill is driven by the single worst day's peak, so `sensor.demand_window_monitor` (pushed via REST API, no HA config change) surfaces this month's running max + a rolling per-day history for the dashboard cards.
 
 ### Rule 3 — Avoid Negative Feed-in Tariff (FIT) and Export Penalty
 - If Amber export price goes **below $0/kWh**: stop exporting to grid
