@@ -1,5 +1,39 @@
 # Energy System Control Log
 
+## 2026-06-03 (session 7 — solar-sufficiency hold, LP horizon extension, schema fix)
+
+**Items 1–4 from morning standup — all implemented and tested.**
+
+**Item 1 + 3 — Deterministic layer: home load deduction + solar-sufficiency hold**
+
+Root cause identified for the `peak_target_met` at SoC=25% divergence seen in the morning standup: `kwh_needed_85` was computed against raw Solcast `remaining` kWh, not net of home consumption. On a sunny day with 10+ kWh remaining, the battery looked "covered" even at 25% SoC because home load consuming 7-10 kWh of that solar was not being deducted.
+
+Fix: `net_expected_solar = max(expected_solar - home_load_kw * solar_window_h, 0.0)` is now used in both the peak and non-peak branches. For peak: window = hours_to_2:55pm. For non-peak: capped at 7h.
+
+`peak_target_met` renamed to `peak_solar_will_cover` when SoC < 85% — the two cases are semantically different and were causing confusion in divergence analysis.
+
+New `solar_will_cover` rule in the non-peak path: if reliable solar forecast (net of home load) can cover the gap to cost_target before 1pm, hold. This encodes the human insight from the morning standup: on a sunny forecast day, hold-until-you-must is correct — not trickle-charging from grid.
+
+68 tests, all pass (was 60).
+
+**Item 2 — LP optimiser horizon extension**
+
+The core divergence cause: Amber's ~6h forecast window ends before the 15:00–21:00 demand window on peak mornings, so the LP never sees the `demand_penalty_c = 1000 ¢/kWh` on those slots and holds/solar-only instead of pre-charging.
+
+Fix: `_build_hourly_price_model()` builds a per-hour-of-day median price table from the last 7 days of decisions.jsonl. `_extend_forecast_to_demand_window()` appends synthetic 30-min slots from the end of the Amber forecast to 22:00 using this model. The LP optimizer now receives the extended forecast each cycle.
+
+New optimizer test 7: cloudy peak morning + zero solar + short horizon → LP may hold; same scenario + extended horizon showing demand window → LP pre-charges. All 12 optimizer tests pass.
+
+**Item 4 — daily_energy.jsonl schema**
+
+- `solar.accuracy` renamed to `solar.forecast_vs_actual_ratio` (explicit semantics; 0.17 on Jun 2 = solar delivered only 17% of forecast)
+- `agent.forecast_accuracy_category` added: "good"/"poor"/"unreliable" based on fraction of daytime cycles with unreliable solar. Jun 2 would score "unreliable"; Jun 1 would score "good". This is the #1 predictor of demand-window breach days for a future learning agent.
+
+**Demand window today (Jun 3):**
+SoC was 30% at 08:30, reserve set to 85% via Solar Sponge (7¢). Watch whether solar delivers today and whether the agent needs to escalate to autonomous. The new `solar_will_cover` rule should prevent unnecessary trickle-charging if the solar forecast is accurate.
+
+---
+
 ## 2026-06-02 (session 6 continued — demand window incident + HA rest_command fix)
 
 **Demand window breach incident — 7pm grid import during cooking**
