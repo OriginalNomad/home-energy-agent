@@ -845,7 +845,7 @@
   conditions:
     - condition: time
       after: "09:00:00"
-      before: "17:00:00"
+      before: "15:00:00"   # stop before demand window — agent handles 3pm+ behaviour
     - condition: numeric_state
       entity_id: sensor.solcast_pv_forecast_power_now
       above: 500
@@ -860,9 +860,9 @@
         message: >
           Solcast expects {{ states('sensor.solcast_pv_forecast_power_now') | int }}W right now,
           inverter showing {{ states('sensor.solar_power_w') | int }}W.
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}%,
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int }}%,
           price {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
-          Solar sponge check will switch to grid charging at next 30-min tick if price is cheap.
+          Agent will handle charging strategy at next 30-min cycle.
 
 # ─────────────────────────────────────────────────────────────
 # LOW SOC EMERGENCY CHARGE
