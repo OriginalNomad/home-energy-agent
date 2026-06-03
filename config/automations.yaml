@@ -541,8 +541,8 @@
 # no need to keep the 5% discharge floor active overnight.
 # ─────────────────────────────────────────────────────────────
 - id: battery_post_demand_window_restore
-  alias: "Battery: Restore 20% reserve at 9pm after demand window"
-  description: "Rule 2 — peak months only: restore normal 20% floor after 3-9pm demand window"
+  alias: "Battery: Restore 5% reserve floor at 9pm after demand window"
+  description: "Rule 2 — peak months only: restore 5% floor after 3-9pm demand window so battery can discharge overnight"
   triggers:
     - trigger: time
       at: "21:00:00"
@@ -557,8 +557,8 @@
       data:
         title: "✅ Demand Window Over"
         message: >
-          9pm — Demand window ended. Reserve restored to 5% floor.
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}%.
+          9pm — Demand window ended. Reserve floor restored to 5%.
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int }}%.
 
 # ─────────────────────────────────────────────────────────────
 # RULE 2: Demand window low battery warning (peak months only)
