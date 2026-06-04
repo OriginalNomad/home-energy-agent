@@ -18,6 +18,21 @@
 #   rest_command.powerwall_set_mode             mode: self_consumption | autonomous | backup
 
 # ─────────────────────────────────────────────────────────────
+# STARTUP: Restore virtual sensors pushed via REST API
+# These sensors are lost on every HA restart. Run the push
+# script 30s after start to give integrations time to load.
+# ─────────────────────────────────────────────────────────────
+- id: restore_virtual_sensors_on_startup
+  alias: "System: Restore virtual sensors after restart"
+  description: "Re-pushes weather and demand window sensors lost on HA restart"
+  triggers:
+    - trigger: homeassistant
+      event: start
+  actions:
+    - delay: "00:00:30"
+    - action: shell_command.push_virtual_sensors
+
+# ─────────────────────────────────────────────────────────────
 # RULE 6: Set minimum backup reserve floor on startup
 # Ensures baseline 20% reserve is set after HA restarts
 # ─────────────────────────────────────────────────────────────

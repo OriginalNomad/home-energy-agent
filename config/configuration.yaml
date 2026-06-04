@@ -330,3 +330,9 @@ rest_command:
       Authorization: "Bearer BEVtCQYyFhwkEu02WK4ONIAoyiJwGP9z"
       "Content-Type": "application/json"
     payload: '{"default_real_mode": "{{ mode }}"}'
+
+shell_command:
+  push_virtual_sensors: >
+    /usr/bin/python3
+    "/Users/simonmonk/Simon Projects/Home Energy Console/agent/push_virtual_sensors.py"
+    >> /tmp/push_virtual_sensors.log 2>&1
