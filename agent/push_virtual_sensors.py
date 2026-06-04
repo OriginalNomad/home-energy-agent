@@ -12,7 +12,7 @@ Pushes:
   - sensor.demand_window_monitor    (demand window pass/fail card data)
 """
 
-import json
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,10 +26,9 @@ HA_TOKEN   = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIxZjQxNDVmOTBjYTI0Z
 HA_HEADERS = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
 TZ         = pytz.timezone("Australia/Sydney")
 
-DAILY_ENERGY_FILE = Path(__file__).parent / "daily_energy.jsonl"
+DEMAND_SUMMARY = Path(__file__).parent / "demand_window_summary.py"
 
-PEAK_MONTHS = {11, 12, 1, 2, 3, 6, 7, 8}
-PASS_KW_THRESHOLD = 0.10
+DEMAND_SUMMARY = Path(__file__).parent / "demand_window_summary.py"
 
 
 # ------------------------------------------------------------------------------
@@ -124,63 +123,18 @@ def push_weather():
 
 
 # ------------------------------------------------------------------------------
-# Demand window monitor (mirrors demand_window_summary.py)
+# Demand window monitor — delegate to demand_window_summary.py
 # ------------------------------------------------------------------------------
 
 def push_demand_window():
-    now = datetime.now(TZ)
-    is_peak = now.month in PEAK_MONTHS
-
-    records = {}
-    if DAILY_ENERGY_FILE.exists():
-        for line in DAILY_ENERGY_FILE.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-                records[r["date"]] = r
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-    # Build rolling history for the current demand window month group
-    history = []
-    for date_str in sorted(records):
-        rec = records[date_str]
-        if not rec.get("peak_day"):
-            continue
-        dw = rec.get("demand_window", {})
-        passed = dw.get("passed")
-        peak_kw = dw.get("peak_30min_import_kw", 0.0)
-        min_soc = dw.get("min_soc_pct")
-        history.append({
-            "date": date_str,
-            "passed": passed,
-            "peak_kw": peak_kw,
-            "min_soc_pct": min_soc,
-        })
-
-    history = history[-14:]  # last 14 peak days
-
-    passed_count  = sum(1 for h in history if h["passed"] is True)
-    failed_count  = sum(1 for h in history if h["passed"] is False)
-    latest_peak   = history[-1]["peak_kw"] if history else 0.0
-    month_max_kw  = max((h["peak_kw"] for h in history), default=0.0)
-
-    state = f"{round(month_max_kw, 3)} kW"
-    attributes = {
-        "friendly_name": "Demand Window Monitor",
-        "passed_count":   passed_count,
-        "failed_count":   failed_count,
-        "latest_peak_kw": latest_peak,
-        "month_max_kw":   round(month_max_kw, 3),
-        "is_peak_month":  is_peak,
-        "history":        history,
-        "unit_of_measurement": "kW",
-    }
-    ha_set_state("sensor.demand_window_monitor", state, attributes)
-    print(f"  pushed sensor.demand_window_monitor = {state} "
-          f"({passed_count} passed / {failed_count} failed)")
+    result = subprocess.run(
+        [sys.executable, str(DEMAND_SUMMARY), "--post"],
+        capture_output=True, text=True,
+    )
+    if result.stdout:
+        print(f"  {result.stdout.strip()}")
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "demand_window_summary.py failed")
 
 
 # ------------------------------------------------------------------------------
