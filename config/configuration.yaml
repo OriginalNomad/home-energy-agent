@@ -283,7 +283,10 @@ template:
           {% set home_load_estimate = home_load_kw * hours_to_3pm %}
           {% set net_solar = [remaining_solar - home_load_estimate, 0] | max %}
           {% set target = (95 - (net_solar / 13.5 * 100)) | round(0) | int %}
-          {{ [[target, 5] | max, 95] | min }}
+          {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
+          {% set is_peak = now().month in peak_months %}
+          {% set floor = 85 if (is_peak and now_h < 15) else 5 %}
+          {{ [[target, floor] | max, 95] | min }}
 
 
 # Tessie Powerwall — polled every 2 minutes
