@@ -52,8 +52,15 @@ def load_records() -> list[dict]:
 
 
 def build_summary(records: list[dict]) -> dict:
+    now = datetime.now(TZ)
+    today_str = now.strftime("%Y-%m-%d")
+    # Exclude today's record if the demand window hasn't closed yet (before 21:05).
+    # An intra-day run produces a partial result that would show a false pass/fail.
+    if records and records[-1].get("date") == today_str and now.hour < 21:
+        records = records[:-1]
+
     recent = records[-ROLLING_DAYS:]
-    this_month = datetime.now(TZ).strftime("%Y-%m")
+    this_month = now.strftime("%Y-%m")
 
     def dw(r):
         return r.get("demand_window") or {}
