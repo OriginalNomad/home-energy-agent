@@ -644,6 +644,7 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
                                     5),
         "actions":              actions_taken,
         "summary":              summary,
+        "demand_reserve_guard_fired": _demand_reserve_guard_fired,
     }
 
     goal_3pm, proj_3pm = _compute_projected_3pm(now)
@@ -1981,6 +1982,7 @@ def run_agent(dry_run: bool = False):
     # stranded above 10%, the Powerwall can't discharge — grid covers home load and
     # sets a demand ratchet charge. Drop it to 5% via Tessie directly, bypassing HA
     # rest_commands entirely (those may be broken on an HA restart, as happened June 2).
+    _demand_reserve_guard_fired = False
     try:
         _now_pre = datetime.now(SYDNEY_TZ)
         _is_peak_pre = _now_pre.month in PEAK_MONTHS
@@ -1993,6 +1995,7 @@ def run_agent(dry_run: bool = False):
                       f" window (soc={_soc_pre}%) — dropping to 5% via Tessie directly",
                       file=sys.stderr)
                 set_powerwall_reserve(5)
+                _demand_reserve_guard_fired = True
     except Exception as _exc:
         print(f"  Warning: demand-window reserve guard failed: {_exc}", file=sys.stderr)
 
