@@ -154,6 +154,45 @@ def soc_at(series: list, target: datetime) -> Optional[int]:
     return round(best) if best is not None else None
 
 
+def cost_cents(grid_series: list, price_series: list,
+               fit_series: list, start: datetime, end: datetime) -> Optional[float]:
+    """Estimate net electricity cost in ¢ over [start, end].
+    Import cost (grid_kw > 0, price $/kWh) minus export FIT credit (grid_kw < 0, fit $/kWh).
+    """
+    if not grid_series or not price_series:
+        return None
+
+    # Build a unified timeline of all events
+    events: list[datetime] = sorted({ts for ts, _ in grid_series + price_series + fit_series
+                                      if start <= ts <= end})
+    if not events:
+        return None
+
+    def val_at(series: list, t: datetime) -> Optional[float]:
+        best = None
+        for ts, v in series:
+            if ts <= t:
+                best = v
+            else:
+                break
+        return best
+
+    total_c = 0.0
+    for i in range(len(events) - 1):
+        t0, t1 = events[i], events[i + 1]
+        dt_h = (t1 - t0).total_seconds() / 3600.0
+        g = val_at(grid_series, t0)
+        p = val_at(price_series, t0)   # $/kWh
+        f = val_at(fit_series, t0)     # $/kWh
+        if g is None or p is None:
+            continue
+        if g > 0:
+            total_c += g * (p * 100) * dt_h   # import cost in ¢
+        elif g < 0 and f is not None:
+            total_c += g * (f * 100) * dt_h   # export credit (g negative → subtracts)
+    return round(total_c, 1)
+
+
 def price_stats(series: list, start: datetime, end: datetime) -> dict:
     """Min/max/mean price (¢/kWh) over a window. Input is $/kWh from Amber."""
     vals = []
@@ -243,6 +282,27 @@ def agent_summary(cycles: list) -> dict:
 
     costs = [c.get('est_cost_usd', 0) for c in cycles if c.get('est_cost_usd')]
 
+    # Overnight LLM charges: cycles where LLM took a charge action between 20:00–07:00
+    overnight_llm_charges = sum(
+        1 for c in cycles
+        if c.get('actions')
+        and int((c.get('ts', '') or '')[11:13] or 12) >= 20
+           or int((c.get('ts', '') or '')[11:13] or 12) < 7
+    )
+    # Fix: rebuild with proper hour check
+    overnight_llm_charges = 0
+    for c in cycles:
+        ts_str = c.get('ts', '') or ''
+        try:
+            h = int(ts_str[11:13])
+        except (ValueError, IndexError):
+            continue
+        if (h >= 20 or h < 7) and c.get('actions'):
+            overnight_llm_charges += 1
+
+    # Demand reserve guard: any cycle where the pre-flight backstop fired
+    demand_reserve_guard_fired = any(c.get('demand_reserve_guard_fired') for c in cycles)
+
     # Forecast accuracy category: what fraction of daytime cycles had unreliable solar?
     daytime_cycles = [c for c in cycles if 9 <= int((c.get("ts", "") or "")[11:13] or 0) < 20]
     if daytime_cycles and len(daytime_cycles) >= 3:
@@ -268,6 +328,8 @@ def agent_summary(cycles: list) -> dict:
         "goal_3pm_soc": goal,
         "projected_3pm_soc_at_midday": projected,
         "agent_cost_usd": round(sum(costs), 3) if costs else None,
+        "overnight_llm_charges": overnight_llm_charges,
+        "demand_reserve_guard_fired": demand_reserve_guard_fired,
     }
 
 
@@ -324,6 +386,7 @@ def compute_day(day) -> dict:
     # --- Battery SoC trajectory ---
     soc_midnight = soc_at(soc_num, day_start + timedelta(minutes=5))
     soc_9am  = soc_at(soc_num, TZ.localize(datetime(day.year, day.month, day.day, 9, 0)))
+    soc_2pm  = soc_at(soc_num, TZ.localize(datetime(day.year, day.month, day.day, 14, 0)))
     soc_3pm  = soc_at(soc_num, demand_start)
     soc_9pm  = soc_at(soc_num, demand_end)
     soc_min_demand = None
@@ -377,6 +440,7 @@ def compute_day(day) -> dict:
         "battery": {
             "soc_midnight": soc_midnight,
             "soc_9am": soc_9am,
+            "soc_2pm": soc_2pm,
             "soc_3pm": soc_3pm,
             "soc_9pm": soc_9pm,
             "soc_min_demand_window": soc_min_demand,
@@ -394,6 +458,7 @@ def compute_day(day) -> dict:
             "export_kwh": grid_export_kwh,
             "import_sponge_kwh": grid_import_sponge_kwh,
             "import_demand_kwh": grid_import_demand_kwh,
+            "net_cost_c": cost_cents(grid_num, price_raw, fit_raw, day_start, day_end),
         },
 
         # --- Prices ---
