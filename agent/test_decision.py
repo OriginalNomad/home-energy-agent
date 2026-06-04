@@ -132,8 +132,45 @@ def test_peak_sunny_low_soc_home_load_deducted():
     ctx = ea.compute_decision_context(state, flat(13), [], now_at(7))
     r = ctx["recommended"]
     check("peak low SoC net solar correctly deducted (no solar_will_cover)", r["rule_fired"] != "peak_solar_will_cover", r)
-    check("peak 7am no urgency → peak_on_track", r["rule_fired"] == "peak_on_track", r)
-    check("peak_on_track is hold (escalation comes later)", r["action"] == "hold", r)
+    # flat(13) forecast at price=16 → 13¢ window is ahead → correctly waits for it
+    check("peak 7am cheaper window ahead → wait_for_cheap_go_hard", r["rule_fired"] == "wait_for_cheap_go_hard", r)
+    check("wait_for_cheap_go_hard is hold (wait for the cheap slot)", r["action"] == "hold", r)
+
+
+def test_peak_wait_for_cheap_go_hard():
+    # SoC=16%, 8:30am, price=17¢, Solar Sponge arrives at 10am (11¢ in forecast).
+    # Solar is poor — grid charge needed. Cheaper window (11¢) is ahead and feasible.
+    # → should hold and wait for that slot (wait_for_cheap_go_hard).
+    prices = [17.0] * 3 + [11.0] * 12 + [16.0] * 9   # 17¢ for 1.5h, then 11¢
+    state = mk_state(16, 8, "poor", 0.3, 5.0, price=17.0)
+    ctx = ea.compute_decision_context(state, fc(prices), [], now_at(8, 30))
+    r = ctx["recommended"]
+    check("wait_for_cheap_go_hard when cheaper window ahead", r["rule_fired"] == "wait_for_cheap_go_hard", r)
+    check("action is hold (waiting)", r["action"] == "hold", r)
+    check("go_hard_slot populated", ctx.get("go_hard_slot") is not None, ctx)
+    check("go_hard_slot price is 11¢", ctx["go_hard_slot"]["price_c"] == 11.0, ctx)
+
+
+def test_peak_charge_now_when_no_cheaper_slot():
+    # SoC=16%, 8:30am, all prices flat at 17¢. No cheaper slot available.
+    # → should charge now at self_consumption (peak_charge_now).
+    state = mk_state(16, 8, "poor", 0.3, 5.0, price=17.0)
+    ctx = ea.compute_decision_context(state, flat(17), [], now_at(8, 30))
+    r = ctx["recommended"]
+    check("peak_charge_now when no cheaper slot", r["rule_fired"] == "peak_charge_now", r)
+    check("action is charge", r["action"] == "charge", r)
+    check("mode is self_consumption (not urgent enough for autonomous)", r["mode"] == "self_consumption", r)
+
+
+def test_peak_sponge_go_hard():
+    # SoC=40%, 10:30am (in Solar Sponge), price=11¢, solar poor, kwh_needed_85 > 0.
+    # Not yet at deadline urgency. → should go autonomous now (peak_sponge_go_hard).
+    state = mk_state(40, 10, "poor", 0.3, 3.0, price=11.0)
+    ctx = ea.compute_decision_context(state, flat(11), [], now_at(10, 30))
+    r = ctx["recommended"]
+    check("peak_sponge_go_hard when in sponge and grid charge needed", r["rule_fired"] == "peak_sponge_go_hard", r)
+    check("action is charge", r["action"] == "charge", r)
+    check("mode is autonomous (go hard)", r["mode"] == "autonomous", r)
 
 
 def test_peak_target_met_label_at_85():
