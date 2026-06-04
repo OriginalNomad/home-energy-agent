@@ -664,7 +664,7 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         record["computed_context"]  = {k: ctx[k] for k in (
             "zero_solar_day", "deferral_detected", "sliding_forecast", "solar_unreliable",
             "cost_target_pct", "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85",
-            "spread_c", "forward_min_c")}
+            "spread_c", "forward_min_c", "go_hard_slot")}
         soc_now      = record.get("soc")
         actual_charge = ((reserve_set is not None and soc_now is not None and reserve_set > soc_now)
                          or mode_set == "autonomous")
@@ -948,6 +948,41 @@ def _detect_deferral(recent_records: list[dict], current_price: float) -> bool:
         else:
             break
     return holds >= 2
+
+
+def _cheapest_go_hard_slot(
+    price_forecast: list[dict],
+    current_price_c: float,
+    soc: float,
+    home_load_kw: float,
+    hours_to_deadline: float,
+    safety_buffer_h: float = 0.5,
+    min_saving_c: float = 1.0,
+) -> "tuple[float, float] | None":
+    """Find the cheapest upcoming slot where fast-charging to 85% before the deadline is still feasible.
+
+    Conservative SoC projection at each slot: home load drains the battery during the wait,
+    no solar credit (pessimistic — real outcome will be better when solar is producing).
+
+    Returns (cheapest_price_c, hours_until_slot) or None if no slot is cheaper by min_saving_c.
+    """
+    best_price = current_price_c - min_saving_c  # must beat this to be worth returning
+    best_hours: float | None = None
+    for i, f in enumerate(price_forecast):
+        hours_until = (i + 1) * 0.5          # 30-min slots
+        slot_price  = f.get("cents_kwh", current_price_c)
+        # Conservative SoC at this slot (home load draining, no solar)
+        soc_at_slot = max(5.0, soc - home_load_kw * hours_until / USABLE_KWH * 100)
+        kwh_needed  = max((0.85 - soc_at_slot / 100) * USABLE_KWH, 0.0)
+        fill_fast_h = kwh_needed / FAST_KW
+        # Feasible = can finish fast-fill AND have safety buffer before deadline
+        if hours_until + fill_fast_h + safety_buffer_h <= hours_to_deadline:
+            if slot_price < best_price:
+                best_price = slot_price
+                best_hours = hours_until
+    if best_hours is not None:
+        return best_price, best_hours
+    return None
 
 
 def _detect_sliding_forecast(recent_records: list[dict], current_price: float,
@@ -1341,6 +1376,22 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
         elif in_sponge and now_h < 13 and soc < 50:
             rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
+        elif in_sponge and kwh_needed_85 > 0 and fill_fast_85 < hours_to_2_55 - 0.5:
+            # We're in the Solar Sponge (cheap window) and still need grid charge.
+            # Go hard now — autonomous fills in fill_fast_85_h, revert automation stops it.
+            # Better than self_consumption which would trickle slowly through the same window.
+            rec = verdict("charge", 85, "autonomous", "peak_sponge_go_hard")
+        elif kwh_needed_85 > 0:
+            # Grid charge needed but not yet at urgency. Look for a cheaper upcoming slot
+            # where we can still fast-fill before the deadline. If one exists, hold and wait;
+            # if not, current price is as good as it gets — charge now at self_consumption.
+            best = _cheapest_go_hard_slot(
+                price_forecast, price, soc, home_load_kw, hours_to_2_55
+            )
+            if best is not None:
+                rec = verdict("hold", None, None, "wait_for_cheap_go_hard")
+            else:
+                rec = verdict("charge", 85, "self_consumption", "peak_charge_now")
         else:
             rec = verdict("hold", None, None, "peak_on_track")
     elif in_sponge and now_h < 13 and soc < 50:
@@ -1406,6 +1457,11 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "spread_c":            round(spread, 1),
         "forward_min_c":       round(forward_min, 1),
         "fit_price_c":         round(fit_price, 1),
+        "go_hard_slot":        (lambda b: {"price_c": round(b[0], 1), "hours_until": round(b[1], 1)}
+                                if b else None)(
+                                    _cheapest_go_hard_slot(price_forecast, price, soc, home_load_kw, hours_to_2_55)
+                                    if is_peak and kwh_needed_85 > 0 else None
+                                ),
         "recommended":         rec,
         "ev_recommended":      ev_rec,
     }
@@ -1429,7 +1485,10 @@ def _format_decision_context(ctx: dict) -> str:
         f"autonomous {ctx['fill_fast_h']}h\n"
         f"  to 85% by 2:55pm: need {ctx['kwh_needed_85']}kWh — self_consumption {ctx['fill_slow_85_h']}h / "
         f"autonomous {ctx['fill_fast_85_h']}h\n"
-        f"  >>> BATTERY: {r['action']} target={r['target_pct']}% mode={r['mode']} (rule: {r['rule_fired']})\n"
+        + (f"  go_hard_slot: cheapest feasible slot at {ctx['go_hard_slot']['price_c']}¢ in "
+           f"{ctx['go_hard_slot']['hours_until']}h — wait then autonomous\n"
+           if ctx.get('go_hard_slot') else "")
+        + f"  >>> BATTERY: {r['action']} target={r['target_pct']}% mode={r['mode']} (rule: {r['rule_fired']})\n"
         f"  fit_price: {round(ctx.get('fit_price_c', 0) or 0, 1)}¢   "
         f"  >>> EV: zappi={ctx['ev_recommended']['zappi_mode']} (rule: {ctx['ev_recommended']['rule_fired']})"
     )
@@ -1501,9 +1560,11 @@ TOOLS = [
             "'autonomous': fast ~5 kW grid charge. ALWAYS pair with set_powerwall_reserve(100) — "
             "this is the export guard. A HA safety net also reverts to self_consumption within 30s "
             "if export is detected, so autonomous is safe. "
-            "Use autonomous only when the price spread justifies urgency: spread > 8¢ AND need "
-            ">15% SoC AND window is short (<2h), OR peak month demand window risk (see system prompt). "
-            "A 4¢ spread does NOT justify autonomous — use self_consumption or hold."
+            "Use autonomous when: (1) price spread > 8¢ AND need >15% AND window short (<2h); "
+            "(2) peak month deadline pressure (fill_fast_85_h close to hours_to_deadline); "
+            "(3) peak month + in Solar Sponge + grid charge still needed (go_hard_at_sponge strategy — "
+            "fill fast at the cheapest window rather than trickling slowly through it). "
+            "A 4¢ spread does NOT justify autonomous outside Solar Sponge."
         ),
         "input_schema": {
             "type": "object",
@@ -1755,8 +1816,8 @@ Each additional 30-minute hold costs you charging time, not money.
 Every cycle from 9am, run this calculation:
   kWh_needed = (0.85 − soc/100) × 13.5 − expected_solar_to_2:55pm
               (use 0 for solar if forecast is poor or unreliable)
-  hours_to_fill_fast = kWh_needed / 5.0   (autonomous)
-  hours_to_fill_slow = kWh_needed / 1.7   (self_consumption)
+  hours_to_fill_fast = kWh_needed / 5.0   (autonomous, 5 kW)
+  hours_to_fill_slow = kWh_needed / 1.7   (self_consumption, 1.7 kW)
   hours_remaining    = hours until 14:55
 
   hours_to_fill_fast ≥ hours_remaining   → autonomous NOW (already very tight, no time to waste)
@@ -1768,6 +1829,28 @@ Paying 5¢/kWh extra on 10 kWh costs 50¢. Always charge — the maths is not cl
 
 Quick check: past 12:30pm + battery below 40% + peak month = switch to autonomous immediately.
 Past 1:30pm + battery below 70% + peak month = switch to autonomous immediately.
+
+**PEAK MONTHS — "wait and go hard" strategy:**
+When not yet at deadline urgency but grid charge IS needed (solar won't cover the gap),
+do NOT default to slow self_consumption now. Instead:
+1. Scan the price forecast for the cheapest slot where:
+     hours_until_slot + hours_to_fill_fast + 0.5h ≤ hours_remaining
+   (i.e., you can still fast-fill and hit the deadline after waiting for that slot)
+2. Project SoC at that slot conservatively (home load drains battery, no solar credit).
+3. If that cheapest slot is ≥1¢ cheaper than now: HOLD and wait for it. Report in your
+   summary: "cheapest feasible slot: Xh away at Y¢ — will go autonomous then".
+4. Once you're at (or past) that cheapest slot and grid charge is still needed:
+   use AUTONOMOUS (5 kW) — not self_consumption. Fill fast at the cheap price and be done
+   in fill_fast_85_h, rather than dribbling at 1.7 kW for fill_slow_85_h.
+   The battery_autonomous_revert_target_reached automation stops charging automatically.
+5. If no cheaper slot exists in the feasible window (all upcoming prices ≥ now):
+   charge at self_consumption now — current price is as good as it gets.
+
+The deterministic helper provides `go_hard_slot` in its reference block when this applies.
+Example: 8:30am, SoC=16%, price=17¢, Solar Sponge at 10am (11¢), fill_fast=0.9h, deadline 6.4h away.
+→ Hold until 10am (1.5h wait). At 10am: go autonomous. Fill in 0.9h. Done by 11am at 11¢.
+   Compare: self_consumption from now would trickle through 17¢ AND 11–14¢ slots over 2.6h,
+   costing more AND occupying the battery charger during the most solar-productive hours.
 
 **NON-PEAK MONTHS — soft deadline: avoid evening spike:**
 Use hours_to_cheap_end (step 4 above) as your deadline — it automatically adapts to when
