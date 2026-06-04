@@ -1842,9 +1842,19 @@ do NOT default to slow self_consumption now. Instead:
 4. Once you're at (or past) that cheapest slot and grid charge is still needed:
    use AUTONOMOUS (5 kW) — not self_consumption. Fill fast at the cheap price and be done
    in fill_fast_85_h, rather than dribbling at 1.7 kW for fill_slow_85_h.
-   The battery_autonomous_revert_target_reached automation stops charging automatically.
+   The battery_autonomous_revert_target_reached automation stops charging automatically
+   within 30s of hitting the target — you do NOT need to switch mode at the next cycle.
 5. If no cheaper slot exists in the feasible window (all upcoming prices ≥ now):
    charge at self_consumption now — current price is as good as it gets.
+
+**MID-FILL RULE — do not downgrade autonomous while charging:**
+If mode_before = "autonomous" AND soc < reserve (i.e. actively charging toward a target),
+DO NOT switch to self_consumption unless:
+  - Prices have risen significantly (>5¢ above when autonomous was triggered), OR
+  - A new, materially cheaper window has appeared in the forecast (>3¢ below current).
+The battery_autonomous_revert_target_reached automation will handle stopping at the target.
+Switching to self_consumption mid-fill wastes the cheap window — you'd spend fill_slow_h
+more time at the cheap price instead of fill_fast_h, increasing exposure to a price spike.
 
 The deterministic helper provides `go_hard_slot` in its reference block when this applies.
 Example: 8:30am, SoC=16%, price=17¢, Solar Sponge at 10am (11¢), fill_fast=0.9h, deadline 6.4h away.
