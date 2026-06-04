@@ -91,6 +91,7 @@ SOLAR_SPONGE_PRICE_THRESHOLD = 10.0   # ¢ — if overnight price > this, wait f
 # Populated by get_current_state() / get_price_forecast() during each cycle,
 # then read by log_decision() to write the structured JSON record.
 _cycle_context: dict = {}
+_demand_reserve_guard_fired: bool = False
 
 SYDNEY_TZ   = pytz.timezone("Australia/Sydney")
 PEAK_MONTHS = {11, 12, 1, 2, 3, 6, 7, 8}   # months with demand window
