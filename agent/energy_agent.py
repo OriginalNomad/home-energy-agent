@@ -1376,11 +1376,15 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
         elif in_sponge and now_h < 13 and soc < 50:
             rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
-        elif in_sponge and kwh_needed_85 > 0 and fill_fast_85 < hours_to_2_55 - 0.5:
-            # We're in the Solar Sponge (cheap window) and still need grid charge.
-            # Go hard now — autonomous fills in fill_fast_85_h, revert automation stops it.
-            # Better than self_consumption which would trickle slowly through the same window.
-            rec = verdict("charge", 85, "autonomous", "peak_sponge_go_hard")
+        elif in_sponge and kwh_needed_85 > 0:
+            # In Solar Sponge with grid charge still needed. Receding-horizon rate choice:
+            # use autonomous (5kW) only when self_consumption won't fit the deadline;
+            # otherwise self_consumption is fine — next cycle will recalculate with fresher
+            # solar and price data and may downgrade further if solar improves.
+            if fill_slow_85 >= hours_to_2_55 - 1.0:
+                rec = verdict("charge", 85, "autonomous", "peak_sponge_go_hard")
+            else:
+                rec = verdict("charge", 85, "self_consumption", "peak_sponge_selfcons")
         elif kwh_needed_85 > 0:
             # Grid charge needed but not yet at urgency. Look for a cheaper upcoming slot
             # where we can still fast-fill before the deadline. If one exists, hold and wait;
@@ -1847,14 +1851,19 @@ do NOT default to slow self_consumption now. Instead:
 5. If no cheaper slot exists in the feasible window (all upcoming prices ≥ now):
    charge at self_consumption now — current price is as good as it gets.
 
-**MID-FILL RULE — do not downgrade autonomous while charging:**
-If mode_before = "autonomous" AND soc < reserve (i.e. actively charging toward a target),
-DO NOT switch to self_consumption unless:
-  - Prices have risen significantly (>5¢ above when autonomous was triggered), OR
-  - A new, materially cheaper window has appeared in the forecast (>3¢ below current).
-The battery_autonomous_revert_target_reached automation will handle stopping at the target.
-Switching to self_consumption mid-fill wastes the cheap window — you'd spend fill_slow_h
-more time at the cheap price instead of fill_fast_h, increasing exposure to a price spike.
+**RECEDING HORIZON — every cycle is a fresh decision:**
+Do NOT treat mode_before as a reason to continue a previous decision. Every 30 minutes,
+recalculate from scratch: given current SoC, current price, current solar, and fill maths,
+what is the optimal charging rate for the NEXT 30 minutes?
+The answer can change each cycle as solar improves, prices shift, or SoC rises:
+  - 10:00am: solar=0.3kW, need 8.5kWh, fill_slow=5h, deadline=4.9h → autonomous (fill_slow > deadline-1h)
+  - 10:30am: solar=1.5kW, need 6kWh, fill_slow=3.5h, deadline=4.4h → self_consumption (now fits)
+  - 11:00am: solar=3kW, net_solar covers remaining gap → hold (solar will cover it)
+Each cycle, recalculate fill_slow_85_h and fill_fast_85_h against the current deadline.
+Use autonomous when fill_slow_85_h is tight relative to the deadline. Use self_consumption
+when fill_slow_85_h fits comfortably. Hold when net solar covers the remaining gap.
+The battery_autonomous_revert_target_reached automation fires within 30s of hitting the
+target regardless — it is a safety net, not the primary rate controller.
 
 The deterministic helper provides `go_hard_slot` in its reference block when this applies.
 Example: 8:30am, SoC=16%, price=17¢, Solar Sponge at 10am (11¢), fill_fast=0.9h, deadline 6.4h away.
