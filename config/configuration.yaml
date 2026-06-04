@@ -99,21 +99,29 @@ input_number:
     mode: slider
     icon: mdi:battery-charging-high
   ev_ultra_cheap_threshold_c:
-    name: "EV — Ultra-cheap threshold"
+    name: "EV — Ultra-cheap threshold (Fast charge)"
     min: 0
     max: 15
     step: 1
     unit_of_measurement: "¢/kWh"
     mode: slider
     icon: mdi:lightning-bolt
-  ev_eco_gap_c:
-    name: "EV — Eco gap (switch to Fast when cheaper by)"
-    min: 0.5
-    max: 5
-    step: 0.5
+  ev_standard_price_c:
+    name: "EV — Standard charge threshold (Eco)"
+    min: 0
+    max: 30
+    step: 1
     unit_of_measurement: "¢/kWh"
     mode: slider
-    icon: mdi:approximately-equal
+    icon: mdi:ev-station
+  ev_min_charge_price_c:
+    name: "EV — Min SoC charge ceiling (Fast to minimum)"
+    min: 5
+    max: 60
+    step: 1
+    unit_of_measurement: "¢/kWh"
+    mode: slider
+    icon: mdi:battery-alert
   battery_charge_price_threshold_c:
     name: "Battery — Charge price threshold"
     min: 5

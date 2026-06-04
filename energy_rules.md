@@ -185,38 +185,35 @@ The old logic found the first interval exceeding 30¢ — which means it found n
 - Ideally charge battery/EV *before* a negative FIT window begins to maximise absorption capacity
 - **Export penalty**: EA116 applies an infrastructure export charge if solar export during 10am–3pm consistently exceeds an approved threshold — absorb excess solar on-site (battery, EV) rather than exporting during this window
 
-### Rule 4 — EV Charging by State of Charge and Price
-
-**Target SoC: 60%** (not 100% — parallel to battery's 95% target, but without a fixed deadline).
-
-The EV charging logic mirrors the battery system: use `amber_in_cheap_window` as the primary price gate rather than fixed per-tier price ceilings, and apply the same "charge what's needed, let solar cover the rest" philosophy.
+### Rule 4 — EV Charging by Price Thresholds
 
 **Core policy: EV never charges from the Powerwall battery.**
-The Powerwall cannot distinguish EV load from home appliance load on the same circuit. The workaround: use `Eco+` as the default/safe mode (charges only from actual grid export — genuine solar surplus). `Fast` mode is only used when the battery is physically unable to discharge (it's below its reserve floor and charging from grid) or has already met its reserve target.
+Use `Eco+` as the default (charges only from actual solar export past the meter). Override to `Eco` or `Fast` only when the grid price is below user-set thresholds and we are outside the demand window.
+
+**Three user-set price thresholds (HA sliders):**
+- `ev_ultra_cheap_threshold_c` (default 5¢) — price at or below this → **Fast** (charge at full speed)
+- `ev_standard_price_c` (default 10¢) — price at or below this → **Eco** (charge slowly from grid+solar)
+- `ev_min_charge_price_c` (default 20¢) — ceiling for the below-minimum emergency charge; above this price even an EV below min SoC stays on Eco+
 
 **Priority order (first matching condition wins):**
 
 | Priority | Condition | Zappi mode | Notes |
 |----------|-----------|-----------|-------|
-| 1 | Demand window + peak month | `Eco+` | Export surplus only — battery protected, Rule 2 absolute |
-| 2 | Price < 5¢ or negative | `Fast` | Ultra-cheap — charge EV + Powerwall together |
-| 3 | EV SoC < 30% + price < 20¢ | `Fast` | Critical EV level — charge alongside Powerwall |
-| 4 | EV SoC < 60% + cheap window + battery ≥ (reserve − 5%) | `Fast` | Battery at/above its floor — EV safely takes grid |
-| 5 | EV SoC < 60% + cheap window + battery < reserve (charging) | `Fast` | Battery charging from grid, cannot discharge — safe to charge EV simultaneously |
-| 6 | Default | `Eco+` | Export surplus only — battery never discharged for EV |
-
-**Case 4 vs Case 5 logic:**
-- **Case 4** checks `tessie_powerwall_charge ≥ powerwall_backup_reserve − 5`. The reserve is the real floor (cloudy day top-up sets it to 80%; sunny day grid charge target sets it to ~60%). Once the battery has met its floor, EV can safely go Fast.
-- **Case 5** checks `tessie_powerwall_charge < powerwall_backup_reserve`. When battery is *below* its reserve floor, it is actively charging from grid and physically cannot discharge for home or EV load. Fast mode is safe — both charge from grid simultaneously. This handles rainy days where there is no solar export but grid is cheap.
-- **Default Eco+** catches everything else — cheap window closed, or battery in the gap between reserve and grid charge target. EV only charges from actual grid export (solar surplus after all home consumption).
+| 1 | Demand window (3–9pm peak months) | `Eco+` | No grid draw ever during demand window — Rule 2 absolute |
+| 2 | EV SoC < min AND price < ev_min_charge_price_c | `Fast` | Critical EV level — override price gate (ceiling is user-set slider, default 20¢) |
+| 3 | FIT < 0¢ AND battery ≥ 85% AND EV < 100% | `Eco+` | Absorb solar surplus into EV rather than paying to export |
+| 4 | EV SoC ≥ target | `Eco+` | Target met — solar surplus only |
+| 5 | Price < ultra_cheap_c | `Fast` | Exceptional price — charge hard |
+| 6 | Price < standard_price_c | `Eco` | Acceptable price — charge slowly |
+| 7 | Default | `Eco+` | Price too high — solar surplus only |
 
 **Zappi modes:**
 - **Fast**: full rated speed from grid; solar reduces grid draw but charge is grid-led
-- **Eco+**: charges only from actual grid export (power physically exporting to street). Battery discharge does not create export, so EV will not charge when battery is covering home load.
-- **Eco**: throttles to match in-home surplus; battery discharge counts as surplus — EV benefits indirectly. **Not used** — replaced by Eco+ to enforce battery protection policy.
+- **Eco**: charges from grid+solar up to in-home surplus rate; slower than Fast
+- **Eco+**: charges only from actual grid export (power physically exporting past the meter — genuine solar surplus). Battery discharge does not count as export, so EV never draws battery power.
 
 - Respect Rule 2: no EV grid charging during demand window (3–9 pm) in peak months
-- Re-evaluates every 10 min and immediately on price window / plug / demand window changes
+- Re-evaluates every 30 min (agent cycle); slider changes take effect at next cycle
 - *Future: allow user to set departure time for deadline-based charging*
 
 ### Rule 5 — Dump Excess Solar into EV

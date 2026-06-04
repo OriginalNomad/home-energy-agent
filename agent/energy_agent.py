@@ -125,7 +125,8 @@ ENTITIES = {
     "ev_min_soc":           "input_number.ev_min_soc_pct",
     "ev_charge_target":     "input_number.ev_charge_target_pct",
     "ev_ultra_cheap_c":     "input_number.ev_ultra_cheap_threshold_c",
-    "ev_eco_gap_c":         "input_number.ev_eco_gap_c",
+    "ev_standard_price_c":  "input_number.ev_standard_price_c",
+    "ev_min_charge_price_c":"input_number.ev_min_charge_price_c",
     "battery_charge_threshold_c": "input_number.battery_charge_price_threshold_c",
     "battery_max_insurance_floor": "input_number.battery_max_insurance_floor_pct",
     "fit_price":              "sensor.1a_wigram_road_glebe_feed_in_price",
@@ -252,8 +253,9 @@ def get_current_state() -> dict:
             "schedule":    _ev_schedule(now),
         },
         "settings": {
-            "ev_ultra_cheap_c":           _safe_float(ENTITIES["ev_ultra_cheap_c"], 6),
-            "ev_eco_gap_c":               _safe_float(ENTITIES["ev_eco_gap_c"], 1.5),
+            "ev_ultra_cheap_c":           _safe_float(ENTITIES["ev_ultra_cheap_c"], 5),
+            "ev_standard_price_c":        _safe_float(ENTITIES["ev_standard_price_c"], 10),
+            "ev_min_charge_price_c":      _safe_float(ENTITIES["ev_min_charge_price_c"], 20),
             "battery_charge_threshold_c": _safe_float(ENTITIES["battery_charge_threshold_c"], 12),
             "max_insurance_floor_pct":    _safe_float(ENTITIES["battery_max_insurance_floor"], DEFAULT_MAX_INSURANCE_FLOOR),
             # price_stats injected by run_agent() after get_current_state() returns
@@ -1282,47 +1284,39 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     # Sliding forecast: cheap window forecast for 3+ consecutive cycles but never arrives.
     sliding_forecast = _detect_sliding_forecast(recent_records, price, forward_min)
 
-    # ---- EV verdict (Cases 2–5 from system prompt) ----
-    ev           = state.get("ev", {})
-    ev_plugged   = ev.get("plugged_in", False)
-    ev_soc       = ev.get("ev_soc_pct") or 0
-    ev_min       = ev.get("min_soc_pct") or 20
-    ev_target    = ev.get("charge_target_pct") or 80
-    cheap_window = grid.get("in_cheap_window", False)
-    reserve      = battery.get("reserve_pct", 20) or 20
+    # ---- EV verdict ----
+    ev              = state.get("ev", {})
+    ev_plugged      = ev.get("plugged_in", False)
+    ev_soc          = ev.get("ev_soc_pct") or 0
+    ev_min          = ev.get("min_soc_pct") or 20
+    ev_target       = ev.get("charge_target_pct") or 80
 
-    ultra_cheap_c = settings.get("ev_ultra_cheap_c", 6)
-    eco_gap_c     = settings.get("ev_eco_gap_c", 1.5)
+    ultra_cheap_c    = settings.get("ev_ultra_cheap_c", 5)
+    standard_price_c = settings.get("ev_standard_price_c", 10)
+    min_charge_price_c = settings.get("ev_min_charge_price_c", 20)
 
     if not ev_plugged:
         ev_rec = {"zappi_mode": "n/a", "rule_fired": "ev_disconnected"}
-    elif price < ultra_cheap_c:
-        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case2_ultra_cheap"}
-    elif ev_soc < ev_min and price < 20:
+    elif in_demand:
+        # Never pull from grid during demand window — solar-only via Eco+
+        ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_demand_window"}
+    elif ev_soc < ev_min and price < min_charge_price_c:
+        # Below minimum SoC — charge regardless of price (up to 20¢)
         ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case3_below_minimum"}
     elif fit_price < 0 and soc >= 85 and ev_soc < 100:
-        # Case 6: FIT is negative (exporting costs money) AND battery is near full.
-        # Use Eco+ — absorbs actual solar export surplus without pulling from grid.
-        # Fast is not needed here: the goal is to avoid paying to export, not to buy grid power.
+        # FIT negative: absorb solar surplus into EV rather than paying to export
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_case6_negative_fit_solar_dump"}
-    elif ev_soc < ev_target and cheap_window and soc >= (reserve - 5):
-        # Case 4: cheap window, battery OK.
-        # 3-phase strategy: Eco (trickle, grid+solar) while cheapish but cheaper is coming;
-        # Fast at the actual cheapest moment; Eco+ once target met (catches free solar).
-        if forward_min < price - eco_gap_c and ev_soc > ev_min:
-            ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_case4_cheaper_upcoming"}
-        else:
-            ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case4_cheap_battery_ok"}
-    elif ev_soc < ev_target and cheap_window and soc < reserve:
-        # Case 5: battery charging from grid (below reserve). Same 3-phase logic.
-        if forward_min < price - eco_gap_c and ev_soc > ev_min:
-            ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_case5_cheaper_upcoming"}
-        else:
-            ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_case5_battery_charging"}
     elif ev_soc >= ev_target:
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_target_met"}
+    elif price < ultra_cheap_c:
+        # Price below ultra-cheap threshold — charge fast
+        ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_ultra_cheap"}
+    elif price < standard_price_c:
+        # Price below standard threshold — charge slowly (Eco: grid+solar, no battery discharge)
+        ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_standard_price"}
     else:
-        ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_default"}
+        # Price too high — solar-only via Eco+
+        ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_price_too_high"}
 
     # ---- Battery verdict — ordered decision tree, first match wins ----
     def verdict(action, target, mode, rule):
@@ -1594,38 +1588,27 @@ You are the energy optimisation agent for a residential battery system in Glebe,
 
 2. EV NEVER FROM BATTERY
    Zappi default is Eco+ (charges only from actual solar export — battery never discharged for EV).
-   Switch to Fast only when one of these cases applies — check in order, first match wins:
 
-   Read ev.min_soc_pct and ev.charge_target_pct each cycle — these are user-set sliders.
-   Use them instead of the hardcoded values below wherever you see [min] and [target].
-   Defaults if unset: min=20%, target=80%.
+   Read ev.min_soc_pct, ev.charge_target_pct, settings.ev_ultra_cheap_c, settings.ev_standard_price_c,
+   settings.ev_min_charge_price_c each cycle — user-set sliders.
+   Defaults: min=20%, target=80%, ultra_cheap=5¢, standard=10¢, min_charge_ceiling=20¢.
 
-   Case 2: price < 6¢ (ultra-cheap — charge everything up to [target])
-   Case 3: EV SoC < [min] AND price < 20¢ (EV below minimum — charge now)
+   Check in order, first match wins:
+
+   Demand window (3–9pm peak months): always Eco+ — no grid draw during demand window, ever.
+
+   Case 3: EV SoC < [min] AND price < ev_min_charge_price_c → Fast (EV below minimum — override price gate)
+
    Case 6: FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%
-            → exporting is costing money; battery is near full; absorb surplus solar into EV
-            → use Eco+ (solar export only — no grid draw, just captures what would be exported at cost)
-            → do NOT use Fast here: the goal is to avoid paying to export, not to buy grid power
-            → checked before Cases 4/5 — takes priority when FIT is negative and battery full
-   Case 4: EV SoC < [target] AND cheap window AND battery SoC ≥ (reserve_pct − 5%)
-            → battery is at/above its floor, Fast is safe
-            → 3-phase strategy:
-              • cheaper still coming (forward_min_c > 1.5¢ below current) AND EV > [min]:
-                use Eco (trickle from grid+solar) now — charges slowly while waiting
-              • this IS the cheapest moment (forward_min_c within 1.5¢ of current):
-                use Fast — charge hard now
-              • EV reaches [target]: switch to Eco+ — catches free solar overflow only
-   Case 5: EV SoC < [target] AND cheap window AND battery SoC < reserve_pct
-            → battery is BELOW its reserve floor, actively charging from grid
-            → battery physically cannot discharge for EV load
-            → Same 3-phase Eco/Fast/Eco+ logic as Case 4
-            → THIS IS THE COMMON CASE when battery is mid-charge and EV just plugged in
+            → Eco+ (absorbs solar surplus into EV rather than paying to export; no grid draw)
 
-   If none of the above: stay on Eco+.
+   Target met (EV SoC ≥ [target]): Eco+ — catches free solar overflow only.
 
-   Note: "battery discharging" is only a concern when battery SoC > reserve (it can discharge).
-   When battery SoC < reserve, it is charging from grid — Case 5 applies and Fast is safe.
-   Do NOT apply Solar Sponge caution to prevent Fast when Case 5 is active.
+   Price < ev_ultra_cheap_c: Fast — charge hard, price is exceptional.
+
+   Price < ev_standard_price_c: Eco — charge slowly from grid+solar, price is acceptable.
+
+   Otherwise: Eco+ — price too high, solar-only.
 
 EV SCHEDULE (read ev.schedule each cycle):
    ev.schedule.active = false → no deadline, use Cases 2–5 above as normal.

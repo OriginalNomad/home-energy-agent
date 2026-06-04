@@ -347,45 +347,78 @@ def test_ev_case6_not_fired_when_battery_low():
 
 
 def mk_ev_state(ev_soc, ev_min, ev_target, batt_soc, reserve, price, forward_prices=None,
-                cheap_window=True):
+                in_demand=False, ultra_cheap_c=5, standard_price_c=10, min_charge_price_c=20):
     """Helper: build minimal state dict for EV verdict tests."""
     forecast = fc(forward_prices) if forward_prices else flat(price)
     state = {
-        "is_peak_month": False, "in_demand_window": False, "in_solar_sponge": False,
+        "is_peak_month": in_demand, "in_demand_window": in_demand, "in_solar_sponge": False,
         "battery": {"soc_pct": batt_soc, "soc_gateway_pct": batt_soc,
                     "grid_target_pct": 30, "reserve_pct": reserve, "mode": "self_consumption"},
-        "grid": {"price_cents_kwh": price, "in_cheap_window": cheap_window},
+        "grid": {"price_cents_kwh": price, "in_cheap_window": False},
         "solar": {"current_kw": 0.0, "forecast_remaining_kwh": 0.0,
                   "forecast_accuracy": "not_applicable (night or near-zero forecast)"},
         "home_load_kw": 0.5,
         "ev": {"plugged_in": True, "plug_status": "EV Connected", "charging": False,
                "zappi_mode": "Eco+", "ev_soc_pct": ev_soc,
                "min_soc_pct": ev_min, "charge_target_pct": ev_target, "schedule": None},
+        "settings": {"ev_ultra_cheap_c": ultra_cheap_c, "ev_standard_price_c": standard_price_c,
+                     "ev_min_charge_price_c": min_charge_price_c,
+                     "battery_charge_threshold_c": 12, "max_insurance_floor_pct": 70},
     }
     return state, forecast
 
 
-def test_ev_eco_plus_when_cheaper_incoming():
-    # EV at 50%, min=20%, target=70%, price=13c (cheap window), but 11c coming → Eco+ first
-    # Prices must be above 10c to avoid Case 2 ("ultra-cheap") firing first.
-    forward = [13] * 4 + [11] * 10 + [28] * 10  # 13c now, 11c in 2h (>1.5c cheaper), spike later
-    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=13,
-                               forward_prices=forward)
+def test_ev_eco_when_below_standard_price():
+    # EV at 50%, price=8c (< standard_price_c=10c, > ultra_cheap=5c) → Eco (slow charge)
+    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=8)
     ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
     ev = ctx["ev_recommended"]
-    check("ev: Eco when cheaper price upcoming", ev["zappi_mode"] == "Eco", ev)
-    check("ev: rule is ev_case4_cheaper_upcoming", ev["rule_fired"] == "ev_case4_cheaper_upcoming", ev)
+    check("ev: Eco when price below standard threshold", ev["zappi_mode"] == "Eco", ev)
+    check("ev: rule is ev_standard_price", ev["rule_fired"] == "ev_standard_price", ev)
 
 
-def test_ev_fast_at_cheapest_price():
-    # EV at 50%, min=20%, target=70%, price=11c, this IS the cheapest (flat) → Fast
-    forward = [11] * 8 + [28] * 10  # 11c now and for 4h, then spike
-    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=11,
-                               forward_prices=forward)
+def test_ev_eco_plus_when_above_standard_price():
+    # EV at 50%, price=13c (> standard_price_c=10c) → Eco+ (solar only, price too high)
+    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=13)
     ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
     ev = ctx["ev_recommended"]
-    check("ev: Fast at cheapest price (no cheaper incoming)", ev["zappi_mode"] == "Fast", ev)
-    check("ev: rule is ev_case4_cheap_battery_ok", ev["rule_fired"] == "ev_case4_cheap_battery_ok", ev)
+    check("ev: Eco+ when price above standard threshold", ev["zappi_mode"] == "Eco+", ev)
+    check("ev: rule is ev_price_too_high", ev["rule_fired"] == "ev_price_too_high", ev)
+
+
+def test_ev_fast_when_ultra_cheap():
+    # EV at 50%, price=4c (< ultra_cheap_c=5c) → Fast
+    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=4)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Fast when price below ultra-cheap threshold", ev["zappi_mode"] == "Fast", ev)
+    check("ev: rule is ev_ultra_cheap", ev["rule_fired"] == "ev_ultra_cheap", ev)
+
+
+def test_ev_fast_when_below_min_within_ceiling():
+    # EV at 15% (below min=20%), price=18c < min_charge_price_c=20c → Fast
+    state, fcast = mk_ev_state(15, 20, 70, batt_soc=80, reserve=20, price=18)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Fast when below min and price within ceiling", ev["zappi_mode"] == "Fast", ev)
+    check("ev: case3 rule", ev["rule_fired"] == "ev_case3_below_minimum", ev)
+
+
+def test_ev_eco_plus_when_below_min_above_ceiling():
+    # EV at 15% (below min=20%), price=25c > min_charge_price_c=20c → Eco+ (too expensive)
+    state, fcast = mk_ev_state(15, 20, 70, batt_soc=80, reserve=20, price=25)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Eco+ when below min but price above ceiling", ev["zappi_mode"] == "Eco+", ev)
+
+
+def test_ev_eco_plus_during_demand_window():
+    # Even with cheap price, demand window → Eco+ (no grid draw)
+    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=4, in_demand=True)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(16))
+    ev = ctx["ev_recommended"]
+    check("ev: Eco+ during demand window despite cheap price", ev["zappi_mode"] == "Eco+", ev)
+    check("ev: rule is ev_demand_window", ev["rule_fired"] == "ev_demand_window", ev)
 
 
 def test_ev_fast_when_below_min_despite_cheaper_incoming():
@@ -545,7 +578,9 @@ if __name__ == "__main__":
                test_nonpeak_deferral, test_overnight_hold_for_cheap_window,
                test_nonpeak_spread_arbitrage, test_nonpeak_spread_too_small,
                test_demand_window_no_import,
-               test_ev_eco_plus_when_cheaper_incoming, test_ev_fast_at_cheapest_price,
+               test_ev_eco_when_below_standard_price, test_ev_eco_plus_when_above_standard_price,
+               test_ev_fast_when_ultra_cheap, test_ev_eco_plus_during_demand_window,
+               test_ev_fast_when_below_min_within_ceiling, test_ev_eco_plus_when_below_min_above_ceiling,
                test_ev_fast_when_below_min_despite_cheaper_incoming,
                test_solar_unreliable_not_before_9am, test_solar_unreliable_after_9am,
                test_nonpeak_solar_unreliable_escalates_autonomous,
