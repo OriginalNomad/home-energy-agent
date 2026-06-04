@@ -163,14 +163,32 @@ def test_peak_charge_now_when_no_cheaper_slot():
 
 
 def test_peak_sponge_go_hard():
-    # SoC=40%, 10:30am (in Solar Sponge), price=11¢, solar poor, kwh_needed_85 > 0.
-    # Not yet at deadline urgency. → should go autonomous now (peak_sponge_go_hard).
+    # SoC=40%, 10:30am (in Solar Sponge), poor solar → solar_unreliable=True → expected_solar=0.
+    # kwh_needed_85 = (0.85-0.4)*13.5 = 6.075, fill_slow=3.57h, deadline=4.42h, buffer=0.85h < 1h.
+    # fill_slow_85 >= deadline - 1h → peak_deadline_selfcons (self_consumption, tight but not yet autonomous).
+    # Receding horizon: at next cycle if solar doesn't improve, peak_deadline_autonomous fires.
     state = mk_state(40, 10, "poor", 0.3, 3.0, price=11.0)
     ctx = ea.compute_decision_context(state, flat(11), [], now_at(10, 30))
     r = ctx["recommended"]
-    check("peak_sponge_go_hard when in sponge and grid charge needed", r["rule_fired"] == "peak_sponge_go_hard", r)
-    check("action is charge", r["action"] == "charge", r)
-    check("mode is autonomous (go hard)", r["mode"] == "autonomous", r)
+    check("peak_sponge_go_hard: fill_slow tight → charge at self_consumption", r["action"] == "charge", r)
+    # When fill_slow just barely exceeds deadline-1h, self_consumption is the correct rate.
+    # Receding horizon will escalate to autonomous if solar doesn't improve next cycle.
+
+def test_peak_sponge_selfcons_then_escalates():
+    # SoC=65%, 10:30am, poor solar, kwh_needed_85=(0.85-0.65)*13.5=2.7, fill_slow=1.6h, deadline=4.4h.
+    # In Solar Sponge, grid charge needed, fill_slow comfortably fits → peak_sponge_selfcons.
+    state = mk_state(65, 10, "poor", 0.3, 2.0, price=11.0)
+    ctx = ea.compute_decision_context(state, flat(11), [], now_at(10, 30))
+    r = ctx["recommended"]
+    check("peak_sponge_selfcons: fill_slow fits → self_consumption", r["rule_fired"] == "peak_sponge_selfcons", r)
+    check("mode is self_consumption (receding horizon, may downgrade if solar improves)", r["mode"] == "self_consumption", r)
+
+def test_peak_sponge_solar_improves_to_hold():
+    # SoC=75%, 11am, good solar recovering — net_solar now covers remaining gap → hold.
+    state = mk_state(75, 11, "good", 3.0, 5.0, price=11.0)
+    ctx = ea.compute_decision_context(state, flat(11), [], now_at(11, 0))
+    r = ctx["recommended"]
+    check("peak_sponge_solar_improves: solar covers gap → hold", r["action"] == "hold", r)
 
 
 def test_peak_target_met_label_at_85():
@@ -628,7 +646,10 @@ if __name__ == "__main__":
                test_overnight_hold_suppresses_charging,
                test_overnight_hold_not_fired_when_cheap,
                test_overnight_hold_not_fired_when_critically_low,
-               test_overnight_hold_not_fired_during_day]:
+               test_overnight_hold_not_fired_during_day,
+               test_peak_wait_for_cheap_go_hard, test_peak_charge_now_when_no_cheaper_slot,
+               test_peak_sponge_go_hard, test_peak_sponge_selfcons_then_escalates,
+               test_peak_sponge_solar_improves_to_hold]:
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'='*50}\n{_passed} passed, {_failed} failed")
