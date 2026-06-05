@@ -451,6 +451,41 @@ When FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%:
 - Battery threshold 85% ensures this only activates when the battery is genuinely near full
 - Overrides the user-set EV charge target — treats 100% as the effective target while FIT is negative
 
+### Rule 22 — Wait-and-Go-Hard: Find the Cheapest Feasible Charge Slot
+
+**Added 2026-06-05.** On peak days where grid charge is needed but the agent is not yet at deadline urgency, the correct strategy is not to start slow self_consumption immediately. Instead, find the cheapest upcoming slot where fast-filling to 85% still fits before the deadline, wait for it, then charge at 5kW (autonomous).
+
+**Every cycle, scan the price forecast for the cheapest slot where:**
+```
+hours_until_slot + fill_fast_85_h + 0.5h ≤ hours_to_2:55pm
+```
+Conservative SoC projection at each slot: home load drains the battery during the wait, no solar credit (pessimistic — real outcome is better if solar produces).
+
+| Condition | Rule | Action |
+|-----------|------|--------|
+| Cheaper slot ≥1¢ below now exists and is feasible | `wait_for_cheap_go_hard` | Hold and wait. Report slot price and hours-until in summary. |
+| No cheaper slot in feasible window | `peak_charge_now` | Charge at self_consumption now — current price is as good as it gets. |
+
+`go_hard_slot` (price, hours_until) is logged to JSONL `computed_context` and shown in the deterministic REFERENCE block each cycle.
+
+**Why:** self_consumption from 8:30am at 17¢ on a day with Solar Sponge arriving at 11¢ at 10am costs more and ties up the charger during solar-producing hours. Waiting and going fast at the cheap price takes less time and money.
+
+### Rule 23 — Receding Horizon Solar Sponge Rate Selection
+
+**Added 2026-06-05.** Once in the Solar Sponge (or at the cheap window identified by Rule 22), the charging rate is not fixed — it's recalculated every cycle as solar data and prices update.
+
+```
+if fill_slow_85_h ≥ hours_to_2:55pm − 1.0h  →  autonomous (peak_sponge_go_hard): tight, go hard
+if fill_slow_85_h < hours_to_2:55pm − 1.0h  →  self_consumption (peak_sponge_selfcons): fits, solar may reduce need
+if kwh_needed_85 ≤ 0                         →  hold (peak_solar_will_cover): solar covering the gap
+```
+
+**Key principle:** each 30-minute cycle is an independent optimization — mode is NOT preserved from the previous cycle. The `battery_autonomous_revert_target_reached` automation fires within 30s of hitting 85% SoC, regardless of the LLM cycle. It is a safety net, not the primary rate controller.
+
+**Why:** as solar improves during the morning, the grid charge needed falls each cycle. A 5kW rate justified at 10:00am (SoC=40%, solar=0.3kW) may be unnecessary at 11:00am (SoC=65%, solar=2kW, fill_slow now 1.6h vs 4.4h deadline). Recalculating prevents over-charging from grid when solar is contributing.
+
+**`battery_grid_charge_target` floor (added 2026-06-05):** In peak months before 3pm, `sensor.battery_grid_charge_target` is clamped to a minimum of 85% regardless of Solcast remaining forecast. Without this, the Solcast-optimistic formula could return 13% on a cloudy day (thinking solar will cover everything), causing `battery_autonomous_revert_target_reached` to fire immediately after autonomous mode is set (battery already above 13%). The 85% floor ensures the automation only stops charging when the demand-window target is actually met.
+
 ### Rule 20 — Overnight Hold: Wait for Solar Sponge
 
 Solar Sponge (10am–3pm) is a structural tariff feature — always cheaper than evening/overnight prices. The demand window is only 3–9pm; the battery just needs 85% by 2:55pm, not by midnight.

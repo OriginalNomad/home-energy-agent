@@ -1,5 +1,58 @@
 # Energy System Control Log
 
+## 2026-06-05 (session 9 — receding horizon charging, NameError bug fix, battery_grid_charge_target fix)
+
+**Morning standup:** Jun 4 demand window passed (97% SoC at 3pm, 0.048kW peak import). Three-way divergence: LLM↔det 74%, LLM↔opt 76%, opt↔det 94%, three-way consensus 75%. LP still diverges on cloudy mornings (cause-c: trusts solar point forecast). Phase 5 cutover blocked until LP consumes `solar_unreliable`.
+
+**Bug 1 fixed: `_demand_reserve_guard_fired` NameError broke JSONL + HA notifications since June 2.**
+
+Root cause: variable was set inside `run_agent()` but never initialised at module level. Every cycle since session 6 (Jun 2) raised `NameError` in `log_decision()`, silently killing: JSONL writes (no records after 2026-06-04T23:30 AEST), `persistent_notification` pushes, HA logbook entries, and dashboard helper updates (`input_text.battery_decision_action` stuck on Jun 4 13:30). Plain-text log continued because it's the first line of `log_decision()`, before the crash. Fix: added `_demand_reserve_guard_fired: bool = False` at module level.
+
+**Bug 2 fixed: `battery_grid_charge_target` incorrectly reverted autonomous mode immediately on unreliable-solar days.**
+
+Root cause: template sensor computed `95 − (solcast_remaining / 13.5 × 100)`. On Jun 5 morning with Solcast claiming 11kWh remaining, the sensor returned 13%. Battery at 26% triggered `battery_autonomous_revert_target_reached` immediately (`26 >= 13`), reverting autonomous mode within 30s and blocking the fast charge. Fix: added peak-month floor — in peak months before 3pm, `battery_grid_charge_target` is clamped to a minimum of 85%. Sensor now shows 85% on cloudy peak days instead of an over-optimistic Solcast-derived low value. Live reload confirmed: sensor updated to 85%.
+
+**New strategy: wait-and-go-hard + receding horizon Solar Sponge charging.**
+
+User insight: on peak days with grid charge needed, the correct strategy is not "charge at 1.7kW now" but "find the cheapest upcoming slot where fast-fill still fits the deadline, wait for it, then go hard at 5kW." Each cycle should also reassess the charging rate as solar arrives — drop from 5kW to 1.7kW if fill_slow now fits; hold if solar is covering the remaining gap.
+
+Implemented:
+
+- `_cheapest_go_hard_slot()`: scans price forecast for cheapest slot where `hours_until + fill_fast_85h + 0.5h ≤ deadline`. Conservative SoC projection (home load drain, no solar credit). Returns (price, hours_until) or None.
+- `wait_for_cheap_go_hard`: peak month, grid charge needed, cheaper feasible slot ≥1¢ ahead → hold and wait.
+- `peak_charge_now`: peak month, grid charge needed, no cheaper slot → charge at self_consumption now.
+- `peak_sponge_go_hard`: in Solar Sponge, fill_slow ≥ deadline − 1h → autonomous (tight, must go hard).
+- `peak_sponge_selfcons`: in Solar Sponge, fill_slow fits comfortably → self_consumption. Next cycle reassesses as solar data improves.
+- Receding horizon principle added to system prompt: every cycle is an independent optimization. Mode can change as solar improves or prices shift. `battery_autonomous_revert_target_reached` is a safety net, not the primary rate controller.
+- `go_hard_slot` field exposed in decision context, REFERENCE block, and JSONL `computed_context`.
+
+86 unit tests, all pass.
+
+**Live validation (Jun 5, 9:21am):** agent correctly held at 8:30am (17¢, cheaper window ahead at ~14¢), then escalated to autonomous + reserve=100% at 9:21am when `fill_slow=4.69h, deadline=5.58h, margin=0.89h < 1h buffer, no cheaper slot ahead`. After Bug 2 fix, autonomous mode held correctly until battery reached 85%.
+
+**Discussed: 85% fixed target is too blunt on flat-price days with variable solar.** On days with flat prices (no cheaper window) and unreliable solar, the optimal target should be derived from expected 3-9pm load, not always 85%. The LP optimizer naturally computes partial-fill targets. This is a future improvement — for today, 85% is the correct conservative choice given solar at 17% of forecast.
+
+**Architecture note:** `battery_autonomous_revert_target_reached` automation uses `sensor.battery_grid_charge_target` as the stop condition. With the peak-month 85% floor now in place, this correctly stops autonomous charging at the demand-window target on all solar conditions.
+
+## 2026-06-04 (session 8 — EV charging logic rework)
+
+**Morning standup:** Jun 3 demand window passed (98% SoC at 3pm, 0.008kW peak import). Three-way divergence analysis: LLM↔det 83%, LLM↔opt 77%, opt↔det 93%. LP optimiser not yet Phase 5 ready — it doesn't consume the `solar_unreliable` flag, so it systematically holds on cloudy mornings while LLM+det correctly charge. LP cutover blocked until this is fixed.
+
+**EV charging logic rewritten (cause: EV was charging at 13¢ despite user expecting 10¢ threshold).**
+
+Root cause: the old Cases 4/5 gated on `amber_in_cheap_window` (Amber's binary sensor), which is True throughout the Solar Sponge window regardless of actual price. `ev_ultra_cheap_threshold_c` only controlled the "go Fast" case (Case 2), not whether EV charged at all.
+
+Fix: replaced `amber_in_cheap_window` + 3-phase Eco/Fast sub-logic with two explicit price sliders:
+- `ev_standard_price_c` (new entity, default 10¢) — Eco (slow charge) when price below this
+- `ev_ultra_cheap_threshold_c` (existing, default 5¢) — Fast when price below this
+- `ev_min_charge_price_c` (new entity, default 20¢) — ceiling for below-minimum emergency Fast; replaces hardcoded 20¢
+
+`ev_eco_gap_c` entity removed (no longer used). Demand window always forces Eco+ regardless of price.
+
+New priority order: demand window → below-min → FIT negative → target met → ultra cheap → standard → Eco+ default.
+
+All three new sliders added to `configuration.yaml` and wired into agent. 75 tests pass. Verified live: 13:30 cycle at 11¢ with standard threshold 10¢ correctly logged `ev_price_too_high → Eco+`.
+
 ## 2026-06-03 (session 7 — solar-sufficiency hold, LP horizon extension, schema fix)
 
 **Items 1–4 from morning standup — all implemented and tested.**
