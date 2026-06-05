@@ -1771,12 +1771,24 @@ reserve was previously set above current SoC.
 
 **CRITICAL — holding ≠ arming. Do NOT raise reserve while waiting for a cheaper window.**
 If you decide to hold/wait (e.g. Solar Sponge is 1–2h away at a cheaper price), the correct
-action is NO reserve change (or set reserve=20% if SoC is already below the 20% safety floor).
-Do NOT set reserve to the charge target (e.g. 85%) while waiting — that starts charging
-immediately at the current price, the opposite of holding.
-  - SoC > 20%, holding for cheaper window → leave reserve at 5%. No action.
-  - SoC ≤ 20%, holding for cheaper window → set reserve=20% (safety floor only — tiny top-up).
-  - Ready to charge (cheap window open) → set reserve to the charge target (e.g. 85% or 100%).
+action is NO reserve change. Do NOT set reserve to the charge target (e.g. 85%) while waiting —
+that starts charging immediately at the current price, the opposite of holding.
+
+The only floor that matters is the Powerwall's 5% absolute floor. The 20% "emergency charge"
+threshold does NOT mean the battery must stay above 20% — it is only an emergency trigger for
+when the battery might hit 5% before cheap charging arrives.
+
+While waiting for a cheaper window, compute:
+  projected_soc_at_cheap_window = soc − (hours_to_window × home_load_kw / 13.5 × 100)
+
+  projected_soc > 5%  → leave reserve at 5%. No action. Battery will survive; charge cheap.
+  projected_soc ≤ 5%  → set reserve to (5% + drain_to_window + 3% buffer) — just enough to
+                         survive to the cheap window, nothing more.
+
+Example: SoC=18% at 7:45am, home load 0.6kW, Solar Sponge at 10am (2.25h away).
+  projected_soc = 18 − (2.25 × 0.6 / 13.5 × 100) = 18 − 10 = 8%. Above 5% → no action.
+  Leave reserve at 5%, let battery drain to 8%, charge cheaply at Solar Sponge.
+
 Setting reserve=85% with SoC=16% is a "charge now" command, not a "get ready for later" command.
 
 - self_consumption mode: ~1.7 kW grid charge rate when reserve > soc. Solar surplus also charges.
@@ -1879,7 +1891,8 @@ target regardless — it is a safety net, not the primary rate controller.
 
 The deterministic helper provides `go_hard_slot` in its reference block when this applies.
 Example: 8:30am, SoC=16%, price=17¢, Solar Sponge at 10am (11¢), fill_fast=0.9h, deadline 6.4h away.
-→ Hold until 10am (1.5h wait). Action: set_reserve(20%) — safety floor only, SoC already below 20%.
+  projected_soc at 10am = 16 − (1.5h × 0.6kW / 13.5 × 100) = 16 − 7 = 9%. Above 5% floor.
+→ Hold until 10am (1.5h wait). Action: NO reserve change (leave at 5%). Battery drains to ~9%.
   At 10am: go autonomous, set_reserve(100%). Fill in 0.9h. Done by 11am at 11¢.
   Do NOT set_reserve(85%) at 8:30am — that starts charging at 17¢ immediately, wasting the wait.
   Compare: self_consumption from 8:30am would trickle through 17¢ AND 11–14¢ slots over 2.6h,
