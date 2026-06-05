@@ -248,8 +248,13 @@ def get_current_state() -> dict:
     in_demand    = is_peak and 15 <= hour < 21
     in_sponge    = 10 <= hour < 15          # Solar Sponge window
 
-    ev_plug_state = ha_state(ENTITIES["ev_plug"])
-    ev_plugged = ev_plug_state != "EV Disconnected"
+    ev_plug_state   = ha_state(ENTITIES["ev_plug"])
+    ev_plugged      = ev_plug_state != "EV Disconnected"
+    _solar_raw      = ha_state(ENTITIES["solar_power"])
+    _solar_unavail  = _solar_raw in ("unavailable", "unknown")
+    if _solar_unavail:
+        print("WARNING: sensor.solaredge_current_power is unavailable in HA — "
+              "solar reading will be 0; zero-solar cycle NOT counted.", file=sys.stderr)
 
     state = {
         "timestamp":       now.strftime("%Y-%m-%d %H:%M %Z"),
@@ -274,14 +279,17 @@ def get_current_state() -> dict:
         "solar": {
             # Unit notes: solaredge_current_power=W, solcast_power_now=W, this_hour=Wh, next_hour=Wh
             # remaining_today is natively kWh (no conversion needed)
-            "current_kw":               round(_float(ha_state(ENTITIES["solar_power"])) / 1000, 2),
+            # sensor_unavailable=True means HA returned "unavailable"/"unknown" — treat differently
+            # from genuine zero production; do NOT count as a zero-solar cycle.
+            "sensor_unavailable":       _solar_unavail,
+            "current_kw":               round(_float(_solar_raw) / 1000, 2),
             "solcast_power_now_kw":     round(_float(ha_state(ENTITIES["solcast_power_now"])) / 1000, 2),
             "forecast_this_hour_kwh":   round(_float(ha_state(ENTITIES["solcast_this_hour"])) / 1000, 2),
             "forecast_next_hour_kwh":   round(_float(ha_state(ENTITIES["solcast_next_hour"])) / 1000, 2),
             "forecast_remaining_kwh":   round(_float(ha_state(ENTITIES["solar_remaining"])), 1),
             # Accuracy: compare actual kW vs forecast_this_hour (Wh→kWh ≈ avg kW for the hour)
             "forecast_accuracy":        _solar_accuracy(
-                                            round(_float(ha_state(ENTITIES["solar_power"])) / 1000, 2),
+                                            round(_float(_solar_raw) / 1000, 2),
                                             round(_float(ha_state(ENTITIES["solcast_this_hour"])) / 1000, 2)
                                         ),
         },
@@ -662,6 +670,7 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "in_solar_sponge":      state.get("in_solar_sponge"),
         "forecast_accuracy":    solar.get("forecast_accuracy"),
         "solar_current_kw":     solar.get("current_kw"),
+        "solar_sensor_unavail": solar.get("sensor_unavailable", False),
         "solar_remaining_kwh":  solar.get("forecast_remaining_kwh"),
         "solar_this_hour_kwh":  solar.get("forecast_this_hour_kwh"),
         "solar_next_hour_kwh":  solar.get("forecast_next_hour_kwh"),
@@ -1071,13 +1080,17 @@ def _detect_sliding_forecast(recent_records: list[dict], current_price: float,
 SOLAR_START_HOUR = 9  # flat roof in Sydney: panels don't produce meaningfully before ~9am
 
 def _detect_zero_solar(recent_records: list[dict], current_solar_kw: float,
-                       now_h: float) -> bool:
+                       now_h: float, sensor_unavailable: bool = False) -> bool:
     """0 kW actual in 2+ of the last 3 daylight cycles (incl. now) → zero-solar day.
     Only active from SOLAR_START_HOUR onward — before then, zero output is expected
-    (low sun angle) and must not be counted as evidence of a zero-solar day."""
+    (low sun angle) and must not be counted as evidence of a zero-solar day.
+    sensor_unavailable=True means HA returned "unavailable" — don't count as a zero cycle."""
     if now_h < SOLAR_START_HOUR:
         return False
-    zeros = 1 if current_solar_kw <= 0.1 else 0
+    if sensor_unavailable:
+        zeros = 0  # can't count a missing reading as evidence of zero generation
+    else:
+        zeros = 1 if current_solar_kw <= 0.1 else 0
     for r in recent_records[-3:]:
         ts_hour = int(r.get("ts", "T00")[11:13] or 0) if r.get("ts") else 0
         if ts_hour >= SOLAR_START_HOUR and (r.get("solar_current_kw") or 0) <= 0.1:
@@ -1265,11 +1278,12 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     is_peak      = state.get("is_peak_month", False)
     in_demand    = state.get("in_demand_window", False)
     in_sponge    = state.get("in_solar_sponge", False)
-    solar_now    = solar.get("current_kw", 0.0) or 0.0
-    remaining    = solar.get("forecast_remaining_kwh", 0.0) or 0.0
-    accuracy     = _accuracy_class(solar.get("forecast_accuracy", ""))
+    solar_now          = solar.get("current_kw", 0.0) or 0.0
+    solar_unavailable  = solar.get("sensor_unavailable", False)
+    remaining          = solar.get("forecast_remaining_kwh", 0.0) or 0.0
+    accuracy           = _accuracy_class(solar.get("forecast_accuracy", ""))
 
-    zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h)
+    zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h, solar_unavailable)
     deferral_detected = _detect_deferral(recent_records, price)
 
     # Overnight hold: Solar Sponge (10am–3pm) is structurally cheaper than overnight
@@ -1415,8 +1429,6 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
         elif (now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70):
             rec = verdict("charge", 100, "autonomous", "peak_deadline_quickcheck")
-        elif fill_slow_85 >= hours_to_2_55 - 1.0:
-            rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
         elif in_sponge and now_h < 13 and soc < 50:
             rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")
         elif in_sponge and kwh_needed_85 > 0:
@@ -1429,15 +1441,20 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             else:
                 rec = verdict("charge", 85, "self_consumption", "peak_sponge_selfcons")
         elif kwh_needed_85 > 0:
-            # Grid charge needed but not yet at urgency. Look for a cheaper upcoming slot
-            # where we can still fast-fill before the deadline. If one exists, hold and wait;
-            # if not, current price is as good as it gets — charge now at self_consumption.
+            # Not in Solar Sponge yet. Check for a cheaper go-hard slot FIRST — waiting for
+            # a cheaper fast-fill slot beats starting self_consumption now, as long as the
+            # deadline is still achievable via autonomous at that cheaper price.
             best = _cheapest_go_hard_slot(
                 price_forecast, price, soc, home_load_kw, hours_to_2_55
             )
             if best is not None:
+                # Cheaper feasible slot exists — hold, charge fast there instead.
                 rec = verdict("hold", None, None, "wait_for_cheap_go_hard")
+            elif fill_slow_85 >= hours_to_2_55 - 1.0:
+                # No cheaper slot AND self_consumption is getting tight — must start now.
+                rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
             else:
+                # No cheaper slot; current price is as good as it gets. Charge at self_consumption.
                 rec = verdict("charge", 85, "self_consumption", "peak_charge_now")
         else:
             rec = verdict("hold", None, None, "peak_on_track")
