@@ -30,6 +30,7 @@ config/secrets.yaml
 # Agent
 agent/Claude AI - API details
 agent/.env
+agent/__pycache__/
 
 # App (Next.js)
 app/node_modules

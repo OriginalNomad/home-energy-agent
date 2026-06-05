@@ -1769,6 +1769,28 @@ To charge from grid: call `set_powerwall_reserve(target_pct)` where target_pct >
 "System is in self_consumption mode" alone does NOT mean grid charging is happening — only if
 reserve was previously set above current SoC.
 
+**CRITICAL — holding ≠ arming. Do NOT raise reserve while waiting for a cheaper window.**
+If you decide to hold/wait (e.g. Solar Sponge is 1–2h away at a cheaper price), the correct
+action is NO reserve change. Do NOT set reserve to the charge target (e.g. 85%) while waiting —
+that starts charging immediately at the current price, the opposite of holding.
+
+The only floor that matters is the Powerwall's 5% absolute floor. The 20% "emergency charge"
+threshold does NOT mean the battery must stay above 20% — it is only an emergency trigger for
+when the battery might hit 5% before cheap charging arrives.
+
+While waiting for a cheaper window, compute:
+  projected_soc_at_cheap_window = soc − (hours_to_window × home_load_kw / 13.5 × 100)
+
+  projected_soc > 5%  → leave reserve at 5%. No action. Battery will survive; charge cheap.
+  projected_soc ≤ 5%  → set reserve to (5% + drain_to_window + 3% buffer) — just enough to
+                         survive to the cheap window, nothing more.
+
+Example: SoC=18% at 7:45am, home load 0.6kW, Solar Sponge at 10am (2.25h away).
+  projected_soc = 18 − (2.25 × 0.6 / 13.5 × 100) = 18 − 10 = 8%. Above 5% → no action.
+  Leave reserve at 5%, let battery drain to 8%, charge cheaply at Solar Sponge.
+
+Setting reserve=85% with SoC=16% is a "charge now" command, not a "get ready for later" command.
+
 - self_consumption mode: ~1.7 kW grid charge rate when reserve > soc. Solar surplus also charges.
   Needs ~4–6h to charge 20%→80% from grid alone.
 - autonomous mode: ~5 kW grid charge rate when reserve > soc (fast). Always pair with reserve=100%
@@ -1843,6 +1865,10 @@ do NOT default to slow self_consumption now. Instead:
 2. Project SoC at that slot conservatively (home load drains battery, no solar credit).
 3. If that cheapest slot is ≥1¢ cheaper than now: HOLD and wait for it. Report in your
    summary: "cheapest feasible slot: Xh away at Y¢ — will go autonomous then".
+   While holding: compute projected_soc = soc − (hours_to_slot × home_load_kw / 13.5 × 100).
+   If projected_soc > 5%: leave reserve at 5%. No action.
+   If projected_soc ≤ 5%: set reserve to (drain_to_slot + 8%) — survival minimum only.
+   Do NOT set reserve to 85% — that triggers charging immediately at the current price.
 4. Once you're at (or past) that cheapest slot and grid charge is still needed:
    use AUTONOMOUS (5 kW) — not self_consumption. Fill fast at the cheap price and be done
    in fill_fast_85_h, rather than dribbling at 1.7 kW for fill_slow_85_h.
@@ -1867,9 +1893,12 @@ target regardless — it is a safety net, not the primary rate controller.
 
 The deterministic helper provides `go_hard_slot` in its reference block when this applies.
 Example: 8:30am, SoC=16%, price=17¢, Solar Sponge at 10am (11¢), fill_fast=0.9h, deadline 6.4h away.
-→ Hold until 10am (1.5h wait). At 10am: go autonomous. Fill in 0.9h. Done by 11am at 11¢.
-   Compare: self_consumption from now would trickle through 17¢ AND 11–14¢ slots over 2.6h,
-   costing more AND occupying the battery charger during the most solar-productive hours.
+  projected_soc at 10am = 16 − (1.5h × 0.6kW / 13.5 × 100) = 16 − 7 = 9%. Above 5% floor.
+→ Hold until 10am (1.5h wait). Action: NO reserve change (leave at 5%). Battery drains to ~9%.
+  At 10am: go autonomous, set_reserve(100%). Fill in 0.9h. Done by 11am at 11¢.
+  Do NOT set_reserve(85%) at 8:30am — that starts charging at 17¢ immediately, wasting the wait.
+  Compare: self_consumption from 8:30am would trickle through 17¢ AND 11–14¢ slots over 2.6h,
+  costing more AND occupying the battery charger during the most solar-productive hours.
 
 **NON-PEAK MONTHS — soft deadline: avoid evening spike:**
 Use hours_to_cheap_end (step 4 above) as your deadline — it automatically adapts to when
@@ -2031,9 +2060,9 @@ overnight is perfectly acceptable if cheaper grid prices are coming. Do not char
 because the battery is low — check the price forecast first:
 - If a cheaper window (≥3¢ cheaper than now) is coming within 4 hours: hold, let it drain,
   charge when the cheap window arrives
-- If no cheaper window is coming and battery is below 20%: charge now to ~80% at current price
-- Only override this logic (charge immediately regardless of price) if battery is below 5%
-  AND no cheaper window within 2 hours — i.e. genuinely about to go flat with nothing better coming
+- If no cheaper window is coming: compute projected_soc = soc − (hours_to_next_cheap × load_rate).
+  If projected_soc > 5%: hold, let it drain, charge when the cheap window arrives.
+  If projected_soc ≤ 5%: charge now to survive — set reserve to (drain + 8%), then charge cheap later.
 
 ## Your task each cycle
 1. Review "Recent decisions" in your context — check for deferral patterns before anything else
