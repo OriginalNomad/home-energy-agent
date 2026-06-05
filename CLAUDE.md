@@ -41,3 +41,5 @@ If the session was read-only (no changes made), still add a brief log entry if a
 | `todo.md` | Outstanding work items |
 | `config/automations.yaml` | The actual running automations |
 | `config/configuration.yaml` | Sensors, REST commands, template sensors |
+| `ARCHITECTURE.md` | Self-learning system design — 4-layer architecture, implementation roadmap, data logger → calibration models → MPC |
+| `agent/data_logger.py` | Layer 1 closed-loop SQLite logger — foundation for self-calibrating models (not yet wired into energy_agent.py) |

@@ -4,13 +4,15 @@ Read the following files in order:
 3. app/CONTEXT.md
 4. todo.md
 5. The last 50 lines of energy_log.md
+6. ARCHITECTURE.md (skim — focus on the implementation roadmap section and any Phase markers)
 
-Then give me a 5-part summary:
+Then give me a 6-part summary:
 - **System status** — agent, automations, anything to watch today
 - **App status** — Sol prototype, where it's up to
 - **Today's priorities** — from todo.md and anything flagged in the log
 - **Three-way decision analysis** — LLM vs deterministic vs LP optimiser (see below)
 - **Daily energy journal review** — schema completeness check (see below)
+- **Architecture progress** — where we are on the self-learning roadmap (see below)
 
 ## Three-way decision analysis
 
@@ -91,6 +93,30 @@ Report one of:
 
 If you recommend additions, don't implement them automatically — just flag them. The user
 decides whether to expand the schema.
+
+## Architecture progress
+
+`ARCHITECTURE.md` describes a 4-layer self-learning system. Each morning, check:
+
+**Layer 1 — Data logger** (`agent/data_logger.py`, `agent/energy_log.db`):
+- Is it wired into `energy_agent.py`? (Look for `data_logger.log_cycle_start`, `log_price_forecast`, `log_agent_decision` calls)
+- If not yet wired in, that's the immediate next step — it's the foundation for everything else.
+- If wired in: how many rows have accumulated? (`python agent/data_logger.py` for a quick health check)
+
+**Layer 2 — Self-calibrating models** (not yet built):
+- Has enough data accumulated to build Model 2 (charge rate)? Needs ~1 week.
+- Has enough data accumulated to build Model 1 (solar corrector)? Needs ~2 weeks.
+- Report current data age and row count so we know when these become buildable.
+
+**Phase markers to track:**
+- `Phase 2.5-A` — 1 week of logged data → build charge rate model
+- `Phase 2.5-B` — 2 weeks → build solar corrector + nightly retraining
+- `Phase 3` — MPC solver (after models validated)
+- `Phase 4` — load model + EV scheduling
+
+Report: which phase we're in, what's blocking the next phase, and whether any data threshold has been crossed since the last session.
+
+If `data_logger.py` isn't yet wired into `energy_agent.py`, flag this prominently — it's the single highest-value item in the architecture roadmap.
 
 ## Standing instructions for the session
 

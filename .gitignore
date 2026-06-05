@@ -53,3 +53,4 @@ app/.env*
 app/.vercel
 app/*.tsbuildinfo
 app/next-env.d.ts
+agent/energy_log.db
