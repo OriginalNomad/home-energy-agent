@@ -198,6 +198,49 @@ def _ev_schedule(now: datetime) -> dict:
         return {"active": True, "error": "could not parse departure time"}
 
 
+def _build_battery_state(soc_tessie: int, soc_gateway: int, reserve: int,
+                         mode: str, grid_target: int, charge_rate_kw: float) -> dict:
+    """Return battery state dict, substituting gateway SoC if Tessie reading looks wrong.
+
+    Tessie is a cloud poll and occasionally returns 0 or an implausibly low value.
+    The gateway floors at reserve when reserve > true SoC, but when reserve is low
+    (gateway > reserve) the gateway reading is reliable. Use it as a sanity check.
+    """
+    soc_tessie = soc_tessie or 0
+    soc_gateway = soc_gateway or 0
+
+    # Gateway is reliable (not floor-clipped) when it reads above the reserve level.
+    gateway_reliable = soc_gateway > reserve
+
+    tessie_suspicious = (
+        soc_tessie == 0 or
+        (gateway_reliable and soc_gateway > soc_tessie + 15)
+    )
+
+    if tessie_suspicious and gateway_reliable:
+        print(
+            f"WARNING: Tessie SoC ({soc_tessie}%) looks wrong "
+            f"(gateway={soc_gateway}%, reserve={reserve}%) — using gateway reading.",
+            file=sys.stderr,
+        )
+        soc_used = soc_gateway
+        tessie_failed = True
+    else:
+        soc_used = soc_tessie
+        tessie_failed = False
+
+    return {
+        "soc_pct":         soc_used,
+        "soc_tessie_pct":  soc_tessie,
+        "soc_gateway_pct": soc_gateway,
+        "tessie_soc_failed": tessie_failed,
+        "mode":            mode,
+        "reserve_pct":     reserve,
+        "grid_target_pct": grid_target,
+        "charge_rate_kw":  charge_rate_kw,
+    }
+
+
 def get_current_state() -> dict:
     now = datetime.now(SYDNEY_TZ)
     month, hour = now.month, now.hour
@@ -214,14 +257,14 @@ def get_current_state() -> dict:
         "is_peak_month":   is_peak,
         "in_demand_window": in_demand,
         "in_solar_sponge":  in_sponge,
-        "battery": {
-            "soc_pct":          _int(ha_state(ENTITIES["battery_soc"])),
-            "soc_gateway_pct":  _int(ha_state(ENTITIES["battery_soc_gateway"])),
-            "mode":             ha_state(ENTITIES["battery_mode"]),
-            "reserve_pct":      _int(ha_state(ENTITIES["battery_reserve"])),
-            "grid_target_pct":  _int(ha_state(ENTITIES["battery_target"])),
-            "charge_rate_kw":   round(_float(ha_state(ENTITIES["battery_power"])), 2),
-        },
+        "battery": _build_battery_state(
+            _int(ha_state(ENTITIES["battery_soc"])),
+            _int(ha_state(ENTITIES["battery_soc_gateway"])),
+            _int(ha_state(ENTITIES["battery_reserve"])),
+            ha_state(ENTITIES["battery_mode"]),
+            _int(ha_state(ENTITIES["battery_target"])),
+            round(_float(ha_state(ENTITIES["battery_power"])), 2),
+        ),
         "grid": {
             "price_cents_kwh":  round(_float(ha_state(ENTITIES["grid_price"])) * 100, 1),
             "in_cheap_window":  ha_state(ENTITIES["cheap_window"]) == "True",
@@ -1751,13 +1794,17 @@ EV SCHEDULE (read ev.schedule each cycle):
 
 **CRITICAL — which SoC reading to trust:**
 The state gives you two battery readings:
-- `soc_pct` (from the Tessie cloud poll) — the TRUE state of charge. ALWAYS use this.
-- `soc_gateway_pct` (from the local Powerwall gateway) — FLOOR-CLIPPED at the reserve level.
-  When reserve is high (e.g. 85%), the gateway reports 85% even if the battery is really at 50%.
+- `soc_pct` — the SoC value used for all decisions. Normally this is the Tessie cloud poll
+  (true SoC), but if Tessie returned an implausible value (0%, or far below the gateway when
+  gateway is reliable), the agent has already substituted the gateway reading and set
+  `tessie_soc_failed: true`. In that case `soc_pct` IS the gateway reading — use it normally.
+- `soc_tessie_pct` — raw Tessie value (may be wrong if tessie_soc_failed is true).
+- `soc_gateway_pct` — local Powerwall gateway, FLOOR-CLIPPED at reserve level when reserve > SoC.
+
+If `tessie_soc_failed: true`: note it in your summary but proceed using `soc_pct` as usual.
 Never use `soc_gateway_pct` to judge whether a charge target has been met — it will lie upward
-whenever reserve > true SoC. If the two disagree, the Tessie `soc_pct` is correct. Declaring the
-demand-window target "achieved" off the gateway reading is a Rule-2-violation trap: you would
-drop reserve and enter the 3-9pm window far below target.
+whenever reserve > true SoC. Declaring the demand-window target "achieved" off the gateway
+reading is a Rule-2-violation trap: you would drop reserve and enter the 3-9pm window under-filled.
 
 **CRITICAL — how grid charging actually works:**
 Grid charging ONLY occurs when `backup_reserve_percent > current_soc`. This is the trigger.
