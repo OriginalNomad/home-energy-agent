@@ -90,6 +90,13 @@ Key agent capabilities added 2026-06-02:
 - **`sensor.demand_window_monitor`** pushed to HA via REST API (no config change) each hour + after daily recompute. Feeds two Markdown dashboard cards: (1) peak 30-min import bars per day, (2) pass/fail timeline with min SoC.
 - **June 2 demand window breach**: SoC reached only 81% (target 85%), reserve stuck at 80%. `battery_pre_demand_window_reset` automation fired at 2:55pm but errored — `rest_command` had failed to load at HA startup on June 1 (truncated payload, fixed but HA never restarted). Grid covered cooking load at 7pm. Fixed: Tessie API direct call to drop reserve → HA restart → rest_commands now loading cleanly.
 
+Key agent capabilities added 2026-06-05:
+- **`_demand_reserve_guard_fired` NameError fixed**: variable was set inside `run_agent()` but never initialised at module level. Caused every `log_decision()` call to crash silently since session 6 (Jun 2), breaking JSONL writes, HA notifications, logbook, and dashboard helpers. Fix: one-line module-level initialisation.
+- **`battery_grid_charge_target` 85% floor (peak months)**: template sensor in `configuration.yaml` now clamps to 85% minimum in peak months before 3pm. Previously returned 13% on a cloudy day (Solcast-optimistic), which caused `battery_autonomous_revert_target_reached` to fire immediately after autonomous mode was set (battery already above 13%). Now the automation correctly waits until 85% is reached.
+- **Wait-and-go-hard strategy (Rule 22)**: `_cheapest_go_hard_slot()` scans price forecast each cycle for the cheapest slot where `hours_until + fill_fast_85h + 0.5h ≤ deadline`. If a slot ≥1¢ cheaper than current price exists and is feasible: `wait_for_cheap_go_hard` (hold). If no cheaper slot: `peak_charge_now` (self_consumption now). `go_hard_slot` exposed in REFERENCE block and JSONL.
+- **Receding horizon Solar Sponge rate selection (Rule 23)**: once in Solar Sponge with grid charge needed, mode is recalculated every cycle. Autonomous only when `fill_slow_85h ≥ deadline − 1h`. Otherwise self_consumption — next cycle will reassess as solar updates. Every cycle is an independent optimization; mode is never preserved from previous cycle.
+- **86 unit tests** (was 75).
+
 Key agent capabilities added 2026-06-03:
 - **Home load deduction in solar sufficiency check**: `compute_decision_context()` now computes `net_expected_solar = max(expected_solar - home_load_kw * window_h, 0)` and uses it in `kwh_needed_85`. Fixes the bug where `peak_target_met` fired at 25% SoC on sunny-forecast days because raw Solcast remaining was used without deducting home consumption.
 - **`peak_solar_will_cover` rule**: renamed from `peak_target_met` when SoC < 85%. The two cases are semantically distinct: one means the battery actually reached target; the other means the solar projection covers the remaining gap.
@@ -246,9 +253,11 @@ Key agent capabilities added 2026-05-29:
 
 **June 2 demand window — PARTIAL BREACH ⚠️ (2026-06-02).** SoC reached 81% (target 85%). `battery_pre_demand_window_reset` (2:55pm automation) errored silently — `rest_command` had failed to load at the June 1 HA restart due to a truncated payload. Reserve stuck at 80% all evening; battery couldn't discharge; grid covered cooking load at 7pm (~2.7 kW peak 30-min import). Fixed: Tessie API direct call + HA restart. **Agent pre-flight demand-window reserve guard now prevents recurrence** — drops reserve to 5% via Tessie directly at the start of every demand-window cycle, independent of HA.
 
-**LP optimiser horizon extension (next priority, was June 2 — carried over).** `agent/optimizer.py` needs synthetic prices appended beyond Amber's ~6h horizon (p25/p75-by-hour from `load_price_history()`). Without this the LP under-charges on peak mornings because it never sees the 17:00–21:00 demand penalty. This is the blocker before any cutover to LP-authoritative.
+**Jun 5 demand window — in progress.** Battery charged autonomously from 28% after 9:21am. `battery_grid_charge_target` floor fix deployed live (was reverting autonomous mode immediately). Receding horizon rules now active — agent should dynamically adjust charging rate as solar data improves through the morning.
 
-**Three-way divergence watch** — `/morning` now reports LLM vs deterministic vs LP. Live `optimizer_verdict` accumulates from June 1 11:00 cron. Target: 48h of live data showing LP correctly pre-charges on peak days → flip `OPTIMIZER_AUTHORITATIVE = True` (target June 4). See todo.md Phase 4b/5.
+**LP optimiser horizon extension — done (2026-06-03).** `_build_hourly_price_model()` + `_extend_forecast_to_demand_window()` added. LP now sees 15:00–21:00 demand-window block with 1000¢/kWh penalty.
+
+**Three-way divergence watch** — Phase 5 cutover blocked by LP not consuming `solar_unreliable` flag. On cloudy mornings the LP holds while LLM+det correctly charge. Need LP solar discount when unreliable + 1-2 more days of data showing correct behaviour before flip. See todo.md Phase 4b/5.
 
 **Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
 
