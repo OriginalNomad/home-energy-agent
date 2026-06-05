@@ -2,6 +2,17 @@
 # Loads default set of integrations. Do not remove.
 default_config:
 
+# Allow Cloudflare Tunnel reverse proxy (required for agent.sol.io)
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
+    - 192.168.0.0/24
+    - 192.168.68.0/24
+    - 172.16.0.0/12
+
+
 # Exclude chatty sensors from recorder and logbook
 # Polestar timestamp sensors update every minute and flood Activity log
 recorder:

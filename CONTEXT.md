@@ -75,6 +75,18 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 ---
 
+## Infrastructure (as of 2026-06-05)
+
+| Host | Role |
+|------|------|
+| **Mac Studio** (`192.168.68.70`) | Runs Home Assistant (localhost:8123), development machine |
+| **Raspberry Pi 5** (`energypi.local`, `192.168.0.67`) | Runs energy agent cron, cloudflared tunnel |
+| **GitHub** (`OriginalNomad/home-energy-agent`) | Single repo, auto-deployed to Pi on each cron run |
+
+**Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `git pull -q` then runs agent. Deploy = `git push` from Mac.
+**Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://192.168.68.70:8123`. Systemd service, connects via Sydney edge.
+**HA external URL**: `https://agent.sol.io`. Trusted proxies configured for Pi subnet + Docker bridge.
+
 ## System architecture (as of 2026-06-03)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
