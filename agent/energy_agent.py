@@ -1865,7 +1865,9 @@ do NOT default to slow self_consumption now. Instead:
 2. Project SoC at that slot conservatively (home load drains battery, no solar credit).
 3. If that cheapest slot is ≥1¢ cheaper than now: HOLD and wait for it. Report in your
    summary: "cheapest feasible slot: Xh away at Y¢ — will go autonomous then".
-   While holding: leave reserve at 5% (or set to 20% if SoC is already below 20%).
+   While holding: compute projected_soc = soc − (hours_to_slot × home_load_kw / 13.5 × 100).
+   If projected_soc > 5%: leave reserve at 5%. No action.
+   If projected_soc ≤ 5%: set reserve to (drain_to_slot + 8%) — survival minimum only.
    Do NOT set reserve to 85% — that triggers charging immediately at the current price.
 4. Once you're at (or past) that cheapest slot and grid charge is still needed:
    use AUTONOMOUS (5 kW) — not self_consumption. Fill fast at the cheap price and be done
@@ -2058,9 +2060,9 @@ overnight is perfectly acceptable if cheaper grid prices are coming. Do not char
 because the battery is low — check the price forecast first:
 - If a cheaper window (≥3¢ cheaper than now) is coming within 4 hours: hold, let it drain,
   charge when the cheap window arrives
-- If no cheaper window is coming and battery is below 20%: charge now to ~80% at current price
-- Only override this logic (charge immediately regardless of price) if battery is below 5%
-  AND no cheaper window within 2 hours — i.e. genuinely about to go flat with nothing better coming
+- If no cheaper window is coming: compute projected_soc = soc − (hours_to_next_cheap × load_rate).
+  If projected_soc > 5%: hold, let it drain, charge when the cheap window arrives.
+  If projected_soc ≤ 5%: charge now to survive — set reserve to (drain + 8%), then charge cheap later.
 
 ## Your task each cycle
 1. Review "Recent decisions" in your context — check for deferral patterns before anything else
