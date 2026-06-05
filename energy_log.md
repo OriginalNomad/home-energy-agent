@@ -1,5 +1,47 @@
 # Energy System Control Log
 
+## 2026-06-05 (session 9 continued — Pi deployment, Cloudflare Tunnel, repo consolidation)
+
+**Raspberry Pi 5 deployment — agent now running on Pi.**
+
+Pi details: `simonmonk@energypi.local` / `192.168.0.67`, running Raspberry Pi OS Lite 64-bit on a 1TB SSD (confirmed `/dev/sda2`, not SD card). Python 3.13.5 installed.
+
+Steps completed:
+- SSH key auth set up (Mac → Pi)
+- Pi SSH key added to GitHub (`energypi` key)
+- Cloned `home-energy-agent` repo via SSH to `~/home-energy-agent`
+- Python venv at `~/home-energy-agent/agent/venv` with all deps (anthropic, pytz, requests, scipy, numpy)
+- `agent/.env` created on Pi with `HA_URL=http://192.168.68.70:8123` + all API keys
+- `HA_URL`, `HA_TOKEN`, `TESSIE_TOKEN`, `TESSIE_SITE_ID` made env-var-configurable in `energy_agent.py` (defaults unchanged for Mac; Pi overrides via `.env`)
+- Dry run confirmed: Pi correctly reads HA sensors on Mac Studio at LAN IP
+- **Mac cron removed** — Pi now owns all three cron jobs
+- Pi cron: every 30 min with `git pull -q` before each run (deploy = `git push` from Mac)
+- Pi cron: daily energy log at 21:05, demand window summary hourly
+
+**Cloudflare Tunnel — HA accessible at `https://agent.sol.io`.**
+
+- `cloudflared` installed on Pi from Cloudflare's official APT repo
+- Tunnel `home-energy-agent` created (ID: `1f5203ff-866e-4c28-ab13-c55009ccc2b9`)
+- `cloudflared` config at `/etc/cloudflared/config.yml` pointing to `http://192.168.68.70:8123`
+- DNS CNAME added manually in Cloudflare dashboard: `agent.sol.io → <tunnel-id>.cfargotunnel.com` (Proxied)
+- `cloudflared` running as systemd service, connected via Sydney edge (`syd06`, `syd01`)
+- HA `configuration.yaml` updated: `http: use_x_forwarded_for: true` + `trusted_proxies` includes Pi subnet `192.168.0.0/24`, Mac subnet `192.168.68.0/24`, Docker bridge `172.16.0.0/12`
+- HA external URL set to `https://agent.sol.io` in HA Settings → Network
+- **Confirmed working**: Chrome ✅, HA Mac app ✅, iOS HA app on WiFi ✅, iOS HA app on mobile data ✅
+- Safari on Mac fails (iCloud Private Relay interference) — not a concern, HA app preferred
+
+**Repo consolidation.**
+
+- `home-energy-automation` (phone repo, older state) archived and deleted
+- `home-energy-console` renamed to `home-energy-agent` on GitHub
+- Local git remote updated to `https://github.com/OriginalNomad/home-energy-agent.git`
+- `ARCHITECTURE.md` and `agent/data_logger.py` pulled from phone branch and merged in
+- `/morning` skill updated to read ARCHITECTURE.md (step 6) and added "Architecture progress" section (6th standup item)
+
+**Dev workflow going forward:**
+- Develop on Mac Studio → `git push` → Pi pulls automatically before each cron run
+- HA remains on Mac Studio for now; future session: migrate HA to Pi via Docker
+
 ## 2026-06-05 (session 9 — receding horizon charging, NameError bug fix, battery_grid_charge_target fix)
 
 **Morning standup:** Jun 4 demand window passed (97% SoC at 3pm, 0.048kW peak import). Three-way divergence: LLM↔det 74%, LLM↔opt 76%, opt↔det 94%, three-way consensus 75%. LP still diverges on cloudy mornings (cause-c: trusts solar point forecast). Phase 5 cutover blocked until LP consumes `solar_unreliable`.

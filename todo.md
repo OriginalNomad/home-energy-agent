@@ -33,6 +33,12 @@
 - [x] **Sliding forecast detector** — implemented `_detect_sliding_forecast()`, fires `rule_fired: "sliding_forecast"` after 3+ cycles of phantom cheap window. (2026-05-31)
 - [ ] **Sliding forecast display** — expose forecast snapshot data from `decisions.jsonl` as HA sensor so past forecasts can be overlaid on the Amber price chart, making sliding visible.
 - [x] **Consider moving agent into HA** — Mac Studio with sleep disabled + cron job is sufficient; no need to move into HA
+- [x] **Deploy agent to Raspberry Pi 5** — Pi running at `energypi.local`, agent on cron with auto git pull, Mac cron removed. (2026-06-05)
+- [x] **Cloudflare Tunnel — `https://agent.sol.io`** — HA accessible remotely via Pi tunnel. Chrome, HA apps (Mac + iOS) confirmed working. (2026-06-05)
+- [x] **Repo consolidation** — `home-energy-automation` deleted, `home-energy-console` renamed to `home-energy-agent`. Single repo accessible from all devices. (2026-06-05)
+- [ ] **Migrate HA to Pi** — install HA via Docker on Pi, restore from Mac backup, update agent `.env` to `localhost:8123`. Simplifies architecture; no urgency while Mac Studio is always on.
+- [ ] **Wire `data_logger.py` into `energy_agent.py`** — ~20 lines in 3 places (after `get_current_state`, after `get_price_forecast`, inside `log_decision`). Starts the Phase 2.5-A data collection clock.
+- [ ] **Switch SD card boot to SSD** — Pi is already running from SSD (`/dev/sda2`); confirm boot order in `raspi-config` to ensure it always boots from SSD, not SD card.
 
 - [x] **Add InfluxDB** — pipe HA sensor history into InfluxDB for long-term retention and analysis (default SQLite rolls off after 10 days)
 - [ ] **InfluxDB dashboards & reports** — set up Data Explorer queries and dashboards for battery SoC history, charging patterns, price vs SoC correlation, daily 3pm SoC outcomes
