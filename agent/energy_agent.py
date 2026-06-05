@@ -1769,6 +1769,16 @@ To charge from grid: call `set_powerwall_reserve(target_pct)` where target_pct >
 "System is in self_consumption mode" alone does NOT mean grid charging is happening — only if
 reserve was previously set above current SoC.
 
+**CRITICAL — holding ≠ arming. Do NOT raise reserve while waiting for a cheaper window.**
+If you decide to hold/wait (e.g. Solar Sponge is 1–2h away at a cheaper price), the correct
+action is NO reserve change (or set reserve=20% if SoC is already below the 20% safety floor).
+Do NOT set reserve to the charge target (e.g. 85%) while waiting — that starts charging
+immediately at the current price, the opposite of holding.
+  - SoC > 20%, holding for cheaper window → leave reserve at 5%. No action.
+  - SoC ≤ 20%, holding for cheaper window → set reserve=20% (safety floor only — tiny top-up).
+  - Ready to charge (cheap window open) → set reserve to the charge target (e.g. 85% or 100%).
+Setting reserve=85% with SoC=16% is a "charge now" command, not a "get ready for later" command.
+
 - self_consumption mode: ~1.7 kW grid charge rate when reserve > soc. Solar surplus also charges.
   Needs ~4–6h to charge 20%→80% from grid alone.
 - autonomous mode: ~5 kW grid charge rate when reserve > soc (fast). Always pair with reserve=100%
@@ -1843,6 +1853,8 @@ do NOT default to slow self_consumption now. Instead:
 2. Project SoC at that slot conservatively (home load drains battery, no solar credit).
 3. If that cheapest slot is ≥1¢ cheaper than now: HOLD and wait for it. Report in your
    summary: "cheapest feasible slot: Xh away at Y¢ — will go autonomous then".
+   While holding: leave reserve at 5% (or set to 20% if SoC is already below 20%).
+   Do NOT set reserve to 85% — that triggers charging immediately at the current price.
 4. Once you're at (or past) that cheapest slot and grid charge is still needed:
    use AUTONOMOUS (5 kW) — not self_consumption. Fill fast at the cheap price and be done
    in fill_fast_85_h, rather than dribbling at 1.7 kW for fill_slow_85_h.
@@ -1867,9 +1879,11 @@ target regardless — it is a safety net, not the primary rate controller.
 
 The deterministic helper provides `go_hard_slot` in its reference block when this applies.
 Example: 8:30am, SoC=16%, price=17¢, Solar Sponge at 10am (11¢), fill_fast=0.9h, deadline 6.4h away.
-→ Hold until 10am (1.5h wait). At 10am: go autonomous. Fill in 0.9h. Done by 11am at 11¢.
-   Compare: self_consumption from now would trickle through 17¢ AND 11–14¢ slots over 2.6h,
-   costing more AND occupying the battery charger during the most solar-productive hours.
+→ Hold until 10am (1.5h wait). Action: set_reserve(20%) — safety floor only, SoC already below 20%.
+  At 10am: go autonomous, set_reserve(100%). Fill in 0.9h. Done by 11am at 11¢.
+  Do NOT set_reserve(85%) at 8:30am — that starts charging at 17¢ immediately, wasting the wait.
+  Compare: self_consumption from 8:30am would trickle through 17¢ AND 11–14¢ slots over 2.6h,
+  costing more AND occupying the battery charger during the most solar-productive hours.
 
 **NON-PEAK MONTHS — soft deadline: avoid evening spike:**
 Use hours_to_cheap_end (step 4 above) as your deadline — it automatically adapts to when
