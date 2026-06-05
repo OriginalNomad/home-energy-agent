@@ -35,15 +35,8 @@ except Exception:                       # scipy/optimizer missing → skip clean
 # Configuration — move sensitive values to environment variables in production
 # ---------------------------------------------------------------------------
 
-HA_URL   = "http://localhost:8123"
-HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIxZjQxNDVmOTBjYTI0ZDgyYjk5MTI5ZjE2YzY3ZWEzNSIsImlhdCI6MTc3OTY2OTMyNiwiZXhwIjoyMDk1MDI5MzI2fQ.Gu5FPRLbn3PpTOstsR-B87fyVeEC00dRXAB6ZiYiFt0"
-
-TESSIE_TOKEN   = "REDACTED_TOKEN"
-TESSIE_SITE_ID = "2252120180790091"
-
-# Load .env file if present (gitignored — keeps keys out of the repo)
-# Uses direct assignment so .env wins over empty shell exports; a non-empty
-# shell variable (e.g. set for testing) still takes precedence.
+# Load .env file first so environment variables override these defaults.
+# .env is gitignored — put machine-specific values (HA_URL, keys) there.
 _env_file = Path(__file__).parent / ".env"
 if _env_file.exists():
     for _line in _env_file.read_text().splitlines():
@@ -54,6 +47,13 @@ if _env_file.exists():
             _val = _v.strip().strip('"').strip("'")
             if not os.environ.get(_key):   # set if missing OR empty
                 os.environ[_key] = _val
+
+# Defaults work on Mac Studio (localhost). Override via .env on other machines.
+HA_URL   = os.environ.get("HA_URL",   "http://localhost:8123")
+HA_TOKEN = os.environ.get("HA_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIxZjQxNDVmOTBjYTI0ZDgyYjk5MTI5ZjE2YzY3ZWEzNSIsImlhdCI6MTc3OTY2OTMyNiwiZXhwIjoyMDk1MDI5MzI2fQ.Gu5FPRLbn3PpTOstsR-B87fyVeEC00dRXAB6ZiYiFt0")
+
+TESSIE_TOKEN   = os.environ.get("TESSIE_TOKEN",   "REDACTED_TOKEN")
+TESSIE_SITE_ID = os.environ.get("TESSIE_SITE_ID", "2252120180790091")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # set via agent/.env
 
