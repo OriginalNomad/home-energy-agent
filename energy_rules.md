@@ -16,7 +16,7 @@ See `CONTEXT.md` for the current automation status and which rules are agent-han
 
 | Term | Definition |
 |------|------------|
-| **Minimum Battery Threshold** | The SoC floor (20%) below which automation will never intentionally discharge the Powerwall |
+| **Minimum Battery Threshold** | 20% — the floor for intentional discharge decisions (arbitrage, normal operation). Distinct from the Powerwall's 5% absolute reserve, which is the floor for *survive-to-cheap-window* decisions. |
 | **Target SoC** | The desired battery state of charge at a given time (typically 100% by 3 pm) |
 | **Solar Sponge Window** | 10:00 am – 3:00 pm — super off-peak rate, primary charging window |
 | **Demand Window** | 3:00 pm – 9:00 pm — zero grid import enforced in peak months |
@@ -158,10 +158,12 @@ The old logic found the first interval exceeding 30¢ — which means it found n
 **Inverter underperformance override:**
 - If Solcast `power_now > 500W` but inverter shows `< 200W`, treat as a solar deficit regardless of remaining-today forecast — charge from grid rather than waiting on solar that isn't arriving
 
-**Low SoC emergency charge (outside solar window):**
-- If battery drops below **20%** at any time between 7am–10pm and price is cheap (cheap window open OR price ≤ 10¢), switch to self_consumption and set reserve to 20% immediately
-- Once SoC reaches 20%, revert to self_consumption at 5% reserve and hand off to solar
-- Safety net only — gets the battery off the floor before the solar window opens
+**Low SoC survival check (before cheap window opens):**
+- Before deciding to top up, compute: `projected_soc = current_soc − (hours_to_next_cheap_window × home_load_kw / 13.5 × 100)`
+- If `projected_soc > 5%`: no action — battery will survive to the cheap window above the Powerwall floor; charge cheap then
+- If `projected_soc ≤ 5%`: set reserve to just enough to survive — `drain_to_window + 8%` — not a top-up to 20%
+- Example: SoC=18%, 2.25h to Solar Sponge, 0.6kW load → projected = 18 − 10 = 8% → above 5%, no action
+- Example: SoC=6%, 2.25h to Solar Sponge, 0.6kW load → projected = 6 − 10 = −4% → set reserve=18% (10+8)
 - Respects demand window: never fires during 3–9pm in peak months
 
 - On cloudy days (see Rule 9): Solcast forecast triggers grid top-up early rather than waiting for the price check
@@ -245,10 +247,11 @@ Use `Eco+` as the default (charges only from actual solar export past the meter)
 ### Rule 7 — Opportunistic Overnight Grid Charging (Seasonal)
 - Do not assume overnight charging is needed or useful — evaluate based on season, solar forecast, and price comparison
 
-**Step 1 — Safety net: maintain Minimum Battery Threshold overnight**
-- Ensure battery will stay above **Minimum Battery Threshold (20%)** until solar kicks in (~9:30 am)
-- If SoC is likely to drop below 20% before solar arrives, top up to 20% with a **Price Ceiling of 25¢**
-- This is a small top-up only — not a full charge
+**Step 1 — Safety net: survive to Solar Sponge**
+- Compute: `projected_soc_at_sponge = current_soc − (hours_to_sponge × home_load_kw / 13.5 × 100)`
+- If `projected_soc > 5%`: no action — battery will survive to Solar Sponge above the Powerwall floor; charge cheaply then
+- If `projected_soc ≤ 5%`: top up to just enough to survive — set reserve to `drain_to_sponge + 8%` with a **Price Ceiling of 25¢**
+- This is a minimal survival top-up only — not a top-up to 20%, not a full charge
 - Reserve cleared back to 5% at **6am** (not 8am) — allows 3.5 extra hours of free discharge before the cheap window opens, arriving at the Solar Sponge window with less stored energy and therefore more capacity to absorb cheap grid or solar charging
 
 **Step 2 — Additional charging: only if it beats the morning rate**
