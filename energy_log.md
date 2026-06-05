@@ -1,5 +1,44 @@
 # Energy System Control Log
 
+## 2026-06-06 (session 10 — premature charging bug, Tessie SoC guard, hold ≠ arming)
+
+**Bug identified: agent charged battery at 8:30am while intending to wait for Solar Sponge.**
+
+At ~07:45am battery was at 18% SoC with Solar Sponge (7–11¢) starting at 10am, ~2.25h away. The agent correctly reasoned "wait for Solar Sponge" but executed `set_reserve(85%)` as a "preparation" step — not understanding that `backup_reserve_percent > current_soc` is the Powerwall's charging trigger. The moment reserve was set to 85%, the Powerwall started pulling from grid at 14¢ — exactly the price we were waiting to avoid.
+
+Root cause: the 20% "emergency charge" threshold was incorrectly being used as a floor to top up before a cheap window. The right behaviour: if the battery can survive to the cheap window above the Powerwall's 5% absolute floor, take no action at all.
+
+**Fix 1 — Hold ≠ arming (system prompt CRITICAL block).**
+
+Added explicit guidance: *"Do NOT raise reserve while waiting for a cheaper window."* Reserve should only be raised above 5% if `projected_soc ≤ 5%` — i.e., the battery will hit the absolute floor before the window opens.
+
+Formula: `projected_soc = current_soc − (hours_to_window × home_load_kw / 13.5 × 100)`
+
+- `projected_soc > 5%` → leave reserve at 5%. Battery survives; charge cheap.
+- `projected_soc ≤ 5%` → set reserve to `drain_to_window + 8%` — survival minimum only.
+
+Example from the bug: SoC=18%, load=0.6kW, 2.25h to Solar Sponge → projected = 18 − 10 = 8% → above floor → **no action**.
+
+Updated Rule 1 (Low SoC survival check) and Rule 7 Step 1 in `energy_rules.md` to match.
+
+**Fix 2 — Tessie SoC=0 sanity guard (`_build_battery_state()`).**
+
+Overnight log showed Tessie returning SoC=0% at 06:30am while gateway correctly read 27%. Old code likely panicked and set reserve=80%, causing unnecessary 14¢ grid charging for the 07:00 and 07:30am cycles (logs missing — confirms old code ran). The 08:07am manual run found reserve=80% with SoC=26%, diagnosed the false alarm, and correctly dropped reserve to 5%.
+
+Fix: new `_build_battery_state()` function. If Tessie returns 0%, or gateway reads more than 15% above Tessie when gateway is reliable (`gateway > reserve`), substitute gateway and set `tessie_soc_failed=True`. The `gateway > reserve` guard correctly excludes cases where reserve is high and gateway is floor-clipped — it only fires when gateway is genuinely above the reserve floor and therefore trustworthy.
+
+Three new fields in battery state dict: `soc_tessie_pct`, `soc_gateway_pct`, `tessie_soc_failed`. System prompt updated to explain these fields and when `soc_pct` may differ from Tessie.
+
+**Overnight observation (Jun 5/6 midnight–06:30am):** 12 consecutive correct overnight holds (Rule 20 — overnight hold). Agent correctly deferred charging to Solar Sponge each cycle. SoC drained from ~75% to 27% overnight without grid charging. All 12 cycles showed `deferral_detected=True` but correctly overridden by confirmed-cheap-window logic — correct behaviour.
+
+**Manual Pi run (08:07am):** venv path issue surfaced — `python3 agent/energy_agent.py` fails with ModuleNotFoundError; must use `agent/venv/bin/python agent/energy_agent.py`. Agent correctly found reserve stuck at 80% (from Tessie=0 panic), dropped it to 5% via Tessie API. Solar Sponge then charged correctly.
+
+**08:10am escalation to autonomous — discussed:** the agent escalated to autonomous at ~08:10am (manual run). User flagged this was too early — autonomous should only be warranted when we're 3h from the demand window and short of target. Noted as expected behaviour: graduated solar underdelivery response logic (self_consumption first, autonomous only near the deadline) is already implemented in Rules 22/23 but may need threshold tuning as June data accumulates.
+
+**Discussed: LLM commentary is the dominant Anthropic cost (~$97/month).** Re-architecture Phase 7 (selective narrative — skip LLM on routine hold/overnight cycles, call LLM only on high-stakes decisions) would reduce this to near-zero. Phase 5 cutover is the prerequisite.
+
+**Committed: 5 commits (8c01c1f, 045a074, 2eaf092, 04cc062, 854893c + 88cc39a gitignore).** All 86 tests pass. Pi picks up changes on next cron cycle.
+
 ## 2026-06-05 (session 9 continued — Pi deployment, Cloudflare Tunnel, repo consolidation)
 
 **Raspberry Pi 5 deployment — agent now running on Pi.**
