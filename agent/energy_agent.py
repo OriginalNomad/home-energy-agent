@@ -109,7 +109,7 @@ ENTITIES = {
     "grid_price":           "sensor.1a_wigram_road_glebe_general_price",
     "grid_forecast":        "sensor.1a_wigram_road_glebe_general_forecast",
     "cheap_window":         "sensor.amber_in_cheap_window",
-    "solar_power":          "sensor.solaredge_current_power",         # W
+    "solar_power":          "sensor.solar_power_w",                    # W — Powerwall gateway, real-time (no cloud lag)
     "solar_remaining":      "sensor.solcast_pv_forecast_forecast_remaining_today",  # kWh
     "solar_forecast_today":  "sensor.solcast_pv_forecast_forecast_today",
     "solcast_power_now":     "sensor.solcast_pv_forecast_power_now",    # W — Solcast's instantaneous estimate (÷1000 for kW)
