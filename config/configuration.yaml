@@ -184,6 +184,13 @@ template:
         unit_of_measurement: "W"
         device_class: power
         state: "{{ (states('sensor.tesla_powerwall_2_load_power') | float(0) * 1000) | round(0) }}"
+      - name: "Grid Export kW"
+        unique_id: grid_export_kw
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        state: >
+          {{ [0, -(states('sensor.tesla_powerwall_2_site_power') | float(0))] | max | round(2) }}
 
       - name: "Powerwall Mode"
         icon: mdi:battery-charging-medium
