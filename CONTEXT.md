@@ -87,13 +87,13 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 **Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://192.168.68.70:8123`. Systemd service, connects via Sydney edge.
 **HA external URL**: `https://agent.sol.io`. Trusted proxies configured for Pi subnet + Docker bridge.
 
-## System architecture (as of 2026-06-03)
+## System architecture (as of 2026-06-06)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
 
 **Layer 1 — Intent**: encoded in the agent system prompt (`agent/energy_agent.py`). Goals in priority order: no demand charges, EV never from battery, minimise cost, use solar. Changes rarely.
 
-**Layer 2 — Agent** (`agent/energy_agent.py`): Claude-powered Python script. Runs every 30 min via cron. Reads HA sensor state + Amber price forecast + Solcast solar forecast, reasons about trade-offs, sets `backup_reserve_percent`, Powerwall mode, and Zappi mode. Logs decisions to `agent/agent_decisions.log` (plain text) and `agent/decisions.jsonl` (structured JSON per cycle). The agent handles all *strategic* decisions.
+**Layer 2 — Agent** (`agent/energy_agent.py`): Python script running every 30 min via cron on the Pi. **As of 2026-06-06, `DETERMINISTIC_AUTHORITATIVE = True` — the deterministic rule layer (`compute_decision_context()`) drives all control actions before the LLM runs.** The LLM runs for narrative/logging only; its `set_*` calls are no-op'd. Kill-switch: flip `DETERMINISTIC_AUTHORITATIVE = False` to revert to LLM-authoritative. Logs decisions to `agent/agent_decisions.log` (plain text) and `agent/decisions.jsonl` (structured JSON per cycle). Also writes to `agent/energy_log.db` (SQLite, via `data_logger.py` — wired in 2026-06-06, Phase 2.5-A clock running).
 
 Key agent capabilities added 2026-06-02:
 - **Demand-window reserve guard (Rule 2 backstop)**: at the start of every `run_agent()` cycle, before the LLM runs — if peak month AND 15:00–21:00 AND `reserve > 10%`, immediately calls Tessie API to set reserve=5%, bypassing HA rest_commands entirely. Prevents the June 2 failure mode (reserve stranded at charging floor during demand window, battery unable to discharge).
@@ -102,7 +102,12 @@ Key agent capabilities added 2026-06-02:
 - **`sensor.demand_window_monitor`** pushed to HA via REST API (no config change) each hour + after daily recompute. Feeds two Markdown dashboard cards: (1) peak 30-min import bars per day, (2) pass/fail timeline with min SoC.
 - **June 2 demand window breach**: SoC reached only 81% (target 85%), reserve stuck at 80%. `battery_pre_demand_window_reset` automation fired at 2:55pm but errored — `rest_command` had failed to load at HA startup on June 1 (truncated payload, fixed but HA never restarted). Grid covered cooking load at 7pm. Fixed: Tessie API direct call to drop reserve → HA restart → rest_commands now loading cleanly.
 
-Key agent capabilities added 2026-06-06:
+Key agent capabilities added 2026-06-06 (session 10, continued):
+- **Phase 5 cutover — `DETERMINISTIC_AUTHORITATIVE = True`**: deterministic rule layer now owns the control path. LLM narrative-only. Fixes class of bug where LLM constructs locally valid reasoning leading to wrong action (e.g. charging during demand window). Kill-switch at top of file.
+- **`_guarded_set_reserve()` in TOOL_MAP**: blocks any `set_powerwall_reserve(N > 10)` during 3–9pm peak months. Belt-and-suspenders with the pre-flight guard. Fixes June 6 demand window — reserve stuck at 80% for 7 consecutive cycles because LLM was overriding the guard.
+- **`data_logger.py` wired into `energy_agent.py`**: `energy_log.db` created on Pi startup. `log_cycle_start`, `log_price_forecast`, `log_agent_decision` called each cycle (guarded by `_HAVE_DATA_LOGGER`). Phase 2.5-A (charge rate model) buildable ~2026-06-13.
+
+Key agent capabilities added 2026-06-06 (session 10):
 - **Tessie SoC=0 sanity guard (`_build_battery_state()`)**: new function called from `get_current_state()`. If Tessie returns 0% or gateway reads >15% above Tessie when gateway is reliable (`gateway > reserve`), substitutes gateway and sets `tessie_soc_failed=True`. Prevents panic charging when Tessie has a cloud API hiccup. Three new JSONL fields: `soc_tessie_pct`, `soc_gateway_pct`, `tessie_soc_failed`.
 - **Hold ≠ arming (CRITICAL system prompt block)**: explicit guidance that `set_reserve(high_target)` starts charging immediately because `backup_reserve_percent > soc` triggers the Powerwall. When waiting for a cheaper window, leave reserve at 5% unless the survival projection fails. Formula: `projected_soc = soc − (hours_to_window × home_load_kw / 13.5 × 100)`. If projected > 5%: no action. If projected ≤ 5%: set reserve to drain + 8% only.
 - **5% survival floor (replaces 20% threshold)**: the 20% Minimum Battery Threshold is the floor for intentional discharge decisions (arbitrage, normal operation), NOT a pre-cheap-window top-up target. Rule 1 and Rule 7 Step 1 rewritten in `energy_rules.md` to use the projection formula. Battery is allowed to drain toward 5% while waiting for Solar Sponge.
@@ -261,6 +266,8 @@ Key agent capabilities added 2026-05-29:
 | `agent/log_daily_energy.py` | Daily (21:05 cron) energy journal → `daily_energy.jsonl`. Comprehensive: solar forecast/actual, price by window, battery trajectory, grid import/export, demand window pass/fail (billing-accurate), agent decision rollup. Reads HA history API + decisions.jsonl, no HA config change |
 | `agent/daily_energy.jsonl` | Durable per-day energy record (survives HA recorder rolloff) — source of truth for dashboard cards and future learning agent |
 | `agent/demand_window_summary.py` | Pushes `sensor.demand_window_monitor` into HA via REST API (month peak kW + rolling per-day history). Reads daily_energy.jsonl. Crons: 21:05 + hourly. Feeds two Markdown dashboard cards |
+| `agent/data_logger.py` | Closed-loop SQLite logger — one row per cycle in `energy_log.db`. Foundation for self-calibrating models (Phase 2.5-A+). Wired in 2026-06-06. |
+| `agent/energy_log.db` | SQLite DB on Pi only (gitignored). Accumulates state + price forecasts + decisions each cycle. Inspect: `ssh energypi.local "agent/venv/bin/python home-energy-agent/agent/data_logger.py"` |
 
 ---
 
@@ -276,7 +283,9 @@ Key agent capabilities added 2026-05-29:
 
 **LP optimiser horizon extension — done (2026-06-03).** `_build_hourly_price_model()` + `_extend_forecast_to_demand_window()` added. LP now sees 15:00–21:00 demand-window block with 1000¢/kWh penalty.
 
-**Three-way divergence watch** — Phase 5 cutover blocked by LP not consuming `solar_unreliable` flag. On cloudy mornings the LP holds while LLM+det correctly charge. Need LP solar discount when unreliable + 1-2 more days of data showing correct behaviour before flip. See todo.md Phase 4b/5.
+**Phase 5 complete (2026-06-06)** — `DETERMINISTIC_AUTHORITATIVE = True`. Deterministic layer now drives control. LLM is narrative-only. LP optimiser remains shadow for divergence tracking.
+
+**LP solar_unreliable gap** — LP still doesn't consume the `solar_unreliable` flag. On cloudy mornings LP would hold while det correctly charges. Not a control issue now (det is authoritative), but blocks LP-authoritative cutover if/when that's pursued.
 
 **Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
 
@@ -292,10 +301,11 @@ Key agent capabilities added 2026-05-29:
 
 ## The bigger picture
 
-The system now has three layers:
+The system now has four layers:
 1. **Intent** — goals encoded in the agent system prompt (minimise cost, no demand charges, EV never from battery)
-2. **Agent** — Claude reasons about real-time state + forecasts and makes strategic decisions every 30 min
-3. **Rules** — HA automations enforce hard constraints that the agent cannot override (demand window, export guard)
+2. **Deterministic rule layer** — `compute_decision_context()` drives all control actions every 30 min (authoritative since 2026-06-06)
+3. **LLM narrative** — Claude reads state and writes the log entry; its `set_*` calls are no-op'd
+4. **HA automations** — hard constraints that fire independently (demand window, export guard, emergency)
 
 This is a working prototype of what Sol will productise. The agent replaces the brittle rule-based approximations with genuine look-ahead reasoning. The rules layer stays — some constraints must be deterministic and fast regardless of the reasoning layer above.
 

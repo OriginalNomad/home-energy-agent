@@ -55,3 +55,5 @@ app/.vercel
 app/*.tsbuildinfo
 app/next-env.d.ts
 agent/energy_log.db
+agent/energy_log.db-shm
+agent/energy_log.db-wal
