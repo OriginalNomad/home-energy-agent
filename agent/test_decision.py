@@ -486,17 +486,40 @@ def test_ev_fast_when_below_min_despite_cheaper_incoming():
 
 
 def test_ev_battery_full_solar_absorb():
-    # Battery ≥95% + solar generating + EV below 100% → Eco (in-home surplus, not Eco+)
+    # Battery ≥95% + solar surplus ≥ 1.44 kW (Zappi minimum met) → Eco
     state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=9)
-    state["solar"]["current_kw"] = 2.5
+    state["solar"]["current_kw"] = 2.5   # surplus = 2.5 - 0.5 home = 2.0 kW ≥ 1.44
+    state["home_load_kw"] = 0.5
     ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
     ev = ctx["ev_recommended"]
-    check("ev: Eco when battery full + solar", ev["zappi_mode"] == "Eco", ev)
+    check("ev: Eco when battery full + sufficient surplus", ev["zappi_mode"] == "Eco", ev)
     check("ev: rule is ev_battery_full_solar_absorb", ev["rule_fired"] == "ev_battery_full_solar_absorb", ev)
 
 
+def test_ev_battery_full_low_surplus_fast_below_target():
+    # Battery ≥95% + solar but surplus < 1.44 kW + EV below target + price OK → Fast
+    state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=11)
+    state["solar"]["current_kw"] = 1.37   # surplus = 1.37 - 0.5 = 0.87 kW < 1.44
+    state["home_load_kw"] = 0.5
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(14))
+    ev = ctx["ev_recommended"]
+    check("ev: Fast when surplus < Eco minimum and EV below target", ev["zappi_mode"] == "Fast", ev)
+    check("ev: rule is ev_battery_full_fast_low_surplus", ev["rule_fired"] == "ev_battery_full_fast_low_surplus", ev)
+
+
+def test_ev_battery_full_low_surplus_eco_plus_at_target():
+    # Battery ≥95% + solar but surplus < 1.44 kW + EV at target → Eco+
+    state, fcast = mk_ev_state(80, 20, 80, batt_soc=96, reserve=5, price=11)
+    state["solar"]["current_kw"] = 1.37
+    state["home_load_kw"] = 0.5
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(14))
+    ev = ctx["ev_recommended"]
+    check("ev: Eco+ when surplus < minimum and EV at target", ev["zappi_mode"] == "Eco+", ev)
+    check("ev: rule is ev_battery_full_low_surplus", ev["rule_fired"] == "ev_battery_full_low_surplus", ev)
+
+
 def test_ev_battery_full_solar_absorb_not_when_no_solar():
-    # Battery ≥95% but no solar → falls through to price-based rule (Eco at standard price)
+    # Battery ≥95% but no solar → falls through to price-based rule
     state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=9)
     state["solar"]["current_kw"] = 0.1  # below 0.5 kW threshold
     ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
@@ -666,6 +689,8 @@ if __name__ == "__main__":
                test_ev_fast_when_below_min_within_ceiling, test_ev_eco_plus_when_below_min_above_ceiling,
                test_ev_fast_when_below_min_despite_cheaper_incoming,
                test_ev_battery_full_solar_absorb,
+               test_ev_battery_full_low_surplus_fast_below_target,
+               test_ev_battery_full_low_surplus_eco_plus_at_target,
                test_ev_battery_full_solar_absorb_not_when_no_solar,
                test_ev_battery_full_solar_absorb_not_when_battery_not_full,
                test_solar_unreliable_not_before_9am, test_solar_unreliable_after_9am,
