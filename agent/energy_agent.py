@@ -1080,15 +1080,24 @@ def _detect_sliding_forecast(recent_records: list[dict], current_price: float,
 SOLAR_START_HOUR = 9  # flat roof in Sydney: panels don't produce meaningfully before ~9am
 
 def _detect_zero_solar(recent_records: list[dict], current_solar_kw: float,
-                       now_h: float, sensor_unavailable: bool = False) -> bool:
+                       now_h: float, sensor_unavailable: bool = False,
+                       solcast_remaining_kwh: float = 0.0) -> bool:
     """0 kW actual in 2+ of the last 3 daylight cycles (incl. now) → zero-solar day.
     Only active from SOLAR_START_HOUR onward — before then, zero output is expected
     (low sun angle) and must not be counted as evidence of a zero-solar day.
-    sensor_unavailable=True means HA returned "unavailable" — don't count as a zero cycle."""
+    sensor_unavailable=True means HA returned "unavailable" — don't count as a zero cycle.
+    If Solcast still forecasts > 2 kWh remaining, near-zero actual is just the morning
+    ramp-up or SolarEdge API lag — don't override the forecast."""
     if now_h < SOLAR_START_HOUR:
         return False
+    # Before 10am: near-zero actual is just the morning ramp (low sun angle + SolarEdge
+    # API 15-min lag). Don't override a healthy Solcast forecast at this hour.
+    # From 10am onward: if panels are still near-zero during Solar Sponge, that IS
+    # evidence of a cloudy day — let the detection proceed regardless of Solcast.
+    if solcast_remaining_kwh > 2.0 and now_h < 10.0:
+        return False
     if sensor_unavailable:
-        zeros = 0  # can't count a missing reading as evidence of zero generation
+        zeros = 0
     else:
         zeros = 1 if current_solar_kw <= 0.1 else 0
     for r in recent_records[-3:]:
@@ -1283,7 +1292,7 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     remaining          = solar.get("forecast_remaining_kwh", 0.0) or 0.0
     accuracy           = _accuracy_class(solar.get("forecast_accuracy", ""))
 
-    zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h, solar_unavailable)
+    zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h, solar_unavailable, remaining)
     deferral_detected = _detect_deferral(recent_records, price)
 
     # Overnight hold: Solar Sponge (10am–3pm) is structurally cheaper than overnight
