@@ -77,6 +77,14 @@ COST_PER_1M_CACHE_WRITE  = COST_PER_1M_INPUT * 1.25  # 25% premium on cache writ
 # ---------------------------------------------------------------------------
 HISTORICAL_PRICE_MODEL = True
 
+# ---------------------------------------------------------------------------
+# Re-architecture kill-switches
+# ---------------------------------------------------------------------------
+# DETERMINISTIC_AUTHORITATIVE: when True, compute_decision_context() drives all set_* actions
+# before the LLM runs. The LLM is called for narrative only; its set_* tool calls are no-op'd.
+# Flip to False to revert to LLM-authoritative instantly. Phase 5 — see ARCHITECTURE.md.
+DETERMINISTIC_AUTHORITATIVE = True
+
 # Insurance floor ceiling — maximum floor percentage when price is at the
 # cheapest historical level. User can override via HA slider (below).
 DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
@@ -2188,6 +2196,47 @@ If the system is already in the right state, say so and hold.
 # Agent loop
 # ---------------------------------------------------------------------------
 
+def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str]:
+    """
+    Execute battery and EV actions from the deterministic verdict.
+    Returns a list of action strings matching the log_decision format (e.g. ['set_reserve(85%)']).
+    Used when DETERMINISTIC_AUTHORITATIVE=True so the rule layer drives control, not the LLM.
+    """
+    rec    = ctx.get("recommended", {})
+    ev_rec = ctx.get("ev_recommended", {})
+    state  = _cycle_context.get("state", {})
+    executed = []
+
+    # Battery
+    if rec.get("action") == "charge":
+        target = rec.get("target_pct")
+        mode   = rec.get("mode")
+        if target is not None:
+            print(f"  [det] set_powerwall_reserve({target}%) — rule: {rec.get('rule_fired')}")
+            if not dry_run:
+                set_powerwall_reserve(target)
+            executed.append(f"set_reserve({target}%)")
+        if mode is not None:
+            current_mode = (state.get("battery") or {}).get("mode")
+            if mode != current_mode:
+                print(f"  [det] set_powerwall_mode({mode}) — rule: {rec.get('rule_fired')}")
+                if not dry_run:
+                    set_powerwall_mode(mode)
+                executed.append(f"set_mode({mode})")
+
+    # EV
+    zappi_mode = ev_rec.get("zappi_mode")
+    if zappi_mode and zappi_mode != "n/a":
+        current_zappi = (state.get("ev") or {}).get("zappi_mode")
+        if zappi_mode != current_zappi:
+            print(f"  [det] set_zappi_mode({zappi_mode}) — rule: {ev_rec.get('rule_fired')}")
+            if not dry_run:
+                set_zappi_mode(zappi_mode)
+            executed.append(f"set_zappi({zappi_mode})")
+
+    return executed
+
+
 def _guarded_set_reserve(percent: int) -> str:
     """Block any reserve increase during the demand window — the battery must be free to discharge."""
     now = datetime.now(SYDNEY_TZ)
@@ -2259,25 +2308,40 @@ def run_agent(dry_run: bool = False):
 
     # ------------------------------------------------------------------------------------
 
-    # Shadow decision layer (Phase 3): precompute the deterministic verdict from the
-    # same state + forecast the LLM will read, inject it as REFERENCE ONLY, and log
-    # it alongside the LLM's actual decision so we can measure divergence over time.
-    # The LLM remains authoritative — this does not constrain it.
+    # Deterministic decision layer — always computed.
+    # When DETERMINISTIC_AUTHORITATIVE=True: executes actions directly, LLM gets narrative-only prompt.
+    # When False: injects verdict as REFERENCE ONLY, LLM remains in control (legacy shadow mode).
     shadow_block = ""
+    _det_executed_actions: list[str] = []
     try:
         _state    = get_current_state()
         _forecast = get_price_forecast()
         _records  = get_recent_records(3)
-        # Inject price stats into settings so compute_decision_context can use them
         _prices   = load_price_history(PRICE_HISTORY_DAYS)
         _stats    = _price_stats(_prices)
         _state.setdefault("settings", {})["price_stats"] = _stats
         _ctx      = compute_decision_context(_state, _forecast, _records,
                                              datetime.now(SYDNEY_TZ))
         _cycle_context["decision_context"] = _ctx
-        shadow_block = "\n\n" + _format_decision_context(_ctx)
+
+        if DETERMINISTIC_AUTHORITATIVE:
+            # Execute the verdict now, before the LLM runs.
+            _det_executed_actions = _execute_deterministic_verdict(_ctx, dry_run=dry_run)
+            _rec    = _ctx.get("recommended", {})
+            _ev_rec = _ctx.get("ev_recommended", {})
+            _cmds   = _det_executed_actions or ["hold — no change needed"]
+            shadow_block = (
+                "\n\n## Actions already executed by deterministic rule layer\n"
+                f"  rule_fired: {_rec.get('rule_fired')}  action: {_rec.get('action')}  "
+                f"target_pct: {_rec.get('target_pct')}  mode: {_rec.get('mode')}\n"
+                f"  EV: zappi={_ev_rec.get('zappi_mode')} (rule: {_ev_rec.get('rule_fired')})\n"
+                f"  Commands sent: {_cmds}\n\n"
+                + _format_decision_context(_ctx)
+            )
+        else:
+            shadow_block = "\n\n" + _format_decision_context(_ctx)
     except Exception as exc:
-        print(f"  Warning: shadow decision context failed: {exc}", file=sys.stderr)
+        print(f"  Warning: deterministic decision context failed: {exc}", file=sys.stderr)
 
     # LP optimiser shadow verdict — separate try so it can never affect the
     # deterministic shadow or the control path. Shadow only, not authoritative.
@@ -2299,14 +2363,29 @@ def run_agent(dry_run: bool = False):
         except Exception as exc:
             print(f"  Warning: optimizer shadow failed: {exc}", file=sys.stderr)
 
-    initial_msg   = (
-        "Run your energy optimisation cycle now.\n\n"
-        "## Recent decisions (last 3 cycles)\n"
-        f"{recent}\n\n"
-        "Check this before deciding to hold. If you see 2+ consecutive holds waiting for "
-        "a cheaper window that hasn't arrived, apply the deferral limit rule and charge now."
-        f"{shadow_block}"
-    )
+    if DETERMINISTIC_AUTHORITATIVE:
+        initial_msg = (
+            "The deterministic rule layer has already executed this cycle's control actions "
+            "(see below). Your job this cycle is NARRATIVE ONLY:\n"
+            "1. Call get_current_state() and get_price_forecast() to read current state.\n"
+            "2. Call log_decision() with a clear human-readable summary of what was done and why.\n"
+            "   - Do NOT call set_powerwall_reserve, set_powerwall_mode, or set_zappi_mode — "
+            "those calls will be ignored.\n"
+            "   - The actions_taken list in log_decision should reflect what the rule layer executed "
+            "(shown below under 'Commands sent').\n\n"
+            "## Recent decisions (last 3 cycles)\n"
+            f"{recent}\n"
+            f"{shadow_block}"
+        )
+    else:
+        initial_msg = (
+            "Run your energy optimisation cycle now.\n\n"
+            "## Recent decisions (last 3 cycles)\n"
+            f"{recent}\n\n"
+            "Check this before deciding to hold. If you see 2+ consecutive holds waiting for "
+            "a cheaper window that hasn't arrived, apply the deferral limit rule and charge now."
+            f"{shadow_block}"
+        )
     messages = [{"role": "user", "content": initial_msg}]
 
     print(f"\n{'='*60}")
@@ -2351,8 +2430,12 @@ def run_agent(dry_run: bool = False):
 
                 print(f"→ {name}({_args_summary(args)})")
 
+                det_noop = DETERMINISTIC_AUTHORITATIVE and name.startswith("set_") and name != "log_decision"
                 if dry_run and is_write:
                     result = f"[dry-run] {name} skipped"
+                elif det_noop:
+                    result = f"[deterministic-authoritative] {name} ignored — rule layer already acted"
+                    print(f"  (no-op: deterministic mode)")
                 else:
                     try:
                         result = TOOL_MAP[name](args)
