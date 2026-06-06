@@ -1096,10 +1096,14 @@ def _detect_zero_solar(recent_records: list[dict], current_solar_kw: float,
     # evidence of a cloudy day — let the detection proceed regardless of Solcast.
     if solcast_remaining_kwh > 2.0 and now_h < 10.0:
         return False
+    # Current cycle shows real solar — can't be a zero-solar day regardless of history.
+    # This also clears stale history when the sensor source changes mid-day.
+    if current_solar_kw > 0.1 and not sensor_unavailable:
+        return False
     if sensor_unavailable:
         zeros = 0
     else:
-        zeros = 1 if current_solar_kw <= 0.1 else 0
+        zeros = 1  # current is ≤ 0.1
     for r in recent_records[-3:]:
         ts_hour = int(r.get("ts", "T00")[11:13] or 0) if r.get("ts") else 0
         if ts_hour >= SOLAR_START_HOUR and (r.get("solar_current_kw") or 0) <= 0.1:
