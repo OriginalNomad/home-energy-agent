@@ -1415,21 +1415,17 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_case6_negative_fit_solar_dump"}
     elif soc >= 95 and solar_now > 0.5 and ev_soc < 100:
         # Battery full + real solar generating + EV has capacity.
-        # Choose mode based on whether there's enough surplus for Eco's 1.44 kW minimum (6A×240V).
-        eco_surplus_kw = solar_now - home_load_kw
-        if eco_surplus_kw >= 1.44:
-            # Enough in-home surplus for Eco to actually charge. Use Eco (not Eco+) because
-            # Powerwall regulation suppresses grid export below Zappi's minimum even when
-            # genuine solar surplus exists. Battery at ≥95% won't discharge for EV.
-            ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_battery_full_solar_absorb"}
-        elif ev_soc < ev_target and price < min_charge_price_c:
-            # Surplus below Eco minimum but EV still needs charge and price is acceptable.
-            # Fast is better than idle: solar offsets part of the draw, EV charges before
-            # the demand window or overnight hold period starts.
-            ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_battery_full_fast_low_surplus"}
+        # Default: Eco (in-home surplus). Powerwall at 100% regulates grid export below
+        # Zappi's 1.44 kW minimum; Eco tracks in-home surplus and charges when available.
+        # Battery at ≥95% won't discharge for EV so battery-to-EV risk doesn't apply.
+        # NOTE: do NOT use home_load_kw to estimate surplus here — home_load_30min_average
+        # includes EV draw, creating a circular calculation.
+        if is_peak and ev_soc < ev_target and hours_to_2_55 <= 0.75 and price < min_charge_price_c:
+            # Demand window ≤45 min away, EV still below target, price acceptable.
+            # Switch to Fast to maximise EV charge before the expensive window starts.
+            ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_battery_full_fast_deadline"}
         else:
-            # Surplus too low for Eco, EV at or above target — Eco+ catches any grid export.
-            ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_battery_full_low_surplus"}
+            ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_battery_full_solar_absorb"}
     elif ev_soc >= ev_target:
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_target_met"}
     elif price < ultra_cheap_c:
@@ -1760,12 +1756,11 @@ You are the energy optimisation agent for a residential battery system in Glebe,
             → Eco+ (absorbs solar surplus into EV rather than paying to export; no grid draw)
 
    Battery full + solar: battery SoC ≥ 95% AND solar > 0.5 kW AND EV SoC < 100%
-            Sub-cases based on usable surplus (solar_kw − home_load_kw):
-            ≥ 1.44 kW surplus → Eco (in-home surplus, Zappi minimum met — charges correctly).
-            < 1.44 kW surplus + EV below target + price < ev_min_charge_price_c → Fast
-              (surplus too low for Eco minimum; Fast is better than idle — solar offsets part
-               of draw, EV charges before demand window).
-            < 1.44 kW surplus + EV at target → Eco+ (nothing to absorb, catch any grid export).
+            Default → Eco (in-home surplus). Powerwall at 100% regulates grid export below
+            Zappi's 1.44 kW minimum; Eco tracks in-home surplus directly. Battery won't
+            discharge at ≥95%, so battery-to-EV risk doesn't apply.
+            Exception: peak month + EV below target + demand window ≤45 min + price OK
+            → Fast (maximise EV charge in the last window before 3–9pm lockout).
 
    Target met (EV SoC ≥ [target]): Eco+ — catches free solar overflow only.
 
