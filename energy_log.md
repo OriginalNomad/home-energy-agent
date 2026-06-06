@@ -1,5 +1,20 @@
 # Energy System Control Log
 
+## 2026-06-06 (session 10 continued — demand window reserve bug, Phase 5 cutover, data logger)
+
+**Demand window reserve stuck at 80% — 7 consecutive cycles (18:30–21:00).**
+Agent was confusing the pre-charge target (reach 85% SoC by 2:55pm) with a floor to maintain during the demand window. Pre-flight guard dropped reserve to 5% at cycle start, but LLM then overrode it back to 85% reasoning "SoC < 85%, I should charge." Battery couldn't discharge; all home load came from grid.
+
+Two fixes deployed:
+1. `_guarded_set_reserve()` in TOOL_MAP — blocks any set_reserve(N > 10) during 3–9pm peak months. Returns error string without API call.
+2. Explicit system prompt instruction: 85% target is a pre-charge goal, NOT a floor during the window. Reserve must stay at 5% during demand window.
+
+**Phase 5 cutover — deterministic layer now authoritative.**
+Root cause of the demand window bug: LLM reasons from first principles and can construct valid-sounding wrong answers. Rule tree cannot. `DETERMINISTIC_AUTHORITATIVE = True` added. `compute_decision_context()` now executes all set_* actions before the LLM runs. LLM runs narrative-only; its set_* calls are no-op'd. `log_decision()` unchanged — JSONL written per cycle. Kill-switch: `DETERMINISTIC_AUTHORITATIVE = False`.
+
+**data_logger.py wired into energy_agent.py.**
+`energy_log.db` now created on startup. Three call sites added (all guarded by `_HAVE_DATA_LOGGER`): `log_cycle_start` after state read, `log_price_forecast` after forecast read, `log_agent_decision` inside `log_decision`. Phase 2.5-A clock started — charge rate model buildable after ~1 week (target ~2026-06-13).
+
 ## 2026-06-06 (session 10 — premature charging bug, Tessie SoC guard, hold ≠ arming)
 
 **Bug identified: agent charged battery at 8:30am while intending to wait for Solar Sponge.**
