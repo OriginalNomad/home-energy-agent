@@ -496,26 +496,28 @@ def test_ev_battery_full_solar_absorb():
     check("ev: rule is ev_battery_full_solar_absorb", ev["rule_fired"] == "ev_battery_full_solar_absorb", ev)
 
 
-def test_ev_battery_full_low_surplus_fast_below_target():
-    # Battery ≥95% + solar but surplus < 1.44 kW + EV below target + price OK → Fast
-    state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=11)
-    state["solar"]["current_kw"] = 1.37   # surplus = 1.37 - 0.5 = 0.87 kW < 1.44
-    state["home_load_kw"] = 0.5
-    ctx = ea.compute_decision_context(state, fcast, [], now_at(14))
-    ev = ctx["ev_recommended"]
-    check("ev: Fast when surplus < Eco minimum and EV below target", ev["zappi_mode"] == "Fast", ev)
-    check("ev: rule is ev_battery_full_fast_low_surplus", ev["rule_fired"] == "ev_battery_full_fast_low_surplus", ev)
-
-
-def test_ev_battery_full_low_surplus_eco_plus_at_target():
-    # Battery ≥95% + solar but surplus < 1.44 kW + EV at target → Eco+
-    state, fcast = mk_ev_state(80, 20, 80, batt_soc=96, reserve=5, price=11)
+def test_ev_battery_full_fast_deadline():
+    # Peak month, demand window ≤45 min away, EV below target, price OK → Fast
+    state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=11, in_demand=False)
+    state["is_peak_month"] = True
     state["solar"]["current_kw"] = 1.37
-    state["home_load_kw"] = 0.5
-    ctx = ea.compute_decision_context(state, fcast, [], now_at(14))
+    # now_at(14, 30) = 14:30 → hours_to_2_55 = 14.917 - 14.5 = 0.417h ≤ 0.75
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(14, 30))
     ev = ctx["ev_recommended"]
-    check("ev: Eco+ when surplus < minimum and EV at target", ev["zappi_mode"] == "Eco+", ev)
-    check("ev: rule is ev_battery_full_low_surplus", ev["rule_fired"] == "ev_battery_full_low_surplus", ev)
+    check("ev: Fast when demand window ≤45min and EV below target", ev["zappi_mode"] == "Fast", ev)
+    check("ev: rule is ev_battery_full_fast_deadline", ev["rule_fired"] == "ev_battery_full_fast_deadline", ev)
+
+
+def test_ev_battery_full_eco_not_fast_when_deadline_far():
+    # Battery full + solar but demand window > 45 min away → Eco (not Fast)
+    state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=11, in_demand=False)
+    state["is_peak_month"] = True
+    state["solar"]["current_kw"] = 1.37
+    # now_at(11) → hours_to_2_55 = 3.9h >> 0.75 → no deadline escalation
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Eco when deadline far", ev["zappi_mode"] == "Eco", ev)
+    check("ev: rule is ev_battery_full_solar_absorb", ev["rule_fired"] == "ev_battery_full_solar_absorb", ev)
 
 
 def test_ev_battery_full_solar_absorb_not_when_no_solar():
@@ -689,8 +691,8 @@ if __name__ == "__main__":
                test_ev_fast_when_below_min_within_ceiling, test_ev_eco_plus_when_below_min_above_ceiling,
                test_ev_fast_when_below_min_despite_cheaper_incoming,
                test_ev_battery_full_solar_absorb,
-               test_ev_battery_full_low_surplus_fast_below_target,
-               test_ev_battery_full_low_surplus_eco_plus_at_target,
+               test_ev_battery_full_fast_deadline,
+               test_ev_battery_full_eco_not_fast_when_deadline_far,
                test_ev_battery_full_solar_absorb_not_when_no_solar,
                test_ev_battery_full_solar_absorb_not_when_battery_not_full,
                test_solar_unreliable_not_before_9am, test_solar_unreliable_after_9am,
