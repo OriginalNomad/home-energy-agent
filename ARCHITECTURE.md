@@ -96,7 +96,7 @@ which nothing bad can happen.
 
 ## Layer 1 — Closed-loop data logger
 
-**Status: built** (`agent/data_logger.py`, integrated into `energy_agent.py`)
+**Status: built and wired in** (`agent/data_logger.py`, wired into `energy_agent.py` 2026-06-06). Phase 2.5-A clock started — 1 week of data needed to build the charge rate model.
 
 ### What it writes
 

@@ -31,6 +31,14 @@ try:
 except Exception:                       # scipy/optimizer missing → skip cleanly
     _HAVE_OPTIMIZER = False
 
+try:
+    import data_logger
+    data_logger.init_db()
+    _HAVE_DATA_LOGGER = True
+except Exception as _dl_exc:
+    _HAVE_DATA_LOGGER = False
+    print(f"  Warning: data_logger unavailable — {_dl_exc}", file=sys.stderr)
+
 # ---------------------------------------------------------------------------
 # Configuration — move sensitive values to environment variables in production
 # ---------------------------------------------------------------------------
@@ -322,6 +330,11 @@ def get_current_state() -> dict:
         },
     }
     _cycle_context["state"] = state
+    if _HAVE_DATA_LOGGER:
+        try:
+            _cycle_context["db_cycle_id"] = data_logger.log_cycle_start(state)
+        except Exception as _exc:
+            print(f"  Warning: data_logger.log_cycle_start failed — {_exc}", file=sys.stderr)
     return state
 
 
@@ -366,6 +379,13 @@ def get_price_forecast() -> list[dict]:
             "descriptor": descriptors[key],
         })
     _cycle_context["price_forecast"] = result
+    if _HAVE_DATA_LOGGER:
+        try:
+            _cid = _cycle_context.get("db_cycle_id")
+            if _cid:
+                data_logger.log_price_forecast(_cid, result)
+        except Exception as _exc:
+            print(f"  Warning: data_logger.log_price_forecast failed — {_exc}", file=sys.stderr)
     return result
 
 
@@ -751,6 +771,14 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
 
     with JSONL_FILE.open("a") as f:
         f.write(json.dumps(record) + "\n")
+
+    if _HAVE_DATA_LOGGER:
+        try:
+            _cid = _cycle_context.get("db_cycle_id")
+            if _cid:
+                data_logger.log_agent_decision(_cid, summary, actions_taken)
+        except Exception as _exc:
+            print(f"  Warning: data_logger.log_agent_decision failed — {_exc}", file=sys.stderr)
 
     _maybe_write_daily_accuracy(now)
 
