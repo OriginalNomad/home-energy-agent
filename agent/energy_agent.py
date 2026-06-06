@@ -1727,6 +1727,12 @@ You are the energy optimisation agent for a residential battery system in Glebe,
    Any import during this window sets the monthly demand charge (~$80–120 extra).
 
    TARGET: battery must be at 85%+ SoC by 2:55pm on peak month days.
+   DURING THE DEMAND WINDOW (3–9pm): reserve MUST be 5% so the battery can discharge freely.
+   Do NOT call set_powerwall_reserve with any value above 5% during 3–9pm peak months.
+   The 85% target is a pre-charge goal (reach it BY 2:55pm) — it is NOT a floor to maintain
+   during the window. Once the window starts, your job is to let the battery discharge, not charge.
+   (The system will block any set_reserve > 10% during 3–9pm as a safety net, but you should
+   not attempt it — the right action is hold/do-nothing.)
    Work backwards from this target every morning:
    - Estimate solar contribution for the day (from solar forecast)
    - If solar alone won't get battery to 85% by 2:55pm, charge from grid — even at
@@ -2182,12 +2188,24 @@ If the system is already in the right state, say so and hold.
 # Agent loop
 # ---------------------------------------------------------------------------
 
+def _guarded_set_reserve(percent: int) -> str:
+    """Block any reserve increase during the demand window — the battery must be free to discharge."""
+    now = datetime.now(SYDNEY_TZ)
+    in_demand = now.month in PEAK_MONTHS and 15 <= now.hour < 21
+    if in_demand and percent > 10:
+        msg = (f"set_powerwall_reserve({percent}%) BLOCKED — demand window active. "
+               f"Reserve must stay at 5% so battery can discharge. No API call made.")
+        print(f"  ⚠️  {msg}", file=sys.stderr)
+        return msg
+    return set_powerwall_reserve(percent)
+
+
 TOOL_MAP = {
     "get_current_state":    lambda _: get_current_state(),
     "get_price_forecast":   lambda _: get_price_forecast(),
     "get_solar_forecast":   lambda _: get_solar_forecast(),
     "get_weather_forecast": lambda _: get_weather_forecast(),
-    "set_powerwall_reserve":lambda a: set_powerwall_reserve(a["percent"]),
+    "set_powerwall_reserve":lambda a: _guarded_set_reserve(a["percent"]),
     "set_powerwall_mode":   lambda a: set_powerwall_mode(a["mode"]),
     "set_zappi_mode":       lambda a: set_zappi_mode(a["mode"]),
     "log_decision":         lambda a: log_decision(a["summary"], a["actions_taken"], a.get("ev_summary", "")),
