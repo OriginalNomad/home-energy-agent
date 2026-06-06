@@ -1167,6 +1167,52 @@
             option: "Eco+"
 
 # ─────────────────────────────────────────────────────────────
+# EV demand window guard
+# Fires the instant the demand window turns on — sets Zappi to Eco+
+# immediately rather than waiting for the next 30-min agent cycle.
+# The agent owns all other Zappi mode decisions; this is purely a
+# timing safety net for the 3:00pm transition.
+# ─────────────────────────────────────────────────────────────
+- id: ev_demand_window_guard
+  alias: "EV: Demand window guard — instant Eco+ at 3pm"
+  description: >
+    Fires when binary_sensor demand window turns on (3:00pm in peak months).
+    Switches Zappi to Eco+ immediately so EV never draws grid power into
+    the demand window. Agent would catch this at 3:00pm cron but may be
+    60-90s late — this fires within seconds of the sensor state change.
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.1a_wigram_road_glebe_demand_window
+      to: "on"
+  conditions:
+    - condition: template
+      value_template: "{{ now().month in [11, 12, 1, 2, 3, 6, 7, 8] }}"
+    - condition: not
+      conditions:
+        - condition: state
+          entity_id: sensor.home_ev_charger_zappi_myenergi_home_ev_charger_zappi_plug_status
+          state: "EV Disconnected"
+    - condition: not
+      conditions:
+        - condition: state
+          entity_id: sensor.home_ev_charger_zappi_myenergi_home_ev_charger_zappi_plug_status
+          state: "unavailable"
+  actions:
+    - action: select.select_option
+      target:
+        entity_id: select.home_ev_charger_zappi_myenergi_home_ev_charger_zappi_charge_mode
+      data:
+        option: "Eco+"
+    - action: persistent_notification.create
+      data:
+        notification_id: ev_demand_window_guard
+        title: "🚗 EV — Demand Window (instant guard)"
+        message: >
+          Zappi → Eco+ at {{ now().strftime('%H:%M:%S') }}.
+          Demand window open — no grid draw from EV until 9pm.
+
+# ─────────────────────────────────────────────────────────────
 # EV plug-in notification
 # Alerts when Zappi detects EV connection.
 # NOTE: verify "EV Connected" is the correct plug_status value.
