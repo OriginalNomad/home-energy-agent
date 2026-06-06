@@ -485,6 +485,34 @@ def test_ev_fast_when_below_min_despite_cheaper_incoming():
     check("ev: Case 3 rule", ev["rule_fired"] == "ev_case3_below_minimum", ev)
 
 
+def test_ev_battery_full_solar_absorb():
+    # Battery ≥95% + solar generating + EV below 100% → Eco (in-home surplus, not Eco+)
+    state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=9)
+    state["solar"]["current_kw"] = 2.5
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: Eco when battery full + solar", ev["zappi_mode"] == "Eco", ev)
+    check("ev: rule is ev_battery_full_solar_absorb", ev["rule_fired"] == "ev_battery_full_solar_absorb", ev)
+
+
+def test_ev_battery_full_solar_absorb_not_when_no_solar():
+    # Battery ≥95% but no solar → falls through to price-based rule (Eco at standard price)
+    state, fcast = mk_ev_state(70, 20, 80, batt_soc=96, reserve=5, price=9)
+    state["solar"]["current_kw"] = 0.1  # below 0.5 kW threshold
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: not battery-full-solar rule when no solar", ev["rule_fired"] != "ev_battery_full_solar_absorb", ev)
+
+
+def test_ev_battery_full_solar_absorb_not_when_battery_not_full():
+    # Solar generating but battery only 85% → does NOT fire battery-full rule
+    state, fcast = mk_ev_state(70, 20, 80, batt_soc=85, reserve=5, price=9)
+    state["solar"]["current_kw"] = 2.5
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(11))
+    ev = ctx["ev_recommended"]
+    check("ev: not battery-full-solar rule at 85%", ev["rule_fired"] != "ev_battery_full_solar_absorb", ev)
+
+
 def test_solar_unreliable_not_before_9am():
     # At 8:30am, actual solar=0 but Solcast forecasts 1.2kWh — should NOT be solar_unreliable
     state = mk_state(30, 8, accuracy="unreliable", solar_kw=0.0, remaining=6.0,
@@ -637,6 +665,9 @@ if __name__ == "__main__":
                test_ev_fast_when_ultra_cheap, test_ev_eco_plus_during_demand_window,
                test_ev_fast_when_below_min_within_ceiling, test_ev_eco_plus_when_below_min_above_ceiling,
                test_ev_fast_when_below_min_despite_cheaper_incoming,
+               test_ev_battery_full_solar_absorb,
+               test_ev_battery_full_solar_absorb_not_when_no_solar,
+               test_ev_battery_full_solar_absorb_not_when_battery_not_full,
                test_solar_unreliable_not_before_9am, test_solar_unreliable_after_9am,
                test_nonpeak_solar_unreliable_escalates_autonomous,
                test_nonpeak_solar_good_stays_selfcons,

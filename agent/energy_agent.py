@@ -1413,6 +1413,13 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     elif fit_price < 0 and soc >= 85 and ev_soc < 100:
         # FIT negative: absorb solar surplus into EV rather than paying to export
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_case6_negative_fit_solar_dump"}
+    elif soc >= 95 and solar_now > 0.5 and ev_soc < 100:
+        # Battery full + real solar generating + EV has capacity.
+        # Use Eco (in-home surplus) not Eco+ (grid export). When Powerwall is at 100% it
+        # regulates grid flow, suppressing export below Zappi's 1.4 kW minimum even when
+        # genuine solar surplus exists inside the house. Eco tracks in-home surplus directly.
+        # Battery at ≥95% won't discharge to feed EV, so battery-to-EV risk doesn't apply.
+        ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_battery_full_solar_absorb"}
     elif ev_soc >= ev_target:
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_target_met"}
     elif price < ultra_cheap_c:
@@ -1741,6 +1748,12 @@ You are the energy optimisation agent for a residential battery system in Glebe,
 
    Case 6: FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%
             → Eco+ (absorbs solar surplus into EV rather than paying to export; no grid draw)
+
+   Battery full + solar: battery SoC ≥ 95% AND solar > 0.5 kW AND EV SoC < 100%
+            → Eco (in-home surplus). Powerwall at 100% regulates grid flow, keeping grid
+              export below Zappi's 1.4 kW minimum even when solar surplus exists inside the
+              house. Eco tracks in-home surplus and charges correctly. Battery won't discharge
+              to feed EV at ≥95%, so the battery-to-EV risk does not apply.
 
    Target met (EV SoC ≥ [target]): Eco+ — catches free solar overflow only.
 
