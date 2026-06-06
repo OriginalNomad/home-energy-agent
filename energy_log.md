@@ -39,6 +39,20 @@ Three new fields in battery state dict: `soc_tessie_pct`, `soc_gateway_pct`, `te
 
 **Committed: 5 commits (8c01c1f, 045a074, 2eaf092, 04cc062, 854893c + 88cc39a gitignore).** All 86 tests pass. Pi picks up changes on next cron cycle.
 
+**Second bug cluster discovered — premature charging again at 09:25am.**
+
+Despite the hold≠arming CRITICAL block, agent charged at 11¢ at 09:25am. Root cause: **decision tree ordering bug** in `compute_decision_context()`. `peak_deadline_selfcons` was evaluated before `wait_for_cheap_go_hard`. At 09:25am `fill_slow_85=5.24h ≥ deadline-1h=4.5h` → `peak_deadline_selfcons` fired and the LLM followed it, setting reserve=85% at 11¢ when Solar Sponge (7¢) was 35 minutes away.
+
+**Fix 3 — Decision tree reorder (3957e8c):** moved `wait_for_cheap_go_hard` and Solar Sponge cases (`peak_sponge_go_hard`, `peak_sponge_selfcons`, `solar_sponge_floor`) before `peak_deadline_selfcons`. `peak_deadline_selfcons` now only fires if no cheaper go-hard slot exists AND there's no Solar Sponge window available.
+
+**Fix 4 — `_detect_zero_solar` false positive suppression (00fac85):** On the same morning (clear sky), agent declared `zero_solar_day=True` before 10am because the lagged SolarEdge sensor showed ~27W throughout the morning ramp. Fix: if `solcast_remaining > 2.0 kWh AND now_h < 10.0`, suppress zero-solar. At 10am+ actual zero readings become valid evidence.
+
+**Fix 5 — Solar sensor switch (9a67c27):** Root cause of the 27W reading: agent was reading `sensor.solaredge_current_power` (SolarEdge cloud API, ~15-min lag). Real-time sensor is `sensor.solar_power_w` (template wrapping Powerwall gateway `sensor.tesla_powerwall_2_solar_power`, real-time). Changed ENTITIES dict to use `sensor.solar_power_w`. At the time of detection: lagged sensor = 27W, real-time sensor = 354–412W.
+
+**Fix 6 — `_detect_zero_solar` stale history override (073a6e2):** After the sensor switch, stale JSONL records from the old sensor still showed ≤0.1 kW, keeping `zero_solar_day=True` for several cycles. Fix: if current reading > 0.1 kW and sensor is available, return False immediately regardless of history.
+
+**Dashboard card fix — Solar Forecast vs Actual (apexcharts):** Card second series was using `sensor.tesla_powerwall_2_solar_power` (kW = 0.412) with `transform: return x / 1000` → displayed 0.000412, rounded to "0 W". Fixed by switching to `sensor.tesla_powerwall_2_solar_power` without transform (native kW scale) and removing `* 1000` from the Solcast `data_generator` — both series now in kW. Using the Powerwall sensor rather than `sensor.solar_power_w` because the Powerwall sensor has recorder history; `solar_power_w` is a template sensor that may not be recorded.
+
 ## 2026-06-05 (session 9 continued — Pi deployment, Cloudflare Tunnel, repo consolidation)
 
 **Raspberry Pi 5 deployment — agent now running on Pi.**
