@@ -2386,7 +2386,9 @@ def run_agent(dry_run: bool = False):
     # deterministic shadow or the control path. Shadow only, not authoritative.
     if _HAVE_OPTIMIZER:
         try:
-            _opt_state  = _cycle_context.get("state")
+            _opt_state  = dict(_cycle_context.get("state") or {})
+            _det_ctx    = _cycle_context.get("decision_context") or {}
+            _opt_state["solar_unreliable"] = _det_ctx.get("solar_unreliable", False)
             _opt_prices = _cycle_context.get("price_forecast")
             if _opt_state and _opt_prices:
                 # Extend the ~6h Amber forecast with synthetic historical prices so the LP

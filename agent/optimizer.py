@@ -125,8 +125,12 @@ def optimize_battery(state: dict,
         return _verdict_only("hold", None, None, "insufficient_forecast", H, soc0_pct)
 
     # forecasts on the price grid, with the robustness knob applied
+    solar_unreliable = bool(state.get("solar_unreliable", False))
     solar = _build_solar_series(price_forecast, solar_forecast, H, fallback_kw=0.0)
-    solar = [s * (1.0 - 0.5 * p.risk) for s in solar]            # conservative solar
+    if solar_unreliable:
+        solar = [0.0] * H                    # mirror deterministic: ignore Solcast when flag set
+    else:
+        solar = [s * (1.0 - 0.5 * p.risk) for s in solar]        # conservative solar
     load = [home_load * (1.0 + 0.3 * p.risk)] * H                # conservative load
     if feedin_forecast and len(feedin_forecast) >= H:
         feedin = [float(x) for x in feedin_forecast[:H]]

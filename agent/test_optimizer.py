@@ -152,5 +152,23 @@ traj_ext = r_ext.get("soc_trajectory_pct") or []
 check("  ...extended horizon lifts SoC meaningfully",
       len(traj_ext) > 12 and traj_ext[11] > 30 + 10, traj_ext[:14])
 
+# 8. solar_unreliable flag: peak month, demand window visible in extended horizon.
+#    Strong solar (4 kW) → without flag LP trusts it → solar-only/hold.
+#    With flag LP zeroes solar → must grid-charge to avoid demand penalty.
+_pf8 = _prices([9, 9, 10, 10, 11, 12, 13, 14, 15, 16, 17, 18], start="2026-06-03 09:00")
+_pf8 += [{"time": f"2026-06-03 {h:02d}:{m:02d}", "cents_kwh": 25.0,
+           "descriptor": "synthetic_historical"}
+          for h in range(15, 21) for m in [0, 30]]
+_solar8 = [{"time": f["time"], "kw_est": 4.0} for f in _pf8]
+r8_ok  = optimize_battery({"soc_pct": 30, "is_peak_month": True, "home_load_kw": 1.0},
+                           _pf8, _solar8, now_am)
+r8_bad = optimize_battery({"soc_pct": 30, "is_peak_month": True, "home_load_kw": 1.0,
+                            "solar_unreliable": True},
+                           _pf8, _solar8, now_am)
+check("solar_unreliable=False + strong solar → solar-only or hold",
+      r8_ok["verdict"]["rule_fired"] in ("mpc_solar_only", "mpc_hold"), r8_ok["verdict"])
+check("solar_unreliable=True zeroes forecast → charges from grid",
+      r8_bad["verdict"]["action"] == "charge", r8_bad["verdict"])
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)
