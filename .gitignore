@@ -31,6 +31,9 @@ config/secrets.yaml
 agent/Claude AI - API details
 agent/.env
 agent/__pycache__/
+agent/decisions.jsonl
+agent/daily_energy.jsonl
+agent/agent_decisions.log
 
 # App (Next.js)
 app/node_modules
