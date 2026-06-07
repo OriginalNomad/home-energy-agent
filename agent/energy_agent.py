@@ -1464,10 +1464,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_battery_full_solar_absorb"}
     elif ev_soc >= ev_target:
         ev_rec = {"zappi_mode": "Eco+", "rule_fired": "ev_target_met"}
-    elif price < ultra_cheap_c:
+    elif price <= ultra_cheap_c:
         # Price below ultra-cheap threshold — charge fast
         ev_rec = {"zappi_mode": "Fast", "rule_fired": "ev_ultra_cheap"}
-    elif price < standard_price_c:
+    elif price <= standard_price_c:
         # Price below standard threshold — charge slowly (Eco: grid+solar, no battery discharge)
         ev_rec = {"zappi_mode": "Eco", "rule_fired": "ev_standard_price"}
     else:
@@ -1806,9 +1806,9 @@ You are the energy optimisation agent for a residential battery system in Glebe,
 
    Target met (EV SoC ≥ [target]): Eco+ — catches free solar overflow only.
 
-   Price < ev_ultra_cheap_c: Fast — charge hard, price is exceptional.
+   Price <= ev_ultra_cheap_c: Fast — charge hard, price is exceptional.
 
-   Price < ev_standard_price_c: Eco — charge slowly from grid+solar, price is acceptable.
+   Price <= ev_standard_price_c: Eco — charge slowly from grid+solar, price is acceptable.
 
    Otherwise: Eco+ — price too high, solar-only.
 
