@@ -285,6 +285,10 @@ Key agent capabilities added 2026-05-29:
 
 **Phase 5 complete (2026-06-06)** — `DETERMINISTIC_AUTHORITATIVE = True`. Deterministic layer now drives control. LLM is narrative-only. LP optimiser remains shadow for divergence tracking.
 
+**Tesla app backup reserve — set to 5% (2026-06-07).** Previously 80%, which caused the reserve to drift back to 80% whenever Tessie's cloud command didn't fully persist to Powerwall hardware. Now 5% is the firmware fallback — safe. The pre-flight guard and `_guarded_set_reserve()` override upward as needed.
+
+**HA automation YAML vs UI discrepancy**: automations.yaml has no `enabled: false` entries — all 21 battery automations show as enabled in the file. HA UI enable/disable state is stored separately in HA's internal storage. Confirmed via HA UI: `battery_winter_overnight_precharge` and `battery_cloudy_day_topup` are disabled. The other 10 "agent handles" automations need verification in HA UI. Most critical to confirm disabled: `battery_cheap_window_autonomous_charge` (sets reserve=100% when Amber cheap window opens).
+
 **LP solar_unreliable gap** — LP still doesn't consume the `solar_unreliable` flag. On cloudy mornings LP would hold while det correctly charges. Not a control issue now (det is authoritative), but blocks LP-authoritative cutover if/when that's pursued.
 
 **Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
