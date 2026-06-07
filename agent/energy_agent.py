@@ -2251,6 +2251,17 @@ def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str
                 if not dry_run:
                     set_powerwall_mode(mode)
                 executed.append(f"set_mode({mode})")
+    else:
+        # Hold: if reserve > SoC the Powerwall is drawing from grid even though we chose to
+        # wait. Drop reserve to 5% to stop unintended grid charging.
+        _batt       = state.get("battery") or {}
+        _reserve_now = _batt.get("reserve_pct")
+        _soc_now     = _batt.get("soc_pct")
+        if _reserve_now is not None and _soc_now is not None and _reserve_now > _soc_now and _reserve_now > 5:
+            print(f"  [det] set_powerwall_reserve(5%) — hold but reserve({_reserve_now}%)>soc({_soc_now}%), stopping unintended grid charge")
+            if not dry_run:
+                set_powerwall_reserve(5)
+            executed.append(f"set_reserve(5%) — stopping unintended grid charge (reserve {_reserve_now}% was above SoC {_soc_now}%)")
 
     # EV
     zappi_mode = ev_rec.get("zappi_mode")
