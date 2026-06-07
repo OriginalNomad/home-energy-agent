@@ -1,5 +1,24 @@
 # Energy System Control Log
 
+## 2026-06-07 (session 11 — morning review, Tesla app reserve root cause found)
+
+**Root cause of reserve=80% drift during demand window — confirmed and fixed.**
+
+June 6 JSONL review showed `reserve_before=80%` at every demand window cycle despite the pre-flight guard setting 5% each cycle. Investigation found: the **Tesla app had backup reserve set to 80%**. When Tessie's cloud command to set 5% didn't fully persist to Powerwall hardware (e.g. Tessie session lag or brief disconnection), the Tesla firmware fell back to its app-stored value of 80%.
+
+Fix: Tesla app backup reserve manually set to **5%**. Now the firmware fallback is safe — agent/guard commands always override upward as needed, but any missed command defaults to 5% (harmless) rather than 80% (causes demand window breach).
+
+This explains the full chain:
+- Session 9 (Jun 5): reserve_before=80% throughout demand window — Tesla app at 80%.
+- Session 10 (Jun 6): same pattern, corrected manually at 18:48 by LLM narrative.
+- Session 11 (Jun 7): Tesla app reset to 5%. Pre-flight guard + `_guarded_set_reserve()` should now hold clean.
+
+Also identified: 12 automations listed as "disabled" in CONTEXT.md have no `enabled: false` in automations.yaml — HA UI enable/disable state is not reflected in the YAML. Confirmed via HA UI: `battery_winter_overnight_precharge` and `battery_cloudy_day_topup` are disabled. Remaining 10 need verification. Most critical to confirm disabled: `battery_cheap_window_autonomous_charge` (sets reserve=100% when cheap window opens — directly conflicts with agent).
+
+**Phase 5 cutover verified clean.** All June 6 charging decisions driven by deterministic layer. LLM correctly narrative-only throughout. Pre-charge: autonomous from 09:31 (SoC 21%→82%), reverted to self_consumption at 12:00, target reached by 13:30. Demand window entered at 100% SoC.
+
+---
+
 ## 2026-06-06 (session 10 continued — demand window reserve bug, Phase 5 cutover, data logger)
 
 **Demand window reserve stuck at 80% — 7 consecutive cycles (18:30–21:00).**
