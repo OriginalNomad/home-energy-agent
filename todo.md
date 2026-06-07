@@ -39,7 +39,7 @@
 - [x] **Deploy agent to Raspberry Pi 5** — Pi running at `energypi.local`, agent on cron with auto git pull, Mac cron removed. (2026-06-05)
 - [x] **Cloudflare Tunnel — `https://agent.sol.io`** — HA accessible remotely via Pi tunnel. Chrome, HA apps (Mac + iOS) confirmed working. (2026-06-05)
 - [x] **Repo consolidation** — `home-energy-automation` deleted, `home-energy-console` renamed to `home-energy-agent`. Single repo accessible from all devices. (2026-06-05)
-- [ ] **Migrate HA to Pi** — install HA via Docker on Pi, restore from Mac backup, update agent `.env` to `localhost:8123`. Simplifies architecture; no urgency while Mac Studio is always on.
+- [ ] **Migrate HA to Pi** — install HA via Docker on Pi, restore from Mac backup, update agent `.env` to `localhost:8123`. Simplifies architecture; **now higher priority** — Mac Studio being off kills the Cloudflare tunnel and breaks remote HA app access (502 error).
 - [x] **Wire `data_logger.py` into `energy_agent.py`** — wired in 2026-06-06. Phase 2.5-A clock started; charge rate model buildable ~2026-06-13.
 - [ ] **Switch SD card boot to SSD** — Pi is already running from SSD (`/dev/sda2`); confirm boot order in `raspi-config` to ensure it always boots from SSD, not SD card.
 
