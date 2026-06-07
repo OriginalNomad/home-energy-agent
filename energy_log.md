@@ -1,6 +1,6 @@
 # Energy System Control Log
 
-## 2026-06-07 (session 11 — morning review, Tesla app reserve root cause found)
+## 2026-06-07 (session 11 — Tesla app reserve fix, hold+reserve bug fix, git cleanup)
 
 **Root cause of reserve=80% drift during demand window — confirmed and fixed.**
 
@@ -14,6 +14,16 @@ This explains the full chain:
 - Session 11 (Jun 7): Tesla app reset to 5%. Pre-flight guard + `_guarded_set_reserve()` should now hold clean.
 
 Also identified: 12 automations listed as "disabled" in CONTEXT.md have no `enabled: false` in automations.yaml — HA UI enable/disable state is not reflected in the YAML. Confirmed via HA UI: `battery_winter_overnight_precharge` and `battery_cloudy_day_topup` are disabled. Remaining 10 need verification. Most critical to confirm disabled: `battery_cheap_window_autonomous_charge` (sets reserve=100% when cheap window opens — directly conflicts with agent).
+
+**Hold + reserve > SoC bug fixed.** `_execute_deterministic_verdict()` was doing nothing on hold verdicts. If reserve was above SoC (e.g. 80% reserve, 28% SoC), the Powerwall would grid-charge at whatever price was current even while the agent was holding for a cheaper slot. Fix: any hold verdict now actively sets reserve=5% if reserve > SoC. 94 tests pass.
+
+**EV price thresholds changed to `<=`** — slider value is now inclusive. "EV Standard Price = 12¢" now charges at exactly 12¢, not only below it.
+
+**Operational data files untracked from git** — `decisions.jsonl`, `daily_energy.jsonl`, `agent_decisions.log` now gitignored and Pi-only. Standard Pi command: `git pull && agent/venv/bin/python agent/energy_agent.py`
+
+**5% battery floor vs 0%**: 5% is conservative choice. Tesla firmware has its own cell-protection floor regardless. 0% would give ~0.67 kWh more discharge during demand window. Not changed — low priority.
+
+**Solar forecast inaccuracy**: Solcast overestimates by ~2.5× in June (actual/forecast ratio 0.39–0.45 all week). `solar_unreliable` flag fires correctly and det layer ignores solar forecast when set. Simple scalar correction (~0.4×) could be applied to `remaining_today` now using existing decisions.jsonl data. Proper Model 1 (OLS per-hour correction) buildable ~2026-06-20.
 
 **Phase 5 cutover verified clean.** All June 6 charging decisions driven by deterministic layer. LLM correctly narrative-only throughout. Pre-charge: autonomous from 09:31 (SoC 21%→82%), reverted to self_consumption at 12:00, target reached by 13:30. Demand window entered at 100% SoC.
 
