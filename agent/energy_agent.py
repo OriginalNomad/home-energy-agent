@@ -1488,7 +1488,13 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             rule_name = "peak_target_met" if soc >= 85 else "peak_solar_will_cover"
             rec = verdict("hold", None, None, rule_name)
         elif fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55:
-            rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
+            # Price already at or below the cheapest upcoming slot — no arbitrage benefit
+            # to going autonomous now vs self_consumption. Charge at self_consumption rate
+            # and re-evaluate next cycle as solar ramps and prices update.
+            if price <= forward_min:
+                rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons_cheap_now")
+            else:
+                rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
         elif (now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70):
             rec = verdict("charge", 100, "autonomous", "peak_deadline_quickcheck")
         elif in_sponge and now_h < 13 and soc < 50:
