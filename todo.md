@@ -5,6 +5,7 @@
 ### NEXT SESSION (Tuesday) — TOP PRIORITY
 
 - [x] **Migrate HA to Pi** — Docker installed on Pi, HA running at localhost:8123, backup restored, Cloudflare tunnel updated to localhost, agent `.env` updated to `localhost:8123`. `https://agent.sol.io` working, HA app working remotely. Mac Studio no longer needed for HA. (2026-06-08)
+- [ ] **Switch Lovelace to YAML mode** — dashboard changes are stored in `.storage/lovelace` (not the repo) and get wiped on HA restore. Switching to YAML-mode dashboards would let them live in `config/ui-lovelace.yaml` and be version-controlled. Fix solar forecast card while doing this: swap `sensor.solaredge_current_power` → `sensor.solar_power_w`.
 
 ---
 
