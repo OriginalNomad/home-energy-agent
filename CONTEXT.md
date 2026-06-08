@@ -87,7 +87,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 **Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://192.168.68.70:8123`. Systemd service, connects via Sydney edge.
 **HA external URL**: `https://agent.sol.io`. Trusted proxies configured for Pi subnet + Docker bridge.
 
-## System architecture (as of 2026-06-06)
+## System architecture (as of 2026-06-07)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
 
@@ -101,6 +101,10 @@ Key agent capabilities added 2026-06-02:
 - **Daily energy journal** (`agent/log_daily_energy.py`, cron 21:05): comprehensive per-day record — solar forecast/actual, battery SoC trajectory, grid import/export by window, price profiles, demand window pass/fail (billing-accurate: peak 30-min avg kW), agent decision rollup. Persisted to `agent/daily_energy.jsonl`. Supersedes the narrower `log_demand_window.py`.
 - **`sensor.demand_window_monitor`** pushed to HA via REST API (no config change) each hour + after daily recompute. Feeds two Markdown dashboard cards: (1) peak 30-min import bars per day, (2) pass/fail timeline with min SoC.
 - **June 2 demand window breach**: SoC reached only 81% (target 85%), reserve stuck at 80%. `battery_pre_demand_window_reset` automation fired at 2:55pm but errored — `rest_command` had failed to load at HA startup on June 1 (truncated payload, fixed but HA never restarted). Grid covered cooking load at 7pm. Fixed: Tessie API direct call to drop reserve → HA restart → rest_commands now loading cleanly.
+
+Key agent capabilities added 2026-06-07 (session 12):
+- **LP optimiser: `solar_unreliable` flag wired in** (`agent/optimizer.py` + call site in `energy_agent.py`): when `solar_unreliable=True`, the LP now zeroes the solar series before solving — matching the deterministic layer's behaviour. Previously the LP trusted Solcast and held on cloudy peak mornings while det correctly charged from grid (systematic cause-c divergence). Now `optimizer_vs_deterministic` disagreements are meaningful. 14/14 optimizer tests pass.
+- **Phase 7 — selective LLM narrative** (`ROUTINE_RULES` frozenset + `_is_routine_cycle()` + `_routine_summary()` in `energy_agent.py`): LLM call skipped on routine unchanged cycles. Conditions to skip: rule in `ROUTINE_RULES` AND unchanged from previous cycle AND no safety overrides (tessie_soc_failed, demand_reserve_guard). Skipped cycles still get a full JSONL record + SQLite row + HA notification, just with a templated one-liner (`"Overnight hold — SoC 68%, price 14¢. Waiting for Solar Sponge."`) instead of LLM prose. Routine rules: `overnight_hold_wait_for_sponge`, `target_met`, `demand_window_active`, `solar_will_cover`, `peak_on_track`, `wait_for_cheap_go_hard`, `spread_too_small`. Estimated ~70% reduction in Anthropic API calls (~$97/month → ~$30/month).
 
 Key agent capabilities added 2026-06-06 (session 10, continued):
 - **Phase 5 cutover — `DETERMINISTIC_AUTHORITATIVE = True`**: deterministic rule layer now owns the control path. LLM narrative-only. Fixes class of bug where LLM constructs locally valid reasoning leading to wrong action (e.g. charging during demand window). Kill-switch at top of file.
@@ -289,7 +293,7 @@ Key agent capabilities added 2026-05-29:
 
 **HA automation YAML vs UI discrepancy**: automations.yaml has no `enabled: false` entries — all 21 battery automations show as enabled in the file. HA UI enable/disable state is stored separately in HA's internal storage. Confirmed via HA UI: `battery_winter_overnight_precharge` and `battery_cloudy_day_topup` are disabled. The other 10 "agent handles" automations need verification in HA UI. Most critical to confirm disabled: `battery_cheap_window_autonomous_charge` (sets reserve=100% when Amber cheap window opens).
 
-**LP solar_unreliable gap** — LP still doesn't consume the `solar_unreliable` flag. On cloudy mornings LP would hold while det correctly charges. Not a control issue now (det is authoritative), but blocks LP-authoritative cutover if/when that's pursued.
+**Phase 7 first cycles** — watch HA notifications for routine one-liners (`"Overnight hold — SoC 68%, price 14¢..."`) instead of LLM paragraphs. Transition cycles (first cycle of a new rule) should still get full LLM narrative. If all cycles are showing one-liners even for autonomous/escalation, check `ROUTINE_RULES` gate logic.
 
 **Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
 

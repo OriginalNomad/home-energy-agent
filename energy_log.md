@@ -1,5 +1,30 @@
 # Energy System Control Log
 
+## 2026-06-07 (session 12 — LP solar_unreliable fix, Phase 7 selective narrative)
+
+**Morning standup.** System in good shape post-session-11. Key items identified: (1) LP still diverges systematically on cloudy mornings because it ignores `solar_unreliable` flag; (2) LLM running every cycle at ~$97/month purely for narrative with no control value; (3) Mac Studio sync via HA shell_command discussed — deferred to desktop session; (4) data logger captures LLM narrative in `action_summary` column, confirmed but not needed by self-learning models.
+
+**LP optimiser: `solar_unreliable` flag wired in.**
+Root cause of systematic LP↔deterministic divergence on cloudy peak mornings: LP trusted Solcast point forecast and held (`mpc_solar_only`) while deterministic layer correctly charged from grid. Fix in two parts:
+1. `optimizer.py` — `optimize_battery()` reads `state.get("solar_unreliable", False)`; if True, zeroes the solar series (`solar = [0.0] * H`) before the LP solve, matching deterministic layer behaviour.
+2. `energy_agent.py` — at the optimizer call site, `_opt_state` is now a copy of `_cycle_context["state"]` augmented with `solar_unreliable` from `_cycle_context["decision_context"]`. Safe: if deterministic context failed, defaults to False (trust forecast = current behaviour).
+3. `test_optimizer.py` — two new tests (tests 13–14): strong solar + `solar_unreliable=False` → `mpc_solar_only`/hold; same + `solar_unreliable=True` → charges from grid. 14/14 pass.
+`optimizer_vs_deterministic` metric in JSONL now meaningful on cloudy days.
+
+**Phase 7 — selective LLM narrative (~70% Anthropic cost reduction).**
+With `DETERMINISTIC_AUTHORITATIVE=True`, the LLM makes no control decisions — it only writes a narrative summary. On routine cycles (same rule repeating, no action needed) that narrative is identical each time and has no value. The LLM call (~$0.07/cycle) was running 48×/day.
+
+Implemented gate in `run_agent()` between the optimizer block and the LLM loop:
+- `ROUTINE_RULES` frozenset (7 rules): `overnight_hold_wait_for_sponge`, `target_met`, `demand_window_active`, `solar_will_cover`, `peak_on_track`, `wait_for_cheap_go_hard`, `spread_too_small`
+- `_is_routine_cycle(ctx, records, demand_guard_fired)`: True if rule in ROUTINE_RULES AND unchanged from previous cycle AND no safety overrides (tessie_soc_failed, demand_reserve_guard). `_ctx is None` (HA unreachable) → gate does not apply.
+- `_routine_summary(ctx)`: templated one-liner per rule with SoC/price/solar values
+- Gate: if routine → call `log_decision(templated_summary, det_actions)` directly and return. Full JSONL record, SQLite row, and HA notification still written. Only the API call is skipped.
+
+Estimated saving: ~34 of 48 daily cycles skipped → ~$67/month saved (~$97 → ~$30/month).
+Note: Phase 7 implemented before Phase 6 (slim the prompt) — the gate is orthogonal to prompt contents and the saving is immediate.
+
+---
+
 ## 2026-06-07 (session 11 — Tesla app reserve fix, hold+reserve bug fix, git cleanup)
 
 **Root cause of reserve=80% drift during demand window — confirmed and fixed.**

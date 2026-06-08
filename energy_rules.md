@@ -6,7 +6,7 @@ These rules are now implemented by a **Claude-powered agent** (`agent/energy_age
 
 Hard constraints (Rule 2 demand window, export guard) remain as HA automations that fire independently of the agent. The agent handles all strategic decisions (when to charge, which mode, how much, EV Zappi mode).
 
-**Re-architecture in progress (June 2026):** A receding-horizon LP optimiser (`agent/optimizer.py`) is being built to replace the LLM as the primary decision-maker. The rules in this document remain the safety envelope — the LP *derives* the optimal schedule from the objective function, rather than approximating these rules as heuristics. The LP runs in shadow (not in the control path) alongside the LLM and the deterministic rule layer (`compute_decision_context()`). Target cutover: June 4 behind a kill-switch flag. See `PRODUCT.md` "Optimisation Engine — Depth" for the full architecture and migration plan.
+**Re-architecture status (June 2026):** Phase 5 complete (2026-06-06) — `DETERMINISTIC_AUTHORITATIVE = True`. The deterministic rule layer (`compute_decision_context()`) now owns the control path. The LLM runs for narrative only; its `set_*` calls are no-op'd. Phase 7 (2026-06-07) — LLM call skipped entirely on routine unchanged cycles (`ROUTINE_RULES`) to reduce Anthropic cost ~70%. A receding-horizon LP optimiser (`agent/optimizer.py`) runs in shadow alongside the deterministic layer for three-way A/B comparison. LP cutover is a future phase. See `PRODUCT.md` "Optimisation Engine — Depth" for the full architecture.
 
 See `CONTEXT.md` for the current automation status and which rules are agent-handled vs HA-enforced.
 
