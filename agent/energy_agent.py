@@ -93,6 +93,21 @@ HISTORICAL_PRICE_MODEL = True
 # Flip to False to revert to LLM-authoritative instantly. Phase 5 — see ARCHITECTURE.md.
 DETERMINISTIC_AUTHORITATIVE = True
 
+# Phase 7 — rules where the LLM call is skipped on repeated cycles.
+# The LLM runs on the FIRST cycle a rule fires (the transition is interesting)
+# and on any cycle with a safety override. On subsequent identical cycles it is
+# replaced by a templated one-liner, cutting ~70% of Anthropic API calls.
+# Add a rule here to suppress its narrative; remove to restore it.
+ROUTINE_RULES: frozenset[str] = frozenset({
+    "overnight_hold_wait_for_sponge",  # fires ~13 consecutive cycles every night
+    "target_met",                       # battery at target, nothing to decide
+    "demand_window_active",             # fires every 3–9pm cycle in peak months
+    "solar_will_cover",                 # sunny-day steady state, repeats for hours
+    "peak_on_track",                    # SoC building normally, no action needed
+    "wait_for_cheap_go_hard",           # holding for cheaper slot, can repeat
+    "spread_too_small",                 # no arbitrage opportunity, can repeat
+})
+
 # Insurance floor ceiling — maximum floor percentage when price is at the
 # cheapest historical level. User can override via HA slider (below).
 DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
@@ -2300,6 +2315,50 @@ TOOL_MAP = {
 }
 
 
+def _is_routine_cycle(ctx: dict, recent_records: list[dict],
+                      demand_guard_fired: bool) -> bool:
+    """True if this cycle is routine and the LLM call can be safely skipped.
+
+    Conditions (all must hold):
+      - DETERMINISTIC_AUTHORITATIVE is True
+      - rule_fired is in ROUTINE_RULES
+      - rule_fired is unchanged from the previous cycle (transitions are interesting)
+      - no safety overrides (tessie failure, demand-window guard)
+    """
+    rule = (ctx.get("recommended") or {}).get("rule_fired")
+    if rule not in ROUTINE_RULES:
+        return False
+    if demand_guard_fired:
+        return False
+    if (_cycle_context.get("state", {}).get("battery", {}) or {}).get("tessie_soc_failed"):
+        return False
+    # First cycle of a rule is interesting; subsequent identical cycles are not.
+    if recent_records:
+        prev_rule = (recent_records[-1].get("computed_verdict") or {}).get("rule_fired")
+        if prev_rule != rule:
+            return False
+    return True
+
+
+def _routine_summary(ctx: dict) -> str:
+    """One-liner summary for routine cycles — replaces LLM narrative."""
+    rule  = (ctx.get("recommended") or {}).get("rule_fired", "hold")
+    state = _cycle_context.get("state") or {}
+    soc   = ((state.get("battery") or {}).get("soc_pct") or 0)
+    price = ((state.get("grid")    or {}).get("price_cents_kwh") or 0)
+    solar = ((state.get("solar")   or {}).get("current_kw") or 0)
+    _TEMPLATES = {
+        "overnight_hold_wait_for_sponge": f"Overnight hold — SoC {soc:.0f}%, price {price:.1f}¢. Waiting for Solar Sponge.",
+        "target_met":                      f"Target met — SoC {soc:.0f}%. Holding.",
+        "demand_window_active":            f"Demand window — discharging from battery. SoC {soc:.0f}%.",
+        "solar_will_cover":                f"Solar covers gap — SoC {soc:.0f}%, solar {solar:.1f} kW. Holding.",
+        "peak_on_track":                   f"On track for 3pm target — SoC {soc:.0f}%, price {price:.1f}¢.",
+        "wait_for_cheap_go_hard":          f"Waiting for cheaper slot — SoC {soc:.0f}%, price {price:.1f}¢.",
+        "spread_too_small":                f"Spread too small — SoC {soc:.0f}%, price {price:.1f}¢. Holding.",
+    }
+    return _TEMPLATES.get(rule, f"Routine hold ({rule}) — SoC {soc:.0f}%, price {price:.1f}¢.")
+
+
 def run_agent(dry_run: bool = False):
     """
     Run one optimisation cycle.
@@ -2352,6 +2411,8 @@ def run_agent(dry_run: bool = False):
     # When False: injects verdict as REFERENCE ONLY, LLM remains in control (legacy shadow mode).
     shadow_block = ""
     _det_executed_actions: list[str] = []
+    _ctx: dict | None = None
+    _records: list = []
     try:
         _state    = get_current_state()
         _forecast = get_price_forecast()
@@ -2403,6 +2464,15 @@ def run_agent(dry_run: bool = False):
                     k: v for k, v in _opt.items() if k != "verdict"}
         except Exception as exc:
             print(f"  Warning: optimizer shadow failed: {exc}", file=sys.stderr)
+
+    # Phase 7 — skip LLM on routine unchanged cycles.
+    # JSONL, DB, and HA notification still written via log_decision(); just no LLM call.
+    if (DETERMINISTIC_AUTHORITATIVE
+            and not dry_run
+            and _ctx is not None
+            and _is_routine_cycle(_ctx, _records, _demand_reserve_guard_fired)):
+        log_decision(_routine_summary(_ctx), _det_executed_actions)
+        return
 
     if DETERMINISTIC_AUTHORITATIVE:
         initial_msg = (
