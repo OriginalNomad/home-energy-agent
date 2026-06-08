@@ -75,17 +75,18 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 ---
 
-## Infrastructure (as of 2026-06-05)
+## Infrastructure (as of 2026-06-08)
 
 | Host | Role |
 |------|------|
-| **Mac Studio** (`192.168.68.70`) | Runs Home Assistant (localhost:8123), development machine |
-| **Raspberry Pi 5** (`energypi.local`, `192.168.0.67`) | Runs energy agent cron, cloudflared tunnel |
+| **Raspberry Pi 5** (`energypi.local`, `192.168.0.67`) | Runs Home Assistant (Docker, localhost:8123), energy agent cron, cloudflared tunnel |
+| **Mac Studio** (`192.168.68.70`) | Development machine only — HA no longer runs here |
 | **GitHub** (`OriginalNomad/home-energy-agent`) | Single repo, auto-deployed to Pi on each cron run |
 
-**Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `git pull -q` then runs agent. Deploy = `git push` from Mac.
-**Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://192.168.68.70:8123`. Systemd service, connects via Sydney edge.
-**HA external URL**: `https://agent.sol.io`. Trusted proxies configured for Pi subnet + Docker bridge.
+**HA on Pi**: Docker container, bind mount at `~/homeassistant/config`. Always on — Mac Studio no longer needed.
+**Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `git pull -q` then runs agent. `HA_URL=http://localhost:8123`.
+**Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://localhost:8123`. Config at `/etc/cloudflared/config.yml`.
+**HA external URL**: `https://agent.sol.io`. Trusted proxies configured in `configuration.yaml` (`use_x_forwarded_for: true`).
 
 ## System architecture (as of 2026-06-06)
 

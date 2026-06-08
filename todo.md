@@ -4,7 +4,7 @@
 
 ### NEXT SESSION (Tuesday) — TOP PRIORITY
 
-- [ ] **Migrate HA to Pi** — install HA via Docker on Pi, restore from Mac backup, update Cloudflare tunnel to point to Pi's HA instead of Mac Studio. Agent `.env` already points to `192.168.68.70:8123` — update to `localhost:8123` once HA is on Pi. **Motivation:** Mac Studio off = 502 on agent.sol.io + HA app broken + energy agent loses HA access. Pi is always on.
+- [x] **Migrate HA to Pi** — Docker installed on Pi, HA running at localhost:8123, backup restored, Cloudflare tunnel updated to localhost, agent `.env` updated to `localhost:8123`. `https://agent.sol.io` working, HA app working remotely. Mac Studio no longer needed for HA. (2026-06-08)
 
 ---
 

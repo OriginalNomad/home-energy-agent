@@ -1,5 +1,25 @@
 # Energy System Control Log
 
+## 2026-06-08 (session 12 — HA migrated to Pi)
+
+**Home Assistant migrated from Mac Studio to Raspberry Pi 5.**
+
+Mac Studio being off (or asleep) was killing the Cloudflare tunnel, breaking HA app access and causing 401 errors in the energy agent. Fix: migrate HA to the Pi, which is always on.
+
+Steps completed:
+- Docker installed on Pi (`get.docker.com`)
+- HA container started on Pi with bind mount at `~/homeassistant/config`
+- Fresh backup taken from Mac HA, restored to Pi via onboarding wizard
+- `/etc/cloudflared/config.yml` updated: `192.168.68.70:8123` → `localhost:8123`, cloudflared restarted
+- `http: use_x_forwarded_for + trusted_proxies` appended to Pi's `configuration.yaml` (cloudflared adds X-Forwarded-For; without this HA returns 400)
+- External URL set in HA UI to `https://agent.sol.io`
+- Agent `.env` updated: `HA_URL=http://localhost:8123`
+- `https://agent.sol.io` returns 200, HA app working on iPhone remotely
+
+Mac Studio can now be turned off without affecting HA, the tunnel, or the energy agent.
+
+---
+
 ## 2026-06-07 (session 11 — Tesla app reserve fix, hold+reserve bug fix, git cleanup)
 
 **Root cause of reserve=80% drift during demand window — confirmed and fixed.**
