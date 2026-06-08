@@ -923,12 +923,12 @@
         mode: self_consumption
     - action: rest_command.powerwall_set_backup_reserve
       data:
-        percent: "{{ [[states('sensor.battery_grid_charge_target') | int, 20] | max, 95] | min }}"
+        percent: "{{ [states('sensor.battery_grid_charge_target') | int, 95] | min }}"
     - action: script.log_battery_decision
       data:
         automation_name: "low_soc_emergency_charge"
         action_taken: "reserve set to {{ states('sensor.battery_grid_charge_target') | int }}% (SoC below 20%)"
-        reserve_set: "{{ [[states('sensor.battery_grid_charge_target') | int, 20] | max, 95] | min }}"
+        reserve_set: "{{ [states('sensor.battery_grid_charge_target') | int, 95] | min }}"
     - action: persistent_notification.create
       data:
         notification_id: "battery_low_soc_charge"
