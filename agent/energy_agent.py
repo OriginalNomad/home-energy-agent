@@ -330,7 +330,10 @@ def get_current_state() -> dict:
         },
     }
     _cycle_context["state"] = state
-    if _HAVE_DATA_LOGGER:
+    if _HAVE_DATA_LOGGER and not _cycle_context.get("db_cycle_id"):
+        # Guard: only log once per cycle. get_current_state() is called twice —
+        # once by run_agent() and again by the LLM tool. Without the guard,
+        # each call inserts a new row, leaving the first permanently undecided.
         try:
             _cycle_context["db_cycle_id"] = data_logger.log_cycle_start(state)
         except Exception as _exc:
