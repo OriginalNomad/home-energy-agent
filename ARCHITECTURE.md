@@ -6,6 +6,50 @@ Claude-agent system into a self-learning agentic AI optimiser. Read alongside
 
 ---
 
+## What exists today (2026-06-09)
+
+The system is further along than the original design implied. Three Python layers are running
+on the Pi right now, every 30 minutes:
+
+### Layer A — Deterministic rule layer (IN CONTROL)
+`compute_decision_context()` + `_execute_deterministic_verdict()` in `energy_agent.py`.
+
+A pure Python `if/elif` rule tree. Reads current state (SoC, price, forecast, time, peak month
+flag), computes a verdict (`charge / hold`, target SoC, mode, rule name), and **executes it** —
+calls the Tessie and HA APIs directly. No ML, no LLM. This is the control path.
+
+Kill-switch: `DETERMINISTIC_AUTHORITATIVE = False` reverts to LLM control.
+
+### Layer B — LLM narrative logger (COSMETIC ONLY)
+Claude runs after the deterministic layer each cycle. It calls `get_current_state()` and
+`get_price_forecast()`, reads the shadow block showing what was just executed, and calls
+`log_decision()` with a plain-English explanation. Its `set_*` tool calls are no-ops.
+The prompt is ~65 lines (slimmed from 470 in Phase 6 — all decision arithmetic removed).
+
+### Layer C — LP optimiser / MPC (SHADOW, not in control path)
+`optimizer.py` — a receding-horizon linear program (MPC). Runs every cycle, computes what it
+*would* have done, logs to `decisions.jsonl` alongside the deterministic verdict. Not yet
+in the control path. Comparison data accumulates for Phase 5 cutover validation.
+
+### Layer 0 — HA automations (ALWAYS ACTIVE, safety net)
+~12 Home Assistant automations that fire independently of the agent. Demand window guard,
+export safety net, autonomous revert. These cannot be overridden by any layer above.
+
+```
+Every 30 min cycle:
+  ┌──────────────────────────────────────────────────┐
+  │  Layer C: LP optimiser   →  logs verdict (shadow) │
+  │  Layer A: Det rule layer →  executes verdict ✓    │
+  │  Layer B: LLM            →  writes narrative log  │
+  └──────────────────────────────────────────────────┘
+  Layer 0: HA automations — always active, independent
+```
+
+**All three control layers are Python.** No ML in the control path yet — the self-learning
+models (Layer 2 below) will feed calibrated inputs into the LP optimiser when built.
+
+---
+
 ## Background and motivation
 
 The current system (`agent/energy_agent.py`) runs every 30 minutes, reads sensor state
