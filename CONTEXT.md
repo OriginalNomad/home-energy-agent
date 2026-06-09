@@ -159,9 +159,9 @@ Key agent capabilities added 2026-05-29:
 
 ---
 
-## Current automation status (as of 2026-06-01)
+## Current automation status (as of 2026-06-09)
 
-**24 automations** in `config/automations.yaml` — **12 active (safety/monitoring), 12 disabled (agent handles)**
+**25 automations** in `config/automations.yaml` — **13 active (safety/monitoring), 12 disabled (agent handles)**
 
 **Active — safety & monitoring:**
 
@@ -176,9 +176,10 @@ Key agent capabilities added 2026-05-29:
 | `battery_demand_window_critical_warning` | Alert: critical SoC, grid import imminent |
 | `battery_negative_price_charge` | Charge to 100% on negative spot price (Rule 8) |
 | `battery_negative_price_reset` | Reset reserve when price goes positive |
-| `battery_low_soc_emergency_charge` | Charge if critically low + cheap price |
+| `battery_low_soc_emergency_charge` | Charge if critically low + cheap price (no 20% floor — uses grid_charge_target directly) |
 | `solar_inverter_underperformance_alert` | Alert when inverter under-produces vs Solcast |
 | `ev_plugged_in_notify` | Alert when EV connects with SoC/price snapshot |
+| `sensor_watchdog_morning` | 09:30 daily: checks 8 sensors for unavailable/stale (>2h), sends persistent notification |
 
 **Disabled — agent handles these decisions:**
 
@@ -284,6 +285,14 @@ Key agent capabilities added 2026-05-29:
 **LP optimiser horizon extension — done (2026-06-03).** `_build_hourly_price_model()` + `_extend_forecast_to_demand_window()` added. LP now sees 15:00–21:00 demand-window block with 1000¢/kWh penalty.
 
 **Phase 5 complete (2026-06-06)** — `DETERMINISTIC_AUTHORITATIVE = True`. Deterministic layer now drives control. LLM is narrative-only. LP optimiser remains shadow for divergence tracking.
+
+**Phase 6 complete (2026-06-09)** — system prompt slimmed from ~470 lines to ~65 lines (86% reduction). All decision arithmetic removed. LLM prompt explicitly states it is a narrative logger only; `set_*` calls are no-ops.
+
+**Session 12 fixes (2026-06-09)**:
+- Race condition between `battery_low_soc_emergency_charge` automation and det layer HOLD fixed: automation no longer has 20% minimum floor; HOLD verdict now unconditionally clears reserve to 5%.
+- `peak_deadline_autonomous` false positives fixed: now checks `price <= forward_min` before escalating to autonomous (was firing during Solar Sponge when we were already at the cheapest price).
+- data_logger double-insert fixed: `_cycle_context["db_cycle_id"]` guard prevents second `log_cycle_start()` call per cycle. 141 orphaned rows cleaned from Pi DB.
+- `sensor_watchdog_morning` automation added: checks 8 sensors at 09:30 for staleness/unavailability.
 
 **Tesla app backup reserve — set to 5% (2026-06-07).** Previously 80%, which caused the reserve to drift back to 80% whenever Tessie's cloud command didn't fully persist to Powerwall hardware. Now 5% is the firmware fallback — safe. The pre-flight guard and `_guarded_set_reserve()` override upward as needed.
 
