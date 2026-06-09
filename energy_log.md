@@ -1,5 +1,19 @@
 # Energy System Control Log
 
+## 2026-06-09 (session 12 — race condition fix, peak_deadline_autonomous fix, sensor watchdog, data_logger dedup, Phase 6 prompt slim)
+
+**Race condition: `battery_low_soc_emergency_charge` automation vs det layer HOLD.** HA automation fired seconds before agent cycle, setting reserve=20%. Det layer then ran HOLD verdict but only cleared reserve when `reserve > SoC` — sensor lag (slow Tessie poll) meant agent read stale reserve=5% and left 20% in place, causing grid charging. Two-part fix: (1) removed 20% minimum floor from automation action (now uses `grid_charge_target` directly, capped at 95%), (2) HOLD verdict now unconditionally sets reserve=5% when reserve > 5%, regardless of stale SoC sensor. Root cause: HA automation existed to protect against running down to 0% on a genuinely cloudy day — but the det layer already handles this via `overnight_hold` and `solar_sponge_floor` rules. 20% floor was vestigial and conflicting.
+
+**`peak_deadline_autonomous` firing unnecessarily.** When current price was already the cheapest in the forecast horizon (Solar Sponge price), the deadline rule was still escalating to autonomous because `fill_slow_85 >= hours_to_2_55`. Fixed with price check: if `price <= forward_min` (cheapest upcoming price), use `self_consumption` (no need to rush to autonomous when we're already in the cheapest window).
+
+**SolarEdge sensor stuck at 27W for 3 days.** Not a code bug. Router WiFi port was turned off (firmware update?). Inverter reconnected after WiFi restored. HA integration was silently returning stale data. Diagnosis: `sensor.solaredge_energy_today` enabled as daily validation metric.
+
+**Sensor watchdog automation added** (`sensor_watchdog_morning`). Fires at 09:30 daily and on HA start. Checks 8 sensors (SolarEdge, Tessie, Solcast ×2, Amber ×2, Powerwall ×2) for `unavailable`/`unknown` state or >2h staleness. Sends persistent HA notification if any sensor is stale.
+
+**data_logger double-insert bug fixed.** `get_current_state()` was called twice per cycle (once by `run_agent()`, once by LLM tool) — each call inserted a new row via `log_cycle_start()`, leaving the first row permanently undecided. Fix: `_cycle_context["db_cycle_id"]` guard — only inserts on first call per cycle. 141 orphaned rows cleaned from Pi DB via SQL (VACUUM had to run in separate connection outside transaction).
+
+**Phase 6 — system prompt slimmed.** Prompt reduced from ~470 lines to ~65 lines (86% reduction). All deadline maths, spread tables, fill-time calculations, wait-and-go-hard strategy, deferral limits, Solar Sponge floor implementation, and escalation rules removed — the deterministic layer handles all of these. LLM prompt now states its role explicitly: narrative logger only, `set_*` calls are no-ops, summarise what the rule layer did from the shadow block.
+
 ## 2026-06-07 (session 11 — Tesla app reserve fix, hold+reserve bug fix, git cleanup)
 
 **Root cause of reserve=80% drift during demand window — confirmed and fixed.**
