@@ -287,6 +287,38 @@ Use `Eco+` as the default (charges only from actual solar export past the meter)
 - Cloudy day: grid top-up to 80% during cheapest morning window (before 9 am), then rely on whatever solar arrives
 - Prevents arriving at 3 pm with a half-full battery because solar underdelivered
 
+
+### Rule 10 — Price Spike Arbitrage
+- **Gentle arbitrage is explicitly excluded** — buying cheap and selling at moderate peaks (e.g. 10¢ buy / 18¢ sell) generates insufficient margin (~$115/year) to justify the battery cycle degradation cost (~$15,000 replacement)
+- **Spike arbitrage only**: triggered when Amber export price forecast exceeds **50¢/kWh**
+
+**Strategy: look ahead, don't discharge greedily**
+- Do NOT discharge at the first price that crosses the threshold — scan the full forecast window first
+- Find the **highest price period** in the upcoming 6 hours (or to end of demand window)
+- Hold battery at full charge until that peak arrives, then discharge at maximum rate (5 kW)
+- Calculate discharge start time based on how long the peak window lasts and battery SoC:
+  - Full battery (13.5 kWh) at 5 kW = ~2.7 hours of discharge
+  - e.g. if peak is forecast 7–9 pm, start discharging at 7 pm not 3 pm
+- After spike passes, recharge during next cheap window — recharge cost should be well below spike revenue
+
+**Example:** 3 pm at 50¢ vs 7 pm at $32
+- Discharging at 3 pm: 13.5 kWh × 50¢ = **$6.75**
+- Waiting for 7 pm: 10 kWh × $32 = **$320**
+- Conclusion: always scan the full window before committing to discharge
+
+**Safety constraints during spike arbitrage:**
+
+| Scenario | Constraint |
+|----------|------------|
+| Peak month, during demand window (3–9 pm) | Do not discharge below buffer needed to cover estimated home load for remaining window hours — cannot risk needing to import before 9 pm |
+| Peak month, outside demand window | Can discharge to Minimum Battery Threshold (20%) |
+| Off-peak month | Can discharge to Minimum Battery Threshold (20%) |
+
+- Spike threshold of **50¢** is configurable — monitor actual spike patterns to tune
+- Forecast source: Amber feed-in forecast sensor
+- Rule 2 still applies: no grid **import** during demand window regardless of price — but grid **export** during demand window is fine and encouraged during spikes
+
+
 ### Rule 11 — Solcast vs Inverter Cross-Check
 - During solar hours (9am–5pm), compare Solcast's hourly forecast against the inverter's actual output every 30 minutes
 - The agent computes a `forecast_accuracy` label from three Solcast sensors and the SolarEdge inverter:
@@ -344,175 +376,6 @@ Tomorrow's `solar_outlook` and `avg_radiation` are captured in `decisions.jsonl`
 
 Also uses `forecast_next_hour` for timing: if next hour is forecast significantly higher, solar may be improving — wait 30 min before committing to grid charge. If next hour is also low, don't wait.
 
-### Rule 10 — Price Spike Arbitrage
-- **Gentle arbitrage is explicitly excluded** — buying cheap and selling at moderate peaks (e.g. 10¢ buy / 18¢ sell) generates insufficient margin (~$115/year) to justify the battery cycle degradation cost (~$15,000 replacement)
-- **Spike arbitrage only**: triggered when Amber export price forecast exceeds **50¢/kWh**
-
-**Strategy: look ahead, don't discharge greedily**
-- Do NOT discharge at the first price that crosses the threshold — scan the full forecast window first
-- Find the **highest price period** in the upcoming 6 hours (or to end of demand window)
-- Hold battery at full charge until that peak arrives, then discharge at maximum rate (5 kW)
-- Calculate discharge start time based on how long the peak window lasts and battery SoC:
-  - Full battery (13.5 kWh) at 5 kW = ~2.7 hours of discharge
-  - e.g. if peak is forecast 7–9 pm, start discharging at 7 pm not 3 pm
-- After spike passes, recharge during next cheap window — recharge cost should be well below spike revenue
-
-**Example:** 3 pm at 50¢ vs 7 pm at $32
-- Discharging at 3 pm: 13.5 kWh × 50¢ = **$6.75**
-- Waiting for 7 pm: 10 kWh × $32 = **$320**
-- Conclusion: always scan the full window before committing to discharge
-
-**Safety constraints during spike arbitrage:**
-
-| Scenario | Constraint |
-|----------|------------|
-| Peak month, during demand window (3–9 pm) | Do not discharge below buffer needed to cover estimated home load for remaining window hours — cannot risk needing to import before 9 pm |
-| Peak month, outside demand window | Can discharge to Minimum Battery Threshold (20%) |
-| Off-peak month | Can discharge to Minimum Battery Threshold (20%) |
-
-- Spike threshold of **50¢** is configurable — monitor actual spike patterns to tune
-- Forecast source: Amber feed-in forecast sensor
-- Rule 2 still applies: no grid **import** during demand window regardless of price — but grid **export** during demand window is fine and encouraged during spikes
-
-### Rule 14 — Solar Sponge Minimum Floor
-
-EA116's Solar Sponge window (10am–3pm) is structurally cheaper than evening prices on every day, regardless of spot price movement. This is a tariff design feature — not a forecast. The spread table does not apply to this floor.
-
-**Rule: during 10am–1pm, if SoC < 50%, always charge to at least 50%.**
-
-This is a floor, not a ceiling:
-- If the demand window target (85%) or grid charge target is higher, use that instead
-- If SoC is already ≥ 50%, normal spread logic applies for charging further
-- If it's past 1pm and SoC < 50%, apply Rule 13 escalation logic instead
-
-**Why 50%:** enough to cover ~3.5 kWh of evening home load (reasonable buffer without over-committing). Getting to 50% during Solar Sponge is always better than paying evening rates for the same kWh.
-
-**Why 10am–1pm:** leaves 2h of Solar Sponge remaining after the target is reached, so actual solar arriving late still has headroom to charge. After 1pm the deadline-aware escalation rules take over.
-
-**Mode:** self_consumption is sufficient (2–4h available, no urgency requiring autonomous).
-
-*Implementation rationale:* this rule prevents the agent from deferring indefinitely on a cheap-window forecast that may not arrive. The Solar Sponge window is the reliable cheap window — it's always there. Any other cheaper dip is a bonus, not a guarantee.
-
-### Rule 15 — Historical Price Model for Grid Charge Target (non-peak)
-
-Replaces fixed thresholds with a self-calibrating model based on rolling 7-day price history from `decisions.jsonl`.
-
-- `p25` = 25th percentile of recent prices (cheap anchor); `p75` = 75th percentile (normal/expensive anchor)
-- `price_position = (P_now − p25) / (p75 − p25)` — 0.0 = cheapest by recent standards, 1.0 = normal
-- **Solar trust**: `solar_trusted = forecast × confidence × price_position` — when prices are cheap (position→0), discount solar (cost of over-charging is low, be aggressive from grid)
-- **Insurance floor**: `floor = max_insurance_floor × (1 − price_position)` — hold a minimum SoC proportional to how cheap prices are, guarding against the cheap window closing early
-- `cost_target = max(solar_adjusted_target, insurance_floor)`
-- Falls back to legacy (time-based substitute) when: `HISTORICAL_PRICE_MODEL = False`, insufficient history (< 48 records), price history flat (swing < 2¢), or peak month
-- Rollback: set `HISTORICAL_PRICE_MODEL = False` in `energy_agent.py`
-- User-settable: `input_number.battery_max_insurance_floor_pct` (default 70%)
-
-**Why**: a cheap-window that closes 1.5h early (as observed 2026-05-31) causes under-charging when relying on solar forecast alone. The insurance floor ensures a meaningful minimum SoC is locked in while prices are cheap, independent of the solar forecast.
-
-### Rule 21 — Solar-Sufficient Hold (non-peak, sunny-forecast days)
-
-**Added 2026-06-03.** On a sunny-forecast day (reliable solar accuracy) before 1pm, if net solar can cover the remaining gap to `cost_target` without any grid charging, hold and let solar do the work.
-
-```
-net_solar = max(expected_solar_remaining − home_load_kw × min(hours_to_deadline, 7h), 0)
-gap       = max((cost_target − soc) / 100 × 13.5, 0)
-if net_solar ≥ gap AND solar_reliable AND now < 1pm: hold ("solar_will_cover")
-```
-
-Rule fires before overnight_hold and deferral logic in the non-peak path. After 1pm, escalation rules take over regardless.
-
-**Why this matters**: on a sunny forecast day, the human default is hold-until-you-must. Unnecessary trickle-charging from grid (a) costs money, (b) crowds out incoming solar (battery partially full is less able to absorb a solar surge). The risk asymmetry (demand charge) only pushes toward earlier charging when the solar forecast is uncertain. When it's confident, hold is the efficient choice.
-
-**If solar underdelivers**: the accuracy checks (`forecast_accuracy = poor/unreliable`) will flip `solar_unreliable = True`, `solar_can_cover = False`, and the deadline escalation rules will take over. The design is: optimistic hold → monitor actuals → escalate if needed.
-
-### Rule 16 — Solar-Unreliable Autonomous Escalation (non-peak)
-
-When `solar_unreliable = True`, self_consumption at 1.7 kW cannot be supplemented by uncertain solar. Apply a tighter autonomous escalation buffer:
-
-- Normal (solar reliable): autonomous if `fill_slow ≥ hours_to_deadline − 0.5h`
-- Solar unreliable: autonomous if `fill_slow ≥ hours_to_deadline − 1.5h`
-
-The 1h extra buffer ensures the battery fills from grid before the cheap window closes, rather than relying on solar that may not arrive.
-
-### Rule 17 — Sliding Forecast Detection
-
-If the Amber cheap window has been forecast as "1–2h away" for 3+ consecutive cycles but the actual price never dropped to that level, the forecast is sliding — it's not a genuine upcoming cheap window, it's a phantom. Action: treat as `deferral_limit` and charge now at current price.
-
-Detection: `_detect_sliding_forecast()` fires when, for the last 3+ records, `forward_min < price − 2¢` in each record but the actual recorded price never reached `forward_min + 2¢`. JSONL `rule_fired = "sliding_forecast"`.
-
-### Rule 18 — EV Eco/Fast/Eco+ Progression
-
-Three-phase EV charging strategy based on price position:
-
-1. **Eco** (trickle from grid+solar): in cheap window, but a meaningfully cheaper price is still forecast (forward_min > eco_gap_c below current price) AND EV above minimum SoC → wait for the cheapest moment
-2. **Fast** (full grid rate): in cheap window and this IS the cheapest upcoming price → charge hard now
-3. **Eco+** (solar overflow only): target met → absorb any remaining solar export for free
-
-Thresholds user-settable: `input_number.ev_ultra_cheap_threshold_c` (Case 2, default 6¢) and `input_number.ev_eco_gap_c` (eco/fast gap, default 1.5¢).
-
-### Rule 19 — Negative FIT Solar Dump (EV Case 6)
-
-When FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%:
-- Switch EV to **Eco+** (not Fast) — absorbs surplus solar that would otherwise be exported at negative price
-- Eco+ draws only from actual solar export, so no grid import occurs — the goal is to avoid paying to export, not to buy grid power
-- Battery threshold 85% ensures this only activates when the battery is genuinely near full
-- Overrides the user-set EV charge target — treats 100% as the effective target while FIT is negative
-
-### Rule 22 — Wait-and-Go-Hard: Find the Cheapest Feasible Charge Slot
-
-**Added 2026-06-05.** On peak days where grid charge is needed but the agent is not yet at deadline urgency, the correct strategy is not to start slow self_consumption immediately. Instead, find the cheapest upcoming slot where fast-filling to 85% still fits before the deadline, wait for it, then charge at 5kW (autonomous).
-
-**Every cycle, scan the price forecast for the cheapest slot where:**
-```
-hours_until_slot + fill_fast_85_h + 0.5h ≤ hours_to_2:55pm
-```
-Conservative SoC projection at each slot: home load drains the battery during the wait, no solar credit (pessimistic — real outcome is better if solar produces).
-
-| Condition | Rule | Action |
-|-----------|------|--------|
-| Cheaper slot ≥1¢ below now exists and is feasible | `wait_for_cheap_go_hard` | Hold and wait. Report slot price and hours-until in summary. |
-| No cheaper slot in feasible window | `peak_charge_now` | Charge at self_consumption now — current price is as good as it gets. |
-
-`go_hard_slot` (price, hours_until) is logged to JSONL `computed_context` and shown in the deterministic REFERENCE block each cycle.
-
-**Why:** self_consumption from 8:30am at 17¢ on a day with Solar Sponge arriving at 11¢ at 10am costs more and ties up the charger during solar-producing hours. Waiting and going fast at the cheap price takes less time and money.
-
-### Rule 23 — Receding Horizon Solar Sponge Rate Selection
-
-**Added 2026-06-05.** Once in the Solar Sponge (or at the cheap window identified by Rule 22), the charging rate is not fixed — it's recalculated every cycle as solar data and prices update.
-
-```
-if fill_slow_85_h ≥ hours_to_2:55pm − 1.0h  →  autonomous (peak_sponge_go_hard): tight, go hard
-if fill_slow_85_h < hours_to_2:55pm − 1.0h  →  self_consumption (peak_sponge_selfcons): fits, solar may reduce need
-if kwh_needed_85 ≤ 0                         →  hold (peak_solar_will_cover): solar covering the gap
-```
-
-**Key principle:** each 30-minute cycle is an independent optimization — mode is NOT preserved from the previous cycle. The `battery_autonomous_revert_target_reached` automation fires within 30s of hitting 85% SoC, regardless of the LLM cycle. It is a safety net, not the primary rate controller.
-
-**Why:** as solar improves during the morning, the grid charge needed falls each cycle. A 5kW rate justified at 10:00am (SoC=40%, solar=0.3kW) may be unnecessary at 11:00am (SoC=65%, solar=2kW, fill_slow now 1.6h vs 4.4h deadline). Recalculating prevents over-charging from grid when solar is contributing.
-
-**`battery_grid_charge_target` floor (added 2026-06-05):** In peak months before 3pm, `sensor.battery_grid_charge_target` is clamped to a minimum of 85% regardless of Solcast remaining forecast. Without this, the Solcast-optimistic formula could return 13% on a cloudy day (thinking solar will cover everything), causing `battery_autonomous_revert_target_reached` to fire immediately after autonomous mode is set (battery already above 13%). The 85% floor ensures the automation only stops charging when the demand-window target is actually met.
-
-### Rule 20 — Overnight Hold: Wait for Solar Sponge
-
-Solar Sponge (10am–3pm) is a structural tariff feature — always cheaper than evening/overnight prices. The demand window is only 3–9pm; the battery just needs 85% by 2:55pm, not by midnight.
-
-**Default overnight behaviour: hold. Do not charge overnight when Solar Sponge will be cheaper.**
-
-`overnight_hold` fires when:
-- Time is 20:00–07:00 (nighttime)
-- Current price > 10¢ (`SOLAR_SPONGE_PRICE_THRESHOLD`)
-- SoC > 25% (battery not critically low)
-
-When `overnight_hold = True`, the deterministic layer returns `hold / overnight_hold_wait_for_sponge` regardless of `deferral_detected`.
-
-**Why:** Charging overnight at 13–17¢ when Solar Sponge at 6–8¢ is 8–12h away wastes ~55¢/night unnecessarily. Rule 13 morning deadline maths handles peak months from 9am — no pre-charge needed.
-
-**Exceptions where overnight charging IS appropriate:**
-1. Price ≤ 10¢ overnight — genuinely cheap, charging justified
-2. SoC ≤ 25% — emergency floor; handled by automation or deferral fallback
-3. Peak month + tomorrow solar outlook is overcast (< 150 W/m²) AND price < 15¢ — Solar Sponge alone may not fill battery; pre-charge justified
-
-**Rollback:** set `SOLAR_SPONGE_PRICE_THRESHOLD = 0` to disable, or set it very high (e.g. 30) to always apply.
 
 ---
 
@@ -562,6 +425,153 @@ Use `hours_to_cheap_end` (from the deadline calculation above) as the deadline �
 - `hours_to_fill_fast ≥ hours_to_cheap_end − 0.5h` → escalate to autonomous NOW
 
 Additional override after noon: if battery < 30% AND price has been flat (within 3¢ of the expected cheap window) across 2+ recent cycles → charge at current price. The cheap window is not coming. Current price IS the floor.
+
+
+### Rule 14 — Solar Sponge Minimum Floor
+
+EA116's Solar Sponge window (10am–3pm) is structurally cheaper than evening prices on every day, regardless of spot price movement. This is a tariff design feature — not a forecast. The spread table does not apply to this floor.
+
+**Rule: during 10am–1pm, if SoC < 50%, always charge to at least 50%.**
+
+This is a floor, not a ceiling:
+- If the demand window target (85%) or grid charge target is higher, use that instead
+- If SoC is already ≥ 50%, normal spread logic applies for charging further
+- If it's past 1pm and SoC < 50%, apply Rule 13 escalation logic instead
+
+**Why 50%:** enough to cover ~3.5 kWh of evening home load (reasonable buffer without over-committing). Getting to 50% during Solar Sponge is always better than paying evening rates for the same kWh.
+
+**Why 10am–1pm:** leaves 2h of Solar Sponge remaining after the target is reached, so actual solar arriving late still has headroom to charge. After 1pm the deadline-aware escalation rules take over.
+
+**Mode:** self_consumption is sufficient (2–4h available, no urgency requiring autonomous).
+
+*Implementation rationale:* this rule prevents the agent from deferring indefinitely on a cheap-window forecast that may not arrive. The Solar Sponge window is the reliable cheap window — it's always there. Any other cheaper dip is a bonus, not a guarantee.
+
+### Rule 15 — Historical Price Model for Grid Charge Target (non-peak)
+
+Replaces fixed thresholds with a self-calibrating model based on rolling 7-day price history from `decisions.jsonl`.
+
+- `p25` = 25th percentile of recent prices (cheap anchor); `p75` = 75th percentile (normal/expensive anchor)
+- `price_position = (P_now − p25) / (p75 − p25)` — 0.0 = cheapest by recent standards, 1.0 = normal
+- **Solar trust**: `solar_trusted = forecast × confidence × price_position` — when prices are cheap (position→0), discount solar (cost of over-charging is low, be aggressive from grid)
+- **Insurance floor**: `floor = max_insurance_floor × (1 − price_position)` — hold a minimum SoC proportional to how cheap prices are, guarding against the cheap window closing early
+- `cost_target = max(solar_adjusted_target, insurance_floor)`
+- Falls back to legacy (time-based substitute) when: `HISTORICAL_PRICE_MODEL = False`, insufficient history (< 48 records), price history flat (swing < 2¢), or peak month
+- Rollback: set `HISTORICAL_PRICE_MODEL = False` in `energy_agent.py`
+- User-settable: `input_number.battery_max_insurance_floor_pct` (default 70%)
+
+**Why**: a cheap-window that closes 1.5h early (as observed 2026-05-31) causes under-charging when relying on solar forecast alone. The insurance floor ensures a meaningful minimum SoC is locked in while prices are cheap, independent of the solar forecast.
+
+
+### Rule 16 — Solar-Unreliable Autonomous Escalation (non-peak)
+
+When `solar_unreliable = True`, self_consumption at 1.7 kW cannot be supplemented by uncertain solar. Apply a tighter autonomous escalation buffer:
+
+- Normal (solar reliable): autonomous if `fill_slow ≥ hours_to_deadline − 0.5h`
+- Solar unreliable: autonomous if `fill_slow ≥ hours_to_deadline − 1.5h`
+
+The 1h extra buffer ensures the battery fills from grid before the cheap window closes, rather than relying on solar that may not arrive.
+
+### Rule 17 — Sliding Forecast Detection
+
+If the Amber cheap window has been forecast as "1–2h away" for 3+ consecutive cycles but the actual price never dropped to that level, the forecast is sliding — it's not a genuine upcoming cheap window, it's a phantom. Action: treat as `deferral_limit` and charge now at current price.
+
+Detection: `_detect_sliding_forecast()` fires when, for the last 3+ records, `forward_min < price − 2¢` in each record but the actual recorded price never reached `forward_min + 2¢`. JSONL `rule_fired = "sliding_forecast"`.
+
+### Rule 18 — EV Eco/Fast/Eco+ Progression
+
+Three-phase EV charging strategy based on price position:
+
+1. **Eco** (trickle from grid+solar): in cheap window, but a meaningfully cheaper price is still forecast (forward_min > eco_gap_c below current price) AND EV above minimum SoC → wait for the cheapest moment
+2. **Fast** (full grid rate): in cheap window and this IS the cheapest upcoming price → charge hard now
+3. **Eco+** (solar overflow only): target met → absorb any remaining solar export for free
+
+Thresholds user-settable: `input_number.ev_ultra_cheap_threshold_c` (Case 2, default 6¢) and `input_number.ev_eco_gap_c` (eco/fast gap, default 1.5¢).
+
+### Rule 19 — Negative FIT Solar Dump (EV Case 6)
+
+When FIT price < 0¢ AND battery SoC ≥ 85% AND EV SoC < 100%:
+- Switch EV to **Eco+** (not Fast) — absorbs surplus solar that would otherwise be exported at negative price
+- Eco+ draws only from actual solar export, so no grid import occurs — the goal is to avoid paying to export, not to buy grid power
+- Battery threshold 85% ensures this only activates when the battery is genuinely near full
+- Overrides the user-set EV charge target — treats 100% as the effective target while FIT is negative
+
+
+### Rule 20 — Overnight Hold: Wait for Solar Sponge
+
+Solar Sponge (10am–3pm) is a structural tariff feature — always cheaper than evening/overnight prices. The demand window is only 3–9pm; the battery just needs 85% by 2:55pm, not by midnight.
+
+**Default overnight behaviour: hold. Do not charge overnight when Solar Sponge will be cheaper.**
+
+`overnight_hold` fires when:
+- Time is 20:00–07:00 (nighttime)
+- Current price > 10¢ (`SOLAR_SPONGE_PRICE_THRESHOLD`)
+- SoC > 25% (battery not critically low)
+
+When `overnight_hold = True`, the deterministic layer returns `hold / overnight_hold_wait_for_sponge` regardless of `deferral_detected`.
+
+**Why:** Charging overnight at 13–17¢ when Solar Sponge at 6–8¢ is 8–12h away wastes ~55¢/night unnecessarily. Rule 13 morning deadline maths handles peak months from 9am — no pre-charge needed.
+
+**Exceptions where overnight charging IS appropriate:**
+1. Price ≤ 10¢ overnight — genuinely cheap, charging justified
+2. SoC ≤ 25% — emergency floor; handled by automation or deferral fallback
+3. Peak month + tomorrow solar outlook is overcast (< 150 W/m²) AND price < 15¢ — Solar Sponge alone may not fill battery; pre-charge justified
+
+**Rollback:** set `SOLAR_SPONGE_PRICE_THRESHOLD = 0` to disable, or set it very high (e.g. 30) to always apply.
+
+
+
+### Rule 21 — Solar-Sufficient Hold (non-peak, sunny-forecast days)
+
+**Added 2026-06-03.** On a sunny-forecast day (reliable solar accuracy) before 1pm, if net solar can cover the remaining gap to `cost_target` without any grid charging, hold and let solar do the work.
+
+```
+net_solar = max(expected_solar_remaining − home_load_kw × min(hours_to_deadline, 7h), 0)
+gap       = max((cost_target − soc) / 100 × 13.5, 0)
+if net_solar ≥ gap AND solar_reliable AND now < 1pm: hold ("solar_will_cover")
+```
+
+Rule fires before overnight_hold and deferral logic in the non-peak path. After 1pm, escalation rules take over regardless.
+
+**Why this matters**: on a sunny forecast day, the human default is hold-until-you-must. Unnecessary trickle-charging from grid (a) costs money, (b) crowds out incoming solar (battery partially full is less able to absorb a solar surge). The risk asymmetry (demand charge) only pushes toward earlier charging when the solar forecast is uncertain. When it's confident, hold is the efficient choice.
+
+**If solar underdelivers**: the accuracy checks (`forecast_accuracy = poor/unreliable`) will flip `solar_unreliable = True`, `solar_can_cover = False`, and the deadline escalation rules will take over. The design is: optimistic hold → monitor actuals → escalate if needed.
+
+
+### Rule 22 — Wait-and-Go-Hard: Find the Cheapest Feasible Charge Slot
+
+**Added 2026-06-05.** On peak days where grid charge is needed but the agent is not yet at deadline urgency, the correct strategy is not to start slow self_consumption immediately. Instead, find the cheapest upcoming slot where fast-filling to 85% still fits before the deadline, wait for it, then charge at 5kW (autonomous).
+
+**Every cycle, scan the price forecast for the cheapest slot where:**
+```
+hours_until_slot + fill_fast_85_h + 0.5h ≤ hours_to_2:55pm
+```
+Conservative SoC projection at each slot: home load drains the battery during the wait, no solar credit (pessimistic — real outcome is better if solar produces).
+
+| Condition | Rule | Action |
+|-----------|------|--------|
+| Cheaper slot ≥1¢ below now exists and is feasible | `wait_for_cheap_go_hard` | Hold and wait. Report slot price and hours-until in summary. |
+| No cheaper slot in feasible window | `peak_charge_now` | Charge at self_consumption now — current price is as good as it gets. |
+
+`go_hard_slot` (price, hours_until) is logged to JSONL `computed_context` and shown in the deterministic REFERENCE block each cycle.
+
+**Why:** self_consumption from 8:30am at 17¢ on a day with Solar Sponge arriving at 11¢ at 10am costs more and ties up the charger during solar-producing hours. Waiting and going fast at the cheap price takes less time and money.
+
+### Rule 23 — Receding Horizon Solar Sponge Rate Selection
+
+**Added 2026-06-05.** Once in the Solar Sponge (or at the cheap window identified by Rule 22), the charging rate is not fixed — it's recalculated every cycle as solar data and prices update.
+
+```
+if fill_slow_85_h ≥ hours_to_2:55pm − 1.0h  →  autonomous (peak_sponge_go_hard): tight, go hard
+if fill_slow_85_h < hours_to_2:55pm − 1.0h  →  self_consumption (peak_sponge_selfcons): fits, solar may reduce need
+if kwh_needed_85 ≤ 0                         →  hold (peak_solar_will_cover): solar covering the gap
+```
+
+**Key principle:** each 30-minute cycle is an independent optimization — mode is NOT preserved from the previous cycle. The `battery_autonomous_revert_target_reached` automation fires within 30s of hitting 85% SoC, regardless of the LLM cycle. It is a safety net, not the primary rate controller.
+
+**Why:** as solar improves during the morning, the grid charge needed falls each cycle. A 5kW rate justified at 10:00am (SoC=40%, solar=0.3kW) may be unnecessary at 11:00am (SoC=65%, solar=2kW, fill_slow now 1.6h vs 4.4h deadline). Recalculating prevents over-charging from grid when solar is contributing.
+
+**`battery_grid_charge_target` floor (added 2026-06-05):** In peak months before 3pm, `sensor.battery_grid_charge_target` is clamped to a minimum of 85% regardless of Solcast remaining forecast. Without this, the Solcast-optimistic formula could return 13% on a cloudy day (thinking solar will cover everything), causing `battery_autonomous_revert_target_reached` to fire immediately after autonomous mode is set (battery already above 13%). The 85% floor ensures the automation only stops charging when the demand-window target is actually met.
+
 
 ---
 
