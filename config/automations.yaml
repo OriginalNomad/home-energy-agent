@@ -1242,3 +1242,59 @@
 # Battery-vs-EV policy to be revisited — for now EV runs on ev_charge_mode_manager only.
 # ─────────────────────────────────────────────────────────────
 
+# ═════════════════════════════════════════════════════════════
+# SENSOR WATCHDOG
+# Checks critical agent sensors each morning at 9:30am.
+# Alerts if any sensor is unavailable, unknown, or hasn't
+# updated in over 2 hours during daylight hours.
+# ═════════════════════════════════════════════════════════════
+- id: sensor_watchdog_morning
+  alias: "System: Morning sensor health check"
+  description: "Alert if any critical agent sensor is stale or unavailable at 9:30am"
+  triggers:
+    - trigger: time
+      at: "09:30:00"
+    - trigger: homeassistant
+      event: start
+  conditions:
+    - condition: time
+      after: "09:00:00"
+      before: "17:00:00"
+  actions:
+    - action: persistent_notification.create
+      data:
+        notification_id: sensor_watchdog
+        title: "🔍 Sensor Health Check — {{ now().strftime('%H:%M') }}"
+        message: >
+          {% set stale_threshold = 7200 %}
+          {% set sensors = [
+            ('SolarEdge inverter',    'sensor.solaredge_current_power'),
+            ('Tessie SoC',            'sensor.tessie_powerwall_charge'),
+            ('Solcast remaining',     'sensor.solcast_pv_forecast_forecast_remaining_today'),
+            ('Solcast power now',     'sensor.solcast_pv_forecast_power_now'),
+            ('Amber price',           'sensor.1a_wigram_road_glebe_general_price'),
+            ('Amber cheap window',    'sensor.amber_in_cheap_window'),
+            ('Powerwall SoC',         'sensor.tesla_powerwall_2_charge'),
+            ('Powerwall solar',       'sensor.tesla_powerwall_2_solar_power'),
+          ] %}
+          {% set ns = namespace(issues=[]) %}
+          {% for label, entity in sensors %}
+            {% set s = states(entity) %}
+            {% if s in ['unavailable', 'unknown', 'none', ''] %}
+              {% set ns.issues = ns.issues + [label ~ ': ' ~ s] %}
+            {% else %}
+              {% set age = (now() - states[entity].last_updated).total_seconds() %}
+              {% if age > stale_threshold %}
+                {% set ns.issues = ns.issues + [label ~ ': stale ' ~ (age / 3600) | round(1) ~ 'h'] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.issues | length == 0 %}
+          ✅ All sensors healthy.
+          {% else %}
+          ⚠️ {{ ns.issues | length }} sensor(s) need attention:
+          {% for issue in ns.issues %}
+          • {{ issue }}
+          {% endfor %}
+          {% endif %}
+
