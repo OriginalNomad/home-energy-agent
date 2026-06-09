@@ -1,14 +1,16 @@
 # Energy Automation Rules
 
-## Implementation note (as of 2026-06-01)
+## Implementation note (as of 2026-06-09)
 
-These rules are now implemented by a **Claude-powered agent** (`agent/energy_agent.py`) rather than HA automations. The agent reads this rule-set's intent via its system prompt and applies it to real-time sensor data + price/solar forecasts every 30 minutes.
+These rules are implemented by three Python layers in `agent/energy_agent.py`, running every 30 minutes on the Pi:
 
-Hard constraints (Rule 2 demand window, export guard) remain as HA automations that fire independently of the agent. The agent handles all strategic decisions (when to charge, which mode, how much, EV Zappi mode).
+**Layer A — Deterministic rule layer (IN CONTROL)**: `compute_decision_context()` + `_execute_deterministic_verdict()`. A pure Python `if/elif` rule tree that reads current state and executes all set_* API calls. This is the control path. Kill-switch: `DETERMINISTIC_AUTHORITATIVE = False`.
 
-**Re-architecture in progress (June 2026):** A receding-horizon LP optimiser (`agent/optimizer.py`) is being built to replace the LLM as the primary decision-maker. The rules in this document remain the safety envelope — the LP *derives* the optimal schedule from the objective function, rather than approximating these rules as heuristics. The LP runs in shadow (not in the control path) alongside the LLM and the deterministic rule layer (`compute_decision_context()`). Target cutover: June 4 behind a kill-switch flag. See `PRODUCT.md` "Optimisation Engine — Depth" for the full architecture and migration plan.
+**Layer B — LLM narrative logger (cosmetic only)**: Claude runs after the deterministic layer, reads the shadow block showing what was executed, and writes a plain-English log entry. Its `set_*` calls are no-ops. System prompt is ~65 lines (slimmed 2026-06-09 — all decision arithmetic removed).
 
-See `CONTEXT.md` for the current automation status and which rules are agent-handled vs HA-enforced.
+**Layer C — LP optimiser / MPC (shadow, not in control)**: `agent/optimizer.py`, a receding-horizon linear program. Runs every cycle, logs its verdict to `decisions.jsonl` alongside the deterministic verdict for comparison. Not yet in the control path.
+
+Hard constraints (Rule 2 demand window, export guard) remain as HA automations that fire independently of all layers above. See `CONTEXT.md` for current automation status.
 
 ---
 
