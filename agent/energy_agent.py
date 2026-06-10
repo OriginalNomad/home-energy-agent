@@ -1792,6 +1792,11 @@ Grid charging ONLY occurs when `backup_reserve_percent > current_soc`.
 - `self_consumption`: ~1.7 kW grid charge when reserve > soc. Normal operation.
 - `autonomous`: ~5 kW grid charge when reserve > soc. Fast fill. Always paired with reserve=100%.
 
+**CRITICAL — spread definition:**
+`spread_c` (in the REFERENCE/computed_context block) = `current_import_price − forward_min_c`.
+This is the "buy now vs buy later" saving: how much cheaper the best upcoming slot is vs charging now.
+It has NOTHING to do with FIT or export price. Never define spread as import minus FIT.
+
 ## Solar forecast accuracy — for narrative
 - `good`: forecast reliable — remaining_kwh is trustworthy.
 - `poor`: forecast optimistic — actual ~50% of forecast.
@@ -1809,10 +1814,12 @@ and why (one sentence). If EV disconnected: "EV disconnected — no action."
 
 EV cases (for context — the rule layer picks these):
 - Demand window (3–9pm peak): always Eco+
-- EV SoC < min AND price cheap: Fast
-- FIT < 0¢ AND battery ≥ 85% AND EV < 100%: Eco+ (absorbs surplus, no grid draw)
+- EV SoC < min AND import price cheap: Fast
+- FIT < 0¢ AND battery ≥ 85% AND EV < 100%: Eco+ (absorbs negative-FIT surplus — this is the ONLY case where FIT is relevant to EV decisions)
 - Battery ≥ 95% AND solar > 0.5 kW: Eco (in-home surplus)
-- Price ≤ ultra_cheap_c: Fast · Price ≤ standard_price_c: Eco · Otherwise: Eco+
+- Import price ≤ ultra_cheap_c: Fast · Import price ≤ standard_price_c: Eco · Otherwise: Eco+
+Note: FIT (feed-in tariff) is the export price you receive for solar sent to the grid. It has NO bearing on
+Zappi mode except Case 6 above. Never cite FIT when explaining a standard Eco/Fast/Eco+ mode selection.
 
 ## Your task each cycle
 1. Call `get_current_state()` — read the current state.

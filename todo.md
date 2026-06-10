@@ -52,7 +52,7 @@
 - [ ] Build EV charging automation (Rules 4 & 5)
 - [ ] Test Polestar 4 SoC and charging state sensors alongside Zappi entities
 - [ ] Investigate Daikin AC integration for HA
-- [ ] Build Rule 10 price spike arbitrage (>50¢ feed-in threshold)
+- [ ] **Price spike arbitrage (Rule 10) — deprioritised**: spikes almost always occur inside the 3–9pm demand window (peak months), where discharging to sell would cost more in demand charges than any FIT revenue gained. The only viable window is a spike outside 3–9pm or in an off-peak month — both rare. Revisit only once the LP is authoritative and can explicitly model the trade-off. Not worth building manually.
 - [ ] Add Solcast forecast change trigger to solar sponge check — update reserve immediately when Solcast revises, not just at next 30-min tick
 - [ ] Confirm `sensor.solcast_pv_forecast_power_now` entity name in HA States (used in inverter underperformance alert)
 - [ ] Confirm SolarEdge inverter AC rated output for Solcast config (check label on inverter box)

@@ -1,5 +1,19 @@
 # Energy System Control Log
 
+## 2026-06-10 (session 13 — LLM narrative prompt fixes: FIT/EV confusion, spread definition, Rule 10 deprioritised)
+
+**Morning review**: three demand window passes Jun 7–9 confirmed on Pi (daily_energy.jsonl synced via SSH — Mac copy stale at Jun 5 due to Pi cron not pushing data back to git). Jun 6 recorded as borderline fail (0.56 kW peak, below billing threshold) during the Phase 5 cutover day. data_logger healthy: 178 rows Jun 6–10, 0 undecided rows. Phase 2.5-A (charge rate model) buildable ~2026-06-13.
+
+**Three-way shadow analysis**: LLM↔det 82.3%, LLM↔opt 80.6%, opt↔det 88.5%, three-way consensus 76.6% (252 records). LP divergences predominantly cause (c) — trusts Solcast point forecast and holds while det correctly charges as insurance. Two LP bugs confirmed: (1) charges when target already met (`mpc_charge_grid` at soc=84–100% when det says `target_met`), (2) `solar_sponge_floor` rule not implemented in LP. LP not ready for control path.
+
+**LLM narrative fix 1 — FIT/EV confusion**: at 7:30am LLM cited FIT price (feed-in tariff) as the reason for Zappi mode selection, which is wrong — FIT has no bearing on EV charging except Case 6 (negative-FIT solar dump). Fixed in `SYSTEM_PROMPT`: EV cases block now explicitly labels FIT as relevant *only* to Case 6, and instructs the LLM never to cite FIT for standard Eco/Fast/Eco+ selections.
+
+**LLM narrative fix 2 — spread definition**: at 8:30am LLM defined `spread_c` as `import_price − FIT` (buy vs sell), which is wrong. `spread_c` is `current_import_price − forward_min_c` (buy now vs buy later). Fixed in `SYSTEM_PROMPT`: added explicit CRITICAL block defining spread as the "buy now vs buy later" saving, and explicitly prohibiting the import-minus-FIT definition.
+
+Root cause of both errors: Phase 6 prompt slim removed all arithmetic context but left `fit_price_cents_kwh` visible in state. LLM had no definition of spread and latched onto FIT as the nearest available price variable.
+
+**Rule 10 deprioritised**: decided not to build price spike arbitrage as a manual rule. In peak months, spikes almost always occur inside the 3–9pm demand window — discharging to sell risks a demand charge breach (~$100/month) that dwarfs any FIT revenue. Outside the demand window, spikes are rare on EA116. Revisit only if LP becomes authoritative (it can model the trade-off explicitly). `energy_rules.md` Rule 10 and `todo.md` updated to reflect this decision.
+
 ## 2026-06-09 (session 12 — race condition fix, peak_deadline_autonomous fix, sensor watchdog, data_logger dedup, Phase 6 prompt slim)
 
 **Race condition: `battery_low_soc_emergency_charge` automation vs det layer HOLD.** HA automation fired seconds before agent cycle, setting reserve=20%. Det layer then ran HOLD verdict but only cleared reserve when `reserve > SoC` — sensor lag (slow Tessie poll) meant agent read stale reserve=5% and left 20% in place, causing grid charging. Two-part fix: (1) removed 20% minimum floor from automation action (now uses `grid_charge_target` directly, capped at 95%), (2) HOLD verdict now unconditionally sets reserve=5% when reserve > 5%, regardless of stale SoC sensor. Root cause: HA automation existed to protect against running down to 0% on a genuinely cloudy day — but the det layer already handles this via `overnight_hold` and `solar_sponge_floor` rules. 20% floor was vestigial and conflicting.

@@ -288,35 +288,15 @@ Use `Eco+` as the default (charges only from actual solar export past the meter)
 - Prevents arriving at 3 pm with a half-full battery because solar underdelivered
 
 
-### Rule 10 — Price Spike Arbitrage
-- **Gentle arbitrage is explicitly excluded** — buying cheap and selling at moderate peaks (e.g. 10¢ buy / 18¢ sell) generates insufficient margin (~$115/year) to justify the battery cycle degradation cost (~$15,000 replacement)
-- **Spike arbitrage only**: triggered when Amber export price forecast exceeds **50¢/kWh**
+### Rule 10 — Price Spike Arbitrage (deprioritised — not implemented)
 
-**Strategy: look ahead, don't discharge greedily**
-- Do NOT discharge at the first price that crosses the threshold — scan the full forecast window first
-- Find the **highest price period** in the upcoming 6 hours (or to end of demand window)
-- Hold battery at full charge until that peak arrives, then discharge at maximum rate (5 kW)
-- Calculate discharge start time based on how long the peak window lasts and battery SoC:
-  - Full battery (13.5 kWh) at 5 kW = ~2.7 hours of discharge
-  - e.g. if peak is forecast 7–9 pm, start discharging at 7 pm not 3 pm
-- After spike passes, recharge during next cheap window — recharge cost should be well below spike revenue
+**Decision (2026-06-10)**: Not worth building as a manual rule. The economics are unfavourable in practice:
 
-**Example:** 3 pm at 50¢ vs 7 pm at $32
-- Discharging at 3 pm: 13.5 kWh × 50¢ = **$6.75**
-- Waiting for 7 pm: 10 kWh × $32 = **$320**
-- Conclusion: always scan the full window before committing to discharge
+- **Demand window conflict**: in peak months (Jun–Aug, Nov–Mar), price spikes almost always occur during the 3–9pm demand window. Discharging to sell during the demand window risks a demand charge breach — a ~$100/month penalty that dwarfs any FIT revenue.
+- **Outside demand window**: spikes outside 3–9pm or in off-peak months are rare on the EA116 tariff.
+- **Gentle arbitrage excluded**: buying at 10¢ and selling at moderate peaks (18¢) generates insufficient margin to justify battery cycle degradation cost (~$15,000 replacement).
 
-**Safety constraints during spike arbitrage:**
-
-| Scenario | Constraint |
-|----------|------------|
-| Peak month, during demand window (3–9 pm) | Do not discharge below buffer needed to cover estimated home load for remaining window hours — cannot risk needing to import before 9 pm |
-| Peak month, outside demand window | Can discharge to Minimum Battery Threshold (20%) |
-| Off-peak month | Can discharge to Minimum Battery Threshold (20%) |
-
-- Spike threshold of **50¢** is configurable — monitor actual spike patterns to tune
-- Forecast source: Amber feed-in forecast sensor
-- Rule 2 still applies: no grid **import** during demand window regardless of price — but grid **export** during demand window is fine and encouraged during spikes
+**Revisit only**: if/when the LP optimiser becomes authoritative — it can model the trade-off explicitly (demand penalty vs FIT revenue) and identify the narrow windows where spike discharge is genuinely profitable. Not worth a hand-coded rule.
 
 
 ### Rule 11 — Solcast vs Inverter Cross-Check
@@ -581,7 +561,7 @@ When multiple rules conflict, apply in this order:
 1. **Rule 6** — Never below Minimum Battery Threshold (safety)
 2. **Rule 2** — Never import during demand window in peak months (cost)
 3. **Rule 3** — Avoid negative FIT and export penalty (revenue protection)
-4. **Rule 10** — Price spike arbitrage > 50¢ (revenue)
+4. **Rule 10** — Price spike arbitrage (deprioritised — not implemented; demand window conflict makes it rarely viable)
 5. **Rule 8** — Exploit negative spot prices (revenue)
 6. **Rule 1** — Get to 100% by 3 pm daily (daily target)
 7. **Rule 5** — Excess solar to EV (efficiency)
