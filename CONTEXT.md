@@ -241,7 +241,7 @@ Key agent capabilities added 2026-05-29:
 
 **Not yet built:**
 - Daikin AC load shedding during demand window
-- Price spike arbitrage (Rule 10)
+- Price spike arbitrage (Rule 10) — deprioritised; demand window conflict makes it rarely viable (see energy_rules.md Rule 10)
 
 ---
 
@@ -287,6 +287,11 @@ Key agent capabilities added 2026-05-29:
 **Phase 5 complete (2026-06-06)** — `DETERMINISTIC_AUTHORITATIVE = True`. Deterministic layer now drives control. LLM is narrative-only. LP optimiser remains shadow for divergence tracking.
 
 **Phase 6 complete (2026-06-09)** — system prompt slimmed from ~470 lines to ~65 lines (86% reduction). All decision arithmetic removed. LLM prompt explicitly states it is a narrative logger only; `set_*` calls are no-ops.
+
+**Session 13 fixes (2026-06-10)**:
+- **LLM narrative fix — FIT/EV confusion**: LLM was citing FIT (feed-in tariff) as the reason for Zappi mode selection. FIT is irrelevant to EV charging except Case 6 (negative-FIT solar dump). `SYSTEM_PROMPT` updated: EV cases block now explicitly restricts FIT reference to Case 6 only, and prohibits citing FIT for standard mode selections.
+- **LLM narrative fix — spread definition**: LLM was defining `spread_c` as `import_price − FIT` (buy vs sell). `spread_c` is `current_import_price − forward_min_c` (buy now vs buy later). `SYSTEM_PROMPT` updated: explicit CRITICAL block added defining spread correctly and prohibiting the FIT-based definition. Root cause of both errors: Phase 6 prompt slim left `fit_price_cents_kwh` visible in state with no definition of spread, so LLM latched onto FIT as the nearest available price variable.
+- **Rule 10 (price spike arbitrage) deprioritised**: decided not to build as a manual rule — demand window conflict makes it rarely viable. `energy_rules.md` and `todo.md` updated.
 
 **Session 12 fixes (2026-06-09)**:
 - Race condition between `battery_low_soc_emergency_charge` automation and det layer HOLD fixed: automation no longer has 20% minimum floor; HOLD verdict now unconditionally clears reserve to 5%.
