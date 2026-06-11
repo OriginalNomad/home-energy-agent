@@ -84,6 +84,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 | **GitHub** (`OriginalNomad/home-energy-agent`) | Single repo, auto-deployed to Pi on each cron run |
 
 **Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `git pull -q` then runs agent. Deploy = `git push` from Mac.
+**Pi data publishing** (`agent/push_pi_data.sh`, cron hourly at :05): snapshots the Pi-only data files (`decisions.jsonl`, `daily_energy.jsonl`, `agent_decisions.log`, `energy_log.db`) to the orphan **`pi-data`** branch (single flat commit, force-pushed). Remote sessions read via `git fetch origin pi-data` + `git show origin/pi-data:<file>` — see the fetch block in `.claude/commands/morning.md`. Freshness check: `git show origin/pi-data:last_updated.txt`.
 **Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://192.168.68.70:8123`. Systemd service, connects via Sydney edge.
 **HA external URL**: `https://agent.sol.io`. Trusted proxies configured for Pi subnet + Docker bridge.
 
@@ -268,6 +269,7 @@ Key agent capabilities added 2026-05-29:
 | `agent/daily_energy.jsonl` | Durable per-day energy record (survives HA recorder rolloff) — source of truth for dashboard cards and future learning agent |
 | `agent/demand_window_summary.py` | Pushes `sensor.demand_window_monitor` into HA via REST API (month peak kW + rolling per-day history). Reads daily_energy.jsonl. Crons: 21:05 + hourly. Feeds two Markdown dashboard cards |
 | `agent/data_logger.py` | Closed-loop SQLite logger — one row per cycle in `energy_log.db`. Foundation for self-calibrating models (Phase 2.5-A+). Wired in 2026-06-06. |
+| `agent/push_pi_data.sh` | Hourly Pi cron — publishes the gitignored data files to the `pi-data` branch so remote sessions (Claude Code web, travelling) can run the full `/morning` analysis without SSH to the Pi. Added 2026-06-11. |
 | `agent/energy_log.db` | SQLite DB on Pi only (gitignored). Accumulates state + price forecasts + decisions each cycle. Inspect: `ssh energypi.local "agent/venv/bin/python home-energy-agent/agent/data_logger.py"` |
 
 ---

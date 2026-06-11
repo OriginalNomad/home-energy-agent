@@ -1,5 +1,13 @@
 # Energy System Control Log
 
+## 2026-06-11 (session 14 — remote session: HA timezone display fix, pi-data publishing branch)
+
+**Session run from Claude Code web (remote container) while Simon is travelling.** Two consequences surfaced: (1) HA dashboards displayed in the local travel timezone, and (2) the morning review's data sections couldn't run — the operational data files are Pi-only since the June 7 gitignore change, and remote containers have no SSH path to the Pi.
+
+**HA timezone display — fixed (user-side, one setting).** HA renders timestamps per user profile setting (default "Local" = browser timezone), while all automations/agent logic run on server time (Sydney). Fix: HA Profile → Time zone → "Server". Display-only issue; nothing operational was affected.
+
+**`pi-data` publishing branch — built (`agent/push_pi_data.sh`).** Hourly Pi cron snapshots `decisions.jsonl`, `daily_energy.jsonl`, `agent_decisions.log`, and a consistent SQLite backup of `energy_log.db` (WAL-safe via `sqlite3.backup`) to an orphan `pi-data` branch. Branch kept flat — single commit, amended and force-pushed each run (JSONL is append-only, DB snapshot is full state, so no information is lost). Worktree at `~/.pi-data-worktree`, flock guard against overlapping runs, push retries with backoff. Tested end-to-end against a local bare origin: bootstrap, steady-state amend, and consumer reads (`git show origin/pi-data:<file>`) all verified. `/morning` command updated with a fetch-fallback block; fetched files land on their normal gitignored paths so `data_logger.py` health checks work unchanged. **Not yet live** — needs two manual steps on the Pi (verify push rights, add cron line); see todo.md.
+
 ## 2026-06-10 (session 13 — LLM narrative prompt fixes: FIT/EV confusion, spread definition, Rule 10 deprioritised)
 
 **Morning review**: three demand window passes Jun 7–9 confirmed on Pi (daily_energy.jsonl synced via SSH — Mac copy stale at Jun 5 due to Pi cron not pushing data back to git). Jun 6 recorded as borderline fail (0.56 kW peak, below billing threshold) during the Phase 5 cutover day. data_logger healthy: 178 rows Jun 6–10, 0 undecided rows. Phase 2.5-A (charge rate model) buildable ~2026-06-13.

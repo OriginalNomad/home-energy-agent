@@ -54,6 +54,28 @@ python energy_agent.py
 
 Or trigger from HA via a shell_command + automation if you want HA to control timing.
 
+## Publishing operational data (`pi-data` branch)
+
+`decisions.jsonl`, `daily_energy.jsonl`, `agent_decisions.log`, and `energy_log.db` are
+gitignored on `main` and exist only on the Pi. `push_pi_data.sh` snapshots them to the
+orphan `pi-data` branch (single flat commit, force-pushed) so any remote session can read
+them without SSH access to the Pi:
+
+```bash
+git fetch origin pi-data
+git show origin/pi-data:decisions.jsonl
+```
+
+Pi cron (hourly, 5 past the hour — after the :00/:30 agent cycles):
+
+```cron
+5 * * * * $HOME/home-energy-agent/agent/push_pi_data.sh >> /tmp/push_pi_data.log 2>&1
+```
+
+First run bootstraps the branch and worktree (`~/.pi-data-worktree`) automatically.
+Requires the Pi's git credential to have **push** rights to the repo — test once manually
+with `agent/push_pi_data.sh` before relying on the cron.
+
 ## Cost
 
 Each cycle makes ~3–5 API calls to Claude (~2000 tokens in, ~500 out).

@@ -42,6 +42,7 @@
 - [ ] **Migrate HA to Pi** — install HA via Docker on Pi, restore from Mac backup, update agent `.env` to `localhost:8123`. Simplifies architecture; no urgency while Mac Studio is always on.
 - [x] **Wire `data_logger.py` into `energy_agent.py`** — wired in 2026-06-06. Phase 2.5-A clock started; charge rate model buildable ~2026-06-13.
 - [ ] **Switch SD card boot to SSD** — Pi is already running from SSD (`/dev/sda2`); confirm boot order in `raspi-config` to ensure it always boots from SSD, not SD card.
+- [ ] **Activate `pi-data` publishing on the Pi** — `agent/push_pi_data.sh` written and tested 2026-06-11 (script lands on Pi via normal git pull). Two manual steps on the Pi: (1) run it once by hand — `~/home-energy-agent/agent/push_pi_data.sh` — to verify the Pi's git credential has **push** rights (if rejected, add a read-write deploy key or PAT); (2) add the cron line: `5 * * * * $HOME/home-energy-agent/agent/push_pi_data.sh >> /tmp/push_pi_data.log 2>&1`. Once live, `/morning` works fully from any remote session.
 
 - [x] **Add InfluxDB** — pipe HA sensor history into InfluxDB for long-term retention and analysis (default SQLite rolls off after 10 days)
 - [ ] **InfluxDB dashboards & reports** — set up Data Explorer queries and dashboards for battery SoC history, charging patterns, price vs SoC correlation, daily 3pm SoC outcomes

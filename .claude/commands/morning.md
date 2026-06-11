@@ -14,6 +14,26 @@ Then give me a 6-part summary:
 - **Daily energy journal review** — schema completeness check (see below)
 - **Architecture progress** — where we are on the self-learning roadmap (see below)
 
+## Getting the operational data (remote sessions)
+
+The data files (`agent/decisions.jsonl`, `agent/daily_energy.jsonl`, `agent/energy_log.db`)
+are gitignored and live on the Pi, which publishes hourly snapshots to the `pi-data` branch
+via `agent/push_pi_data.sh`. If the local files are missing or stale (cloud/web sessions, or
+a Mac that hasn't synced), fetch them before the analysis sections below:
+
+```bash
+git fetch origin pi-data
+git show origin/pi-data:last_updated.txt          # check snapshot freshness first
+git show origin/pi-data:decisions.jsonl    > agent/decisions.jsonl
+git show origin/pi-data:daily_energy.jsonl > agent/daily_energy.jsonl
+git show origin/pi-data:energy_log.db      > agent/energy_log.db
+```
+
+These paths are gitignored locally, so writing them is safe. If `last_updated.txt` is more
+than ~2 hours old, flag it in the System status section — the Pi's push cron may have
+stopped. If the `pi-data` branch doesn't exist at all, say so and fall back to documented
+state from `energy_log.md`.
+
 ## Three-way decision analysis
 
 The agent runs three decision layers in parallel; only the LLM is in the control path.
