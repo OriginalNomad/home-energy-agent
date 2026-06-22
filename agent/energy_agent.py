@@ -1063,7 +1063,11 @@ def _cheapest_go_hard_slot(
         hours_until = (i + 1) * 0.5          # 30-min slots
         slot_price  = f.get("cents_kwh", current_price_c)
         # Conservative SoC at this slot (home load draining, no solar)
-        soc_at_slot = max(5.0, soc - home_load_kw * hours_until / USABLE_KWH * 100)
+        soc_at_slot = soc - home_load_kw * hours_until / USABLE_KWH * 100
+        # If battery hits the 5% backup floor before this slot, the grid already covers home
+        # load at the expensive current price — waiting for this slot saves nothing.
+        if soc_at_slot < 5.0:
+            continue
         kwh_needed  = max((0.85 - soc_at_slot / 100) * USABLE_KWH, 0.0)
         fill_fast_h = kwh_needed / FAST_KW
         # Feasible = can finish fast-fill AND have safety buffer before deadline
@@ -1487,9 +1491,18 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         # Peak-month hard deadline escalation (Rule 13)
         if kwh_needed_85 <= 0:
             # net solar (after home load) covers the remaining gap — no grid charge needed yet.
-            # "peak_target_met" only when SoC has actually reached 85%.
-            rule_name = "peak_target_met" if soc >= 85 else "peak_solar_will_cover"
-            rec = verdict("hold", None, None, rule_name)
+            if soc >= 85:
+                rec = verdict("hold", None, None, "peak_target_met")
+            else:
+                # Survival check: will the battery reach Solar Sponge (10am) without hitting the
+                # 5% backup floor? If not, the grid covers home load at the expensive current price
+                # anyway — charging now at self_consumption is strictly cheaper than that outcome.
+                hours_to_sponge = max(10.0 - now_h, 0.0)
+                projected_soc_at_sponge = soc - (home_load_kw * hours_to_sponge / USABLE_KWH * 100)
+                if projected_soc_at_sponge <= 5.0:
+                    rec = verdict("charge", 85, "self_consumption", "peak_solar_cover_survival")
+                else:
+                    rec = verdict("hold", None, None, "peak_solar_will_cover")
         elif fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55:
             # Price already at or below the cheapest upcoming slot — no arbitrage benefit
             # to going autonomous now vs self_consumption. Charge at self_consumption rate
