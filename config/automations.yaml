@@ -588,6 +588,7 @@
     - trigger: numeric_state
       entity_id: sensor.tesla_powerwall_2_charge
       below: 25
+      for: "0:01:00"
   conditions:
     - condition: template
       value_template: "{{ now().month in [11, 12, 1, 2, 3, 6, 7, 8] }}"
@@ -611,6 +612,7 @@
     - trigger: numeric_state
       entity_id: sensor.tesla_powerwall_2_charge
       below: 10
+      for: "0:01:00"
   conditions:
     - condition: template
       value_template: "{{ now().month in [11, 12, 1, 2, 3, 6, 7, 8] }}"
