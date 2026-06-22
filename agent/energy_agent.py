@@ -970,6 +970,44 @@ SLOW_KW          = 1.7
 FAST_KW          = 5.0
 DEMAND_DEADLINE  = 14 + 55 / 60   # 2:55pm as a decimal hour
 
+# Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
+# Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
+MODEL_PARAMS_FILE = Path(__file__).parent / "model_params.json"
+_charge_rate_model: dict = {}
+try:
+    with MODEL_PARAMS_FILE.open() as _f:
+        _charge_rate_model = json.load(_f).get("charge_rate_kw", {})
+except Exception:
+    pass
+
+_MODEL_MIN_SAMPLES = 5
+
+
+def _avg_charge_rate_kw(soc_from: float, soc_to: float, mode: str) -> float:
+    """Weighted-average charge rate from soc_from% to soc_to% using model_params.json.
+
+    Segments the SoC range into 10%-point buckets and averages the rates weighted
+    by the kWh in each segment. Falls back to SLOW_KW / FAST_KW for missing or
+    low-sample buckets so missing autonomous data is handled gracefully.
+    """
+    fallback = SLOW_KW if mode == "self_consumption" else FAST_KW
+    if soc_to <= soc_from:
+        return fallback
+    table = (_charge_rate_model or {}).get(mode, {})
+    total_kwh = (soc_to - soc_from) / 100.0 * USABLE_KWH
+    total_time = 0.0
+    bucket_floor = int(soc_from / 10) * 10
+    while bucket_floor < soc_to:
+        seg_bot = max(float(bucket_floor), soc_from)
+        seg_top = min(float(bucket_floor + 10), soc_to)
+        if seg_top > seg_bot:
+            seg_kwh = (seg_top - seg_bot) / 100.0 * USABLE_KWH
+            entry = table.get(str(bucket_floor))
+            rate = entry["kw"] if (entry and entry.get("n", 0) >= _MODEL_MIN_SAMPLES) else fallback
+            total_time += seg_kwh / rate
+        bucket_floor += 10
+    return round(total_kwh / total_time, 3) if total_time > 0 else fallback
+
 
 def _accuracy_class(label: str) -> str:
     """Collapse the verbose forecast_accuracy string into one of: good/poor/unreliable/na."""
@@ -1400,14 +1438,18 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
 
     # Peak-month demand fill maths (toward 85% by 2:55pm)
     # Uses net solar so we don't mistakenly hold when home load will consume most of the forecast.
-    kwh_needed_85   = max((0.85 - soc / 100) * USABLE_KWH - net_expected_solar, 0.0)
-    fill_slow_85    = kwh_needed_85 / SLOW_KW
-    fill_fast_85    = kwh_needed_85 / FAST_KW
+    kwh_needed_85    = max((0.85 - soc / 100) * USABLE_KWH - net_expected_solar, 0.0)
+    _slow_rate_85    = _avg_charge_rate_kw(soc, 85.0, "self_consumption")
+    _fast_rate_85    = _avg_charge_rate_kw(soc, 85.0, "autonomous")
+    fill_slow_85     = kwh_needed_85 / _slow_rate_85
+    fill_fast_85     = kwh_needed_85 / _fast_rate_85
 
     # Cost-target fill maths
     kwh_needed   = max((cost_target / 100 - soc / 100) * USABLE_KWH, 0.0)
-    fill_slow    = kwh_needed / SLOW_KW
-    fill_fast    = kwh_needed / FAST_KW
+    _slow_rate   = _avg_charge_rate_kw(soc, float(cost_target), "self_consumption")
+    _fast_rate   = _avg_charge_rate_kw(soc, float(cost_target), "autonomous")
+    fill_slow    = kwh_needed / _slow_rate
+    fill_fast    = kwh_needed / _fast_rate
 
     # Non-peak: will solar alone (net of home load) cover the gap to cost_target?
     # Only fires before 1pm when solar still has time to deliver, and when forecast is reliable.
@@ -1936,6 +1978,47 @@ TOOL_MAP = {
     "log_decision":         lambda a: log_decision(a["summary"], a["actions_taken"], a.get("ev_summary", "")),
 }
 
+# ---------------------------------------------------------------------------
+# Phase 7 — selective narrative: skip LLM on routine cycles
+# ---------------------------------------------------------------------------
+
+_ROUTINE_HOLD_RULES = {
+    "overnight_hold_wait_for_sponge",
+    "peak_target_met",
+    "peak_on_track",
+    "peak_solar_will_cover",
+    "demand_window_active",
+    "target_met",
+    "nonpeak_on_track",
+}
+
+
+def _is_interesting_cycle(ctx: dict, actions: list[str], records: list[dict],
+                           demand_guard_fired: bool) -> bool:
+    """Return True when this cycle needs LLM narrative (rule fired, action taken, or context shifted)."""
+    if demand_guard_fired:
+        return True
+    if actions:
+        return True  # any battery/EV action taken — always narrate
+    rule = (ctx.get("recommended") or {}).get("rule_fired", "")
+    if rule not in _ROUTINE_HOLD_RULES:
+        return True  # unusual hold rule — worth explaining
+    if records:
+        prev_rule = (records[-1].get("computed_verdict") or {}).get("rule_fired")
+        if prev_rule != rule:
+            return True  # rule changed since last cycle
+    return False
+
+
+def _build_auto_summary(ctx: dict) -> str:
+    """One-line summary for routine cycles where LLM is skipped."""
+    rule  = (ctx.get("recommended") or {}).get("rule_fired", "unknown")
+    soc   = ctx.get("soc", "?")
+    state = _cycle_context.get("state", {})
+    price = (state.get("grid") or {}).get("price_cents_kwh", "?")
+    solar = (state.get("solar") or {}).get("current_kw", "?")
+    return f"[auto] {rule} | SoC {soc}% | {price}¢/kWh | solar {solar}kW | hold — no action"
+
 
 def run_agent(dry_run: bool = False):
     """
@@ -2023,9 +2106,14 @@ def run_agent(dry_run: bool = False):
     # deterministic shadow or the control path. Shadow only, not authoritative.
     if _HAVE_OPTIMIZER:
         try:
-            _opt_state  = _cycle_context.get("state")
+            _opt_state  = dict(_cycle_context.get("state") or {})
             _opt_prices = _cycle_context.get("price_forecast")
             if _opt_state and _opt_prices:
+                # Pass solar_unreliable flag so the LP zeroes out solar on cloudy mornings
+                # (previously the LP would see a positive Solcast forecast and hold when the
+                # deterministic layer correctly charged — all divergences were this bug).
+                _det_ctx = _cycle_context.get("decision_context") or {}
+                _opt_state["solar_unreliable"] = _det_ctx.get("solar_unreliable", False)
                 # Extend the ~6h Amber forecast with synthetic historical prices so the LP
                 # can see the 15:00–21:00 demand-window block and apply its demand_penalty.
                 _hourly_model = _build_hourly_price_model()
@@ -2038,6 +2126,21 @@ def run_agent(dry_run: bool = False):
                     k: v for k, v in _opt.items() if k != "verdict"}
         except Exception as exc:
             print(f"  Warning: optimizer shadow failed: {exc}", file=sys.stderr)
+
+    # Phase 7 — skip LLM on routine hold cycles to reduce API cost and latency.
+    # Only fires when DETERMINISTIC_AUTHORITATIVE=True (control path is deterministic).
+    if DETERMINISTIC_AUTHORITATIVE and not dry_run:
+        try:
+            _interesting = _is_interesting_cycle(
+                _ctx, _det_executed_actions, _records, _demand_reserve_guard_fired)
+            if not _interesting:
+                _auto = _build_auto_summary(_ctx)
+                log_decision(_auto, ["hold — no change needed"])
+                print(f"Cycle complete (routine — LLM skipped, rule: "
+                      f"{(_ctx.get('recommended') or {}).get('rule_fired', '?')}).")
+                return
+        except Exception as _exc:
+            print(f"  Warning: Phase 7 routine-check failed ({_exc}) — running LLM", file=sys.stderr)
 
     if DETERMINISTIC_AUTHORITATIVE:
         initial_msg = (
