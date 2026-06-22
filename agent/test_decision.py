@@ -152,6 +152,21 @@ def test_peak_solar_cover_survival_charges_when_battery_wont_reach_sponge():
     check("survival floor mode is self_consumption", r["mode"] == "self_consumption", r)
 
 
+def test_peak_survival_waits_when_sponge_close_and_cheaper():
+    # SoC=12%, 7:30am, Solcast says solar covers gap (kwh_needed_85=0), battery drains to
+    # floor before Solar Sponge (2.5h away). But Solar Sponge is close (≤3h) and 9¢ cheaper
+    # (20¢ now vs 11¢ at 10am) — waiting and fast-charging at Solar Sponge saves ~68¢.
+    # Should hold (peak_survival_wait_for_sponge) not charge now.
+    prices = [20.0] * 5 + [11.0] * 12 + [18.0] * 7     # 20¢ until ~10am, then 11¢
+    state = mk_state(12, 7, "good", 0.1, 20.0, price=20.0)  # kwh_needed_85=0 via Solcast
+    state["home_load_kw"] = 0.5
+    ctx = ea.compute_decision_context(state, fc(prices), [], now_at(7, 30))
+    r = ctx["recommended"]
+    check("waits for sponge when close and cheaper (survival path)",
+          r["rule_fired"] == "peak_survival_wait_for_sponge", r)
+    check("action is hold", r["action"] == "hold", r)
+
+
 def test_peak_solar_cover_no_survival_holds_when_soc_ok():
     # SoC=60%, 3am, solar covers gap, battery comfortably survives to Solar Sponge (7h × 0.5kW ≈ 19% drain → ~41% remaining).
     # Should hold normally.
@@ -165,18 +180,19 @@ def test_peak_solar_cover_no_survival_holds_when_soc_ok():
     check("action is hold when soc ok", r["action"] == "hold", r)
 
 
-def test_wait_for_cheap_go_hard_charges_when_battery_wont_survive():
-    # SoC=8%, 7am, kwh_needed_85>0, cheaper slot at 10am (11¢) — but battery will drain
-    # to <5% before that slot (3h × 0.5kW = 11% drain → -3% → floor hit).
-    # _cheapest_go_hard_slot should reject the 10am slot; agent should charge now.
+def test_wait_for_cheap_go_hard_holds_when_sponge_close_and_cheaper():
+    # SoC=8%, 7am, kwh_needed_85>0, cheaper slot at 10am (11¢, 3h away, 19¢ gap).
+    # Battery will drain to floor before 10am, but waiting is cheaper:
+    # drain cost (~0.3 kWh grid) < saving (9.86 kWh × 19¢ gap = 187¢).
+    # Agent should hold and wait for the cheap slot.
     prices = [30.0] * 6 + [11.0] * 12 + [20.0] * 6     # 30¢ for 3h, then 11¢
     state = mk_state(8, 7, "poor", 0.1, 8.0, price=30.0)
     state["home_load_kw"] = 0.5
     ctx = ea.compute_decision_context(state, fc(prices), [], now_at(7))
     r = ctx["recommended"]
-    check("no wait_for_cheap when battery drains before cheap slot",
-          r["rule_fired"] != "wait_for_cheap_go_hard", r)
-    check("charges now when battery won't survive", r["action"] == "charge", r)
+    check("waits for cheap slot even when battery hits floor en route",
+          r["rule_fired"] == "wait_for_cheap_go_hard", r)
+    check("action is hold", r["action"] == "hold", r)
 
 
 def test_peak_wait_for_cheap_go_hard():
@@ -748,8 +764,9 @@ if __name__ == "__main__":
                test_overnight_hold_not_fired_when_critically_low,
                test_overnight_hold_not_fired_during_day,
                test_peak_solar_cover_survival_charges_when_battery_wont_reach_sponge,
+               test_peak_survival_waits_when_sponge_close_and_cheaper,
                test_peak_solar_cover_no_survival_holds_when_soc_ok,
-               test_wait_for_cheap_go_hard_charges_when_battery_wont_survive,
+               test_wait_for_cheap_go_hard_holds_when_sponge_close_and_cheaper,
                test_peak_wait_for_cheap_go_hard, test_peak_charge_now_when_no_cheaper_slot,
                test_peak_sponge_go_hard, test_peak_sponge_selfcons_then_escalates,
                test_peak_sponge_solar_improves_to_hold]:
