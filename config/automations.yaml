@@ -889,7 +889,10 @@
 # ─────────────────────────────────────────────────────────────
 - id: battery_low_soc_emergency_charge
   alias: "Battery: Charge when critically low + price cheap"
-  description: "Charge to 80% whenever SoC < 20% and price is cheap, regardless of time of day"
+  description: >
+    Emergency charge when SoC < 20% and price is genuinely cheap (≤ 20¢ absolute ceiling,
+    plus Amber cheap window). Target: 85% in peak months (demand window protection),
+    battery_grid_charge_target otherwise. Never fires above 20¢ or during demand window.
   triggers:
     - trigger: numeric_state
       entity_id: sensor.tessie_powerwall_charge
@@ -900,6 +903,11 @@
     - condition: numeric_state
       entity_id: sensor.tessie_powerwall_charge
       below: 20
+    # Absolute price ceiling: never charge in an emergency above 20¢/kWh.
+    # At 20¢+ the "cheap" label is meaningless — wait for Solar Sponge instead.
+    - condition: numeric_state
+      entity_id: sensor.1a_wigram_road_glebe_general_price
+      below: 0.20
     - condition: or
       conditions:
         - condition: state
@@ -923,21 +931,45 @@
         mode: self_consumption
     - action: rest_command.powerwall_set_backup_reserve
       data:
-        percent: "{{ [states('sensor.battery_grid_charge_target') | int, 95] | min }}"
+        # Peak months before 3pm: always target 85% (demand window protection).
+        # battery_grid_charge_target can return sub-85% on Solcast-optimistic forecasts
+        # even with the floor logic, and this is an emergency — we need the full buffer.
+        percent: >
+          {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
+          {% set is_peak = now().month in peak_months %}
+          {% set now_h = now().hour + now().minute / 60 %}
+          {% if is_peak and now_h < 15 %}
+            85
+          {% else %}
+            {{ [states('sensor.battery_grid_charge_target') | int, 5] | max }}
+          {% endif %}
     - action: script.log_battery_decision
       data:
         automation_name: "low_soc_emergency_charge"
-        action_taken: "reserve set to {{ states('sensor.battery_grid_charge_target') | int }}% (SoC below 20%)"
-        reserve_set: "{{ [states('sensor.battery_grid_charge_target') | int, 95] | min }}"
+        action_taken: >
+          {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
+          {% set is_peak = now().month in peak_months %}
+          {% set now_h = now().hour + now().minute / 60 %}
+          {% set target = 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int, 5] | max %}
+          reserve set to {{ target }}% (SoC below 20%, {% if is_peak and now_h < 15 %}peak-month 85% floor{% else %}grid charge target{% endif %})
+        reserve_set: >
+          {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
+          {% set is_peak = now().month in peak_months %}
+          {% set now_h = now().hour + now().minute / 60 %}
+          {{ 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int, 5] | max }}
     - action: persistent_notification.create
       data:
         notification_id: "battery_low_soc_charge"
-        title: "🔋 Low Battery — Charging to Shortfall Target"
+        title: "🔋 Low Battery — Emergency Charge"
         message: >
+          {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
+          {% set is_peak = now().month in peak_months %}
+          {% set now_h = now().hour + now().minute / 60 %}
+          {% set target = 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int, 5] | max %}
           Battery at {{ states('sensor.tessie_powerwall_charge') | int }}% — below 20%.
           Price {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh
-          — self_consumption, reserve set to grid charge target {{ states('sensor.battery_grid_charge_target') | int }}%.
-          Solar covers the rest to 95%.
+          — self_consumption, reserve set to {{ target }}%
+          ({% if is_peak and now_h < 15 %}peak-month 85% floor{% else %}grid charge target{% endif %}).
 
 # ═════════════════════════════════════════════════════════════
 # EV CHARGING — RULES 4 & 5
