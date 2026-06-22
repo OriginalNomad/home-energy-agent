@@ -1062,12 +1062,10 @@ def _cheapest_go_hard_slot(
     for i, f in enumerate(price_forecast):
         hours_until = (i + 1) * 0.5          # 30-min slots
         slot_price  = f.get("cents_kwh", current_price_c)
-        # Conservative SoC at this slot (home load draining, no solar)
-        soc_at_slot = soc - home_load_kw * hours_until / USABLE_KWH * 100
-        # If battery hits the 5% backup floor before this slot, the grid already covers home
-        # load at the expensive current price — waiting for this slot saves nothing.
-        if soc_at_slot < 5.0:
-            continue
+        # Conservative SoC at this slot (home load draining, no solar).
+        # Clip at 5% — below that the Powerwall stops discharging and grid covers home load,
+        # but the slot is still reachable (battery just sits at floor until we charge).
+        soc_at_slot = max(5.0, soc - home_load_kw * hours_until / USABLE_KWH * 100)
         kwh_needed  = max((0.85 - soc_at_slot / 100) * USABLE_KWH, 0.0)
         fill_fast_h = kwh_needed / FAST_KW
         # Feasible = can finish fast-fill AND have safety buffer before deadline
@@ -1500,7 +1498,20 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                 hours_to_sponge = max(10.0 - now_h, 0.0)
                 projected_soc_at_sponge = soc - (home_load_kw * hours_to_sponge / USABLE_KWH * 100)
                 if projected_soc_at_sponge <= 5.0:
-                    rec = verdict("charge", 85, "self_consumption", "peak_solar_cover_survival")
+                    # Battery hits floor before Solar Sponge. But if Solar Sponge is close
+                    # and meaningfully cheaper, it's still better to drain to the floor and
+                    # fast-charge there — the grid covers home load either way once at floor.
+                    # Break-even: saving (price−forward_min) × kwh_needed must exceed the
+                    # cost of home load during the drain period. A 5¢ gap with ≤3h wait
+                    # is reliably worth it at this site's typical load (~0.5 kW).
+                    worth_waiting = (
+                        hours_to_sponge <= 3.0
+                        and forward_min <= price - 5.0
+                    )
+                    if worth_waiting:
+                        rec = verdict("hold", None, None, "peak_survival_wait_for_sponge")
+                    else:
+                        rec = verdict("charge", 85, "self_consumption", "peak_solar_cover_survival")
                 else:
                     rec = verdict("hold", None, None, "peak_solar_will_cover")
         elif fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55:
