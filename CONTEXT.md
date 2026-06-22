@@ -38,7 +38,7 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 - Set to `20%` → normal floor, self-consumption mode
 - Set to `5%` → deep discharge floor during demand window (peak months only)
 
-**Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode — typically ~1.7 kW. This is why the battery sometimes doesn't reach 100% by 3pm even when grid is cheap. Full solution requires Tesla Fleet API or MPC with rate commands.
+**Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode. **Phase 2.5-A data (17 days)** shows: peak ~1.66 kW at 60% SoC, tapering to 0.876 kW at 80% and 0.625 kW at 90%. `_avg_charge_rate_kw()` now uses these model rates (from `agent/model_params.json`) for fill time projections instead of a flat 1.7 kW assumption. Full rate control requires Tesla Fleet API or MPC.
 
 **Dynamic grid charge target**: `sensor.battery_grid_charge_target`
 - Formula: `clamp(95 − (net_solar_kWh / 13.5 × 100), 5, 95)`
@@ -176,7 +176,7 @@ Key agent capabilities added 2026-05-29:
 | `battery_demand_window_critical_warning` | Alert: critical SoC, grid import imminent |
 | `battery_negative_price_charge` | Charge to 100% on negative spot price (Rule 8) |
 | `battery_negative_price_reset` | Reset reserve when price goes positive |
-| `battery_low_soc_emergency_charge` | Charge if critically low + cheap price (no 20% floor — uses grid_charge_target directly) |
+| `battery_low_soc_emergency_charge` | Charge if critically low + cheap price + price ≤20¢ + **NEEDS RELOAD** (20¢ ceiling + 85% target in peak months added 2026-06-23) |
 | `solar_inverter_underperformance_alert` | Alert when inverter under-produces vs Solcast |
 | `ev_plugged_in_notify` | Alert when EV connects with SoC/price snapshot |
 | `sensor_watchdog_morning` | 09:30 daily: checks 8 sensors for unavailable/stale (>2h), sends persistent notification |

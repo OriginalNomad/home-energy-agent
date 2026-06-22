@@ -1002,3 +1002,52 @@ The May 23 log incorrectly concluded that autonomous mode was "banned permanentl
 - Rule 9 cloudy day automation added: fires 7am, charges to 80% if forecast_today < 10 kWh and price in cheap window
 - Today (18 May): 7.2 kWh — correctly identified as cloudy day
 - Tomorrow (19 May): 9.9 kWh forecast — also cloudy, overnight top-up likely needed
+
+## 2026-06-23 (session 14 — morning rule fixes + Phase 2.5-A/B + Phase 7)
+
+**Session start context**: Mac desktop session, 13 days since last session (last session 2026-06-10).
+
+**Morning rule fixes (commits 773e3ce, a7d01bb, 5f64f0a, 33a5f89):**
+
+- `peak_solar_cover_survival`: charges now when battery can't survive overnight to Solar Sponge AND sponge is either >3h away OR price gap <5¢. Addresses Jun 23 case where battery drained to 8% at 7am and emergency-charged at 42¢.
+- `peak_survival_wait_for_sponge`: holds when battery can barely survive AND sponge ≤3h away AND sponge is ≥5¢ cheaper. Addresses 7:30am notification charging at 20¢ when 11¢ sponge was 2.5h away.
+- `battery_low_soc_emergency_charge` automation: added 20¢ absolute price ceiling + hardcoded 85% reserve target in peak months before 3pm (bypasses `sensor.battery_grid_charge_target` which was returning 42% — suspected template cache issue).
+- Demand window warning automations: added `for: "0:01:00"` to both triggers to prevent sensor glitch false positives (Jun 14 incident: "Battery at 0% during demand window. Grid importing 0W" — contradictory, clearly a sensor momentary drop).
+
+**Phase 2.5-A — charge rate model (commit 403b48f):**
+
+Built `agent/model_params.json` from 17 days of `energy_log.db` observations (179 self_consumption charging pairs across SoC buckets 0–90). Key findings:
+- Peak rate 1.66 kW at 60% SoC (near rated self_consumption ~1.7 kW)
+- Significant taper above 80%: 0.876 kW at 80%, 0.625 kW at 90%
+- Below-rated at 40% (1.30 kW) — possibly firmware throttling at low SoC
+- No autonomous data yet (Powerwall hasn't fast-charged during the 17-day window)
+
+`_avg_charge_rate_kw(soc_from, soc_to, mode)` computes weighted-average rate by summing fill time across 10%-point SoC buckets. `fill_slow_85`, `fill_fast_85`, `fill_slow`, `fill_fast` now use model rates. Falls back to SLOW_KW=1.7/FAST_KW=5.0 for missing or low-sample (n<5) buckets.
+
+Impact: fill time estimates are now accurate above 80% SoC. Previously underestimated time to charge from 75% to 85% (3.24 kW assumed → actual tapers to 0.876 kW). This is where the `fill_slow_85 >= hours_to_deadline` deadine check was most wrong.
+
+**LP solar_unreliable fix (commit 403b48f):**
+
+`optimizer.py`: zeros solar series when `state['solar_unreliable']=True`. Previously the LP always saw the raw Solcast forecast — on cloudy mornings it planned `mpc_solar_only` (hold, rely on solar) while the deterministic layer correctly charged from grid. This was the source of ALL 19 LP divergences in the previous 2-day analysis window.
+
+With fix: LP now fires `mpc_hold` instead of `mpc_solar_only` on cloudy mornings (it still defers to cheap-grid slots rather than charging at the exact current slot, which is a different philosophical approach from the deterministic layer). The divergence label changes from a wrong positive claim ("solar will handle it") to an honest deferral ("no solar, charging later").
+
+`run_agent()`: injects `solar_unreliable` flag from `_cycle_context['decision_context']` into `_opt_state` before calling `optimize_battery`.
+
+**Phase 7 — selective narrative (commit 403b48f):**
+
+`_is_interesting_cycle()`: skips LLM when:
+- No action was taken (no set_reserve / set_mode calls)
+- Rule is in `_ROUTINE_HOLD_RULES` (overnight_hold_wait_for_sponge, peak_target_met, peak_on_track, peak_solar_will_cover, demand_window_active, target_met, nonpeak_on_track)
+- Rule hasn't changed since last cycle
+- Demand guard didn't fire
+
+LLM runs on: any action taken, unusual rule, rule change, demand_guard_fired, or dry_run.
+
+`_build_auto_summary()`: generates one-line `[auto] rule | SoC% | price¢ | solarKW | hold` entry directly. JSONL written by `log_decision()` call from Python — no Anthropic API call.
+
+Estimated API cost reduction: ~60-70% of cycles are routine holds overnight (14 cycles) + during demand window (12 cycles). These all now skip LLM. Remaining ~20% of cycles (Solar Sponge charges, peak deadline decisions, rule changes) still get LLM narrative.
+
+**Tests**: 56 passed (test_decision.py) + 12 passed (test_optimizer.py). No regressions.
+
+**Pending**: HA automations from this session still need manual reload. Pi will pull commit on next cron cycle (max 30 min).
