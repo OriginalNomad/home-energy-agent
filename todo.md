@@ -1,93 +1,71 @@
 # Project To-Do List
 
-## Personal — Home Automation
+## Energy Agent — Active
 
-### Energy Agent (in progress — observing since 2026-05-25)
+### Immediate
 
-- [x] **Run manually for a few days** — agent running on cron since 2026-05-29, confidence building through June peak week (2026-06-01)
-- [x] **Fix price forecast** — was not empty (stale note); Amber sensor returns mixed 5-min + 30-min intervals. Now resampled to uniform 30-min buckets so deadline/spread maths is valid. Fail-loud warning on empty. (2026-05-29)
-- [x] **Schedule via cron** — cron job running, API key baked in, Mac Studio with sleep disabled is sufficient (2026-05-31)
-- [x] **Verify overnight behaviour** — confirmed June 1/2: agent held overnight (Rule 20), SoC drained 72%→36% without charging, Solar Sponge charged correctly in the morning. (2026-06-01/02)
-- [x] **June 1 demand window** — PASSED ✅ Battery at 99% entering 3pm demand window, zero grid imports 3–9pm, agent held correctly throughout. Overnight_hold also validated. (2026-06-01)
-- [x] **June 2 demand window** — PARTIAL BREACH ⚠️ rest_command broken since June 1 restart → 2:55pm automation failed silently → reserve stuck at 80% → grid import during cooking at 7pm. Fixed manually via Tessie API + HA restart. rest_command now working.
-- [x] **Agent health check for HA rest_commands** — added to `run_agent()` pre-flight: checks `/api/services` each cycle, warns loudly if `rest_command` domain missing. (2026-06-02)
-- [x] **Agent demand-window reserve guard** — added to `run_agent()` pre-flight: if peak month + in demand window (15–21h) + reserve > 10%, drops reserve to 5% via Tessie directly before the LLM runs. Bypasses HA rest_commands entirely. (2026-06-02)
-- [x] **`_demand_reserve_guard_fired` NameError fixed** — broke JSONL + HA notifications + dashboard helpers since Jun 2. One-line fix. (2026-06-05)
-- [x] **`battery_grid_charge_target` 85% floor** — was reverting autonomous mode immediately on cloudy days (sensor returned 13% from Solcast-optimistic formula). Peak-month floor added to `configuration.yaml`. (2026-06-05)
-- [x] **Wait-and-go-hard charging strategy (Rule 22)** — `_cheapest_go_hard_slot()` scans forecast each cycle; `wait_for_cheap_go_hard` holds for cheaper slot; `peak_charge_now` charges when no better slot. (2026-06-05)
-- [x] **Receding horizon Solar Sponge rate selection (Rule 23)** — mode recalculated every cycle in Solar Sponge; autonomous only when `fill_slow_85h ≥ deadline − 1h`; otherwise self_consumption. (2026-06-05)
-- [x] **Hold ≠ arming fix** — agent was setting reserve=85% while "waiting" for Solar Sponge, immediately triggering charging at expensive morning prices. CRITICAL block added to system prompt: only raise reserve above 5% if projected_soc ≤ 5% at cheap window. Projection formula replaces 20% threshold throughout. (2026-06-06)
-- [x] **Tessie SoC=0 guard (`_build_battery_state()`)** — Tessie occasionally returns 0% (cloud API hiccup). New function cross-references gateway; if Tessie implausible + gateway reliable (`gateway > reserve`), substitutes gateway + sets `tessie_soc_failed=True`. Prevents panic reserve increases from false empty readings. (2026-06-06)
-- [ ] **Watch Tessie reliability** — `tessie_soc_failed` flag now logged in JSONL. Monitor frequency of Tessie=0 failures in `/morning` review; if recurring, investigate whether Tessie API polling rate needs to be throttled or token needs renewal.
-- [ ] **Re-architecture Phase 4 — collect shadow divergence** *(through first June peak week)*: shadow mode now logs LLM vs deterministic verdict each cycle. Review via the `/morning` shadow-layer section; tag each divergence as deterministic-layer bug vs LLM over/under-cautious. Goal: enough data to trust (or fix) the deterministic layer before cutover.
-- [x] **LP optimiser — extend price horizon to 24h (done 2026-06-03)**: `_build_hourly_price_model()` + `_extend_forecast_to_demand_window()` added to energy_agent.py. Appends synthetic 30-min slots to 22:00 using per-hour-of-day medians from the last 7 days of decisions.jsonl. LP now sees the 15:00–21:00 demand-window block and applies `demand_penalty_c=1000¢/kWh` on those slots. Test 7 in test_optimizer.py confirms correct pre-charge on extended horizon.
-- [ ] **LP optimiser — add `--live-only` flag to `three_way_review.py`**: filter to records where `optimizer_verdict` is present in the JSONL (not back-filled), re-run agreement analysis. Live records only have real solar forecasts; back-fill is contaminated by `_synth_solar_from_record()` overstating generation. (Less urgent now that horizon extension is live — divergence pattern should shift from cause-c to something more meaningful.)
-- [ ] **Re-architecture Phase 4b — three-way divergence watch** *(through first June peak week)*: `agent/three_way_review.py` now reports LLM vs deterministic vs LP optimiser. Live `optimizer_verdict` accumulates from 2026-06-01 11:00 cron onward; review via `/morning`. Tag divergences (a) bug / (b) LLM caution / (c) optimiser trusts point forecast. Goal: enough data to decide which shadow layer to trust at cutover.
-- [x] **LP optimiser — wire in `solar_unreliable` flag**: zeros solar series in LP when `solar_unreliable=True`. Stops LP from planning `mpc_solar_only` on cloudy mornings. LP still diverges from det on timing (det charges now, LP defers to next cheap slot) but no longer makes wrong solar claims. (2026-06-23)
-- [ ] **Dynamic demand-window target**: 85% is a fixed conservative rule. On flat-price days with variable solar, a smarter target (based on expected 3-9pm load) would reduce unnecessary charging. LP naturally computes this when authoritative — lower priority until Phase 5.
-- [x] **Re-architecture Phase 5 — cutover to deterministic-authoritative (2026-06-06)**: `DETERMINISTIC_AUTHORITATIVE = True` — deterministic rule layer drives all set_* actions; LLM runs narrative-only; set_* calls no-op'd. Kill-switch: flip to False. (LP-authoritative remains a future phase once solar_unreliable is wired into LP.)
-- [x] **Re-architecture Phase 6 — slim the prompt**: prompt reduced from ~470 lines to ~65 lines (86% reduction). All deadline maths, spread tables, escalation rules removed. LLM now explicitly narrative-only logger. (2026-06-09)
-- [x] **Re-architecture Phase 7 — selective narrative**: routine hold cycles (overnight_hold, target_met, demand_window_active, peak_solar_will_cover) skip Anthropic API; `_build_auto_summary()` writes `[auto]` JSONL entry directly. LLM still runs when any action taken, unusual rule fires, or rule changed from prior cycle. (2026-06-23)
-- [ ] **Tune `α` / `MIN_DAILY_SWING`** in `_hours_to_cheap_end` against June peak-month forecasts (larger swings than the flat May days the 0.30 / 5¢ first-pass was set on).
-- [ ] **Tune historical price model** — `CHEAP_BAND_ALPHA`, `MAX_INSURANCE_FLOOR`, `PRICE_HISTORY_DAYS` after first week of June peak-month data accumulates. May need to raise insurance floor or adjust p25/p75 thresholds for larger winter price swings.
-- [ ] **Tune overnight hold threshold** — `SOLAR_SPONGE_PRICE_THRESHOLD = 10¢` is a first-pass value. If Solar Sponge prices are regularly above 10¢ in winter, raise it. Review after first week of June data.
-- [ ] **Verify Zappi "Eco" mode string** — confirm myenergi integration accepts exactly `"Eco"` (verified in HA States as of 2026-05-31, but worth checking after any integration updates).
-- [ ] **Verify HA slider values** — check sliders are correctly set after June 2 restart: `ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`, `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`. Not yet confirmed.
-- [x] **Sliding forecast detector** — implemented `_detect_sliding_forecast()`, fires `rule_fired: "sliding_forecast"` after 3+ cycles of phantom cheap window. (2026-05-31)
-- [ ] **Sliding forecast display** — expose forecast snapshot data from `decisions.jsonl` as HA sensor so past forecasts can be overlaid on the Amber price chart, making sliding visible.
-- [x] **Consider moving agent into HA** — Mac Studio with sleep disabled + cron job is sufficient; no need to move into HA
-- [x] **Deploy agent to Raspberry Pi 5** — Pi running at `energypi.local`, agent on cron with auto git pull, Mac cron removed. (2026-06-05)
-- [x] **Cloudflare Tunnel — `https://agent.sol.io`** — HA accessible remotely via Pi tunnel. Chrome, HA apps (Mac + iOS) confirmed working. (2026-06-05)
-- [x] **Repo consolidation** — `home-energy-automation` deleted, `home-energy-console` renamed to `home-energy-agent`. Single repo accessible from all devices. (2026-06-05)
-- [ ] **Migrate HA to Pi** — install HA via Docker on Pi, restore from Mac backup, update agent `.env` to `localhost:8123`. Simplifies architecture; no urgency while Mac Studio is always on.
-- [x] **Wire `data_logger.py` into `energy_agent.py`** — wired in 2026-06-06. Phase 2.5-A clock started; charge rate model buildable ~2026-06-13.
-- [x] **Phase 2.5-A — charge rate model**: built `agent/model_params.json` from 17 days / 179 self_consumption obs. SoC-dependent rates: 1.66 kW peak (60%), tapers to 0.63 kW at 90%. `_avg_charge_rate_kw()` replaces flat SLOW_KW=1.7 in all fill-time calculations. (2026-06-23)
-- [ ] **Switch SD card boot to SSD** — Pi is already running from SSD (`/dev/sda2`); confirm boot order in `raspi-config` to ensure it always boots from SSD, not SD card.
+- [ ] **Reload HA automations** — `battery_low_soc_emergency_charge` (20¢ ceiling + 85% peak target) and both demand window warning automations (1-min debounce) were updated 2026-06-23 but HA doesn't auto-reload. Do via Automations → reload or Developer Tools → YAML → All automations.
+- [ ] **Verify HA slider values** — confirm after June 2 restart: `ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`, `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`.
 
-- [x] **Add InfluxDB** — pipe HA sensor history into InfluxDB for long-term retention and analysis (default SQLite rolls off after 10 days)
-- [ ] **InfluxDB dashboards & reports** — set up Data Explorer queries and dashboards for battery SoC history, charging patterns, price vs SoC correlation, daily 3pm SoC outcomes
-- [ ] **Add structured decision log** — timestamped event log every time an automation fires: `{timestamp, automation_id, trigger, conditions, action, soc, price, solar_forecast}` — foundation for future ML
-- [ ] Monitor battery automations over several days and review rule-set *(in progress — June 1 demand window is first real test)*
-- [ ] Review Tessie ~A$10/month cost vs savings achieved — cancel if not justified
-- [ ] Replace Tessie with direct Tesla Fleet API (personal OAuth) — eliminate $10/month fee
-- [ ] Build EV charging automation (Rules 4 & 5)
-- [ ] Test Polestar 4 SoC and charging state sensors alongside Zappi entities
-- [ ] Investigate Daikin AC integration for HA
-- [ ] **Price spike arbitrage (Rule 10) — deprioritised**: spikes almost always occur inside the 3–9pm demand window (peak months), where discharging to sell would cost more in demand charges than any FIT revenue gained. The only viable window is a spike outside 3–9pm or in an off-peak month — both rare. Revisit only once the LP is authoritative and can explicitly model the trade-off. Not worth building manually.
-- [ ] Add Solcast forecast change trigger to solar sponge check — update reserve immediately when Solcast revises, not just at next 30-min tick
-- [ ] Confirm `sensor.solcast_pv_forecast_power_now` entity name in HA States (used in inverter underperformance alert)
-- [ ] Confirm SolarEdge inverter AC rated output for Solcast config (check label on inverter box)
-- [ ] **BOM solar forecast investigation** — Solcast and Open-Meteo have both been unreliable (today: forecast solar arriving from 11am, actual zero all day). Investigate BOM API (api.weather.bom.gov.au) for official gridded solar radiation forecasts. Track Solcast vs SolarEdge actuals in InfluxDB to quantify accuracy. Goal: replace or weight-adjust Solcast with a more reliable source, or build a "forecast confidence" metric from the accuracy history.
-- [ ] **Daily 3pm accuracy review** — `decisions.jsonl` now logs `goal_3pm_soc`, `projected_3pm_soc`, and daily accuracy records (actual vs projected at 3pm). Build InfluxDB dashboard showing forecast accuracy over time — which morning cycle hours had best projection accuracy, how often projection was optimistic vs pessimistic.
-- [ ] **Amber price forecast accuracy + risk premium derivation** *(needs ~4 weeks of data — build in late June/July)*: for each JSONL record, reconstruct the 12 forecasted times from `ts` + 30min intervals, pull actual prices from InfluxDB, compute signed error (actual − forecast) per slot. Bucket by time-of-day: Solar Sponge (10am–3pm), evening (4pm–9pm), overnight. Build error distribution per bucket — mean, 75th and 90th percentile. The 75th percentile error for evening slots becomes the empirical risk premium to add to the spread table, replacing the current gut-feel 5¢ threshold. This makes the spread threshold data-driven rather than assumed.
+### Architecture roadmap (in order)
 
-## Done ✅
+- [ ] **Phase 2.5-B — solar corrector** — OLS regression on Solcast vs SolarEdge actuals from `energy_log.db`. Data threshold (2 weeks) crossed 2026-06-20. SQL query and design in `ARCHITECTURE.md`. Produces a per-hour-of-day correction factor that feeds into `net_expected_solar`. Especially important in winter where Solcast overestimates by 2–3×. Highest-value item right now.
+- [ ] **LP to control path** — LP shadow has been running since Jun 1. Blocker: timing divergence (LP defers to cheapest slot; det charges at first acceptable slot). Once solar corrector is wired in and LP has calibrated solar, this gap should close. Plan: LP-authoritative with deterministic layer as hard-constraint backstop (Rule 2, survival floor, reserve guard). Kill-switch already in place.
+- [ ] **Analyst agent** — weekly agent that reads `decisions.jsonl` + `daily_energy.jsonl` and surfaces systematic patterns: "cloudy mornings consistently start charging 1h late", "sponge threshold too tight 3 weeks in a row". Outputs proposed rule changes in plain English for human review. This is the feedback loop that makes the system self-improving rather than just self-executing.
+- [ ] **Savings dashboard** — daily/weekly $ saved vs naive baseline (flat-rate charging, no demand management, no solar optimisation). Broken down by: demand charge avoided, cheap-window differential, solar self-consumption. Core product metric; also the first Sol feature users need to see.
 
-- [x] Install Solcast integration via HACS for solar forecasting
-- [x] Add Solcast-aware cloudy day detection to morning charge trigger (Rule 9)
-- [x] Dynamic grid charge target — shortfall=0 drives reserve instead of fixed 100%
-- [x] Emergency low SoC automation — pre-9:30am gap-filler
-- [x] Reactive cheap-window trigger — charging starts immediately when window opens
-- [x] Autonomous mode banned — confirmed exports at 4¢ while buying at 11¢
-- [x] True SoC sensor via Tessie live_status — replaces floor-clipped gateway reading
-- [x] 30-min averaged home load — smooths stove/kettle spikes from forecast
-- [x] Peak-month backtest harness (`agent/backtest.py`) — validate demand-window logic before June 1 (2026-05-29)
-- [x] SoC-sensor trust bug fixed — agent was judging "target met" off the floor-clipped gateway; guidance added to system prompt + Rule 6 (2026-05-29)
-- [x] Deterministic decision layer (`compute_decision_context`) + 28 unit tests (`agent/test_decision.py`) (2026-05-29)
-- [x] Shadow mode wired in — logs LLM + deterministic verdict per cycle to `decisions.jsonl` (2026-05-29)
-- [x] `_hours_to_cheap_end` rewritten as scale-free daily-shape model — fixes gradual-ramp under-reporting (2026-05-29)
-- [x] `/morning` review extended with shadow-layer analysis section (2026-05-29)
+### Tune from winter data (review at next session and monthly)
 
-## Product Design — Battery Control Service
+- [ ] **Tune `SOLAR_SPONGE_PRICE_THRESHOLD`** — currently 10¢. If winter Solar Sponge prices are regularly 12–18¢, overnight_hold fires too aggressively and battery arrives flat. Check the `rule_fired=overnight_hold_wait_for_sponge` cycles in `decisions.jsonl` against actual sponge prices.
+- [ ] **Validate `peak_survival_wait_for_sponge` thresholds** — the 3h window and 5¢ price gap were set on one morning's data (Jun 23). Winter will give dozens of cycles. Check outcomes: did waiting pay off (sponge arrived and was cheaper), or did the battery hit the floor?
+- [ ] **Tune historical price model** — `CHEAP_BAND_ALPHA`, `MAX_INSURANCE_FLOOR`, `PRICE_HISTORY_DAYS`. Set on May flat-price data; winter has larger swings. Review after 4 weeks of July data.
+- [ ] **Tune `α` / `MIN_DAILY_SWING`** in `_hours_to_cheap_end` — same issue, set on May data.
+- [ ] **Amber price forecast accuracy + risk premium** — needs ~4 weeks of JSONL data to compute signed forecast error per time-of-day bucket. 75th-percentile evening error → empirical spread threshold, replacing gut-feel 5¢. Due ~July.
+- [ ] **Update charge rate model** — `model_params.json` has no autonomous mode data (17 days, no fast-charge cycles). Rebuild when autonomous charging accumulates (check `battery_mode='autonomous'` rows in `energy_log.db`).
 
-- [ ] **Savings dashboard — "what did this cost me without the agent?"** — core product metric. Show daily/weekly/monthly $ saved vs a naive baseline (e.g. always charging at flat rate, no demand window management, no solar optimisation). Broken down by: demand charge avoided, cheap-window vs peak charging differential, solar self-consumption gain. User should see "this week the agent saved you $34" front and centre — not buried in a notification. Key insight from user research: people paying for a service need visible proof of value, not just operational logs. Consider: daily summary notification (not every cycle), a persistent dashboard card, and a monthly email/report. Also relevant: "kWh of additional battery life preserved" as an alternative metric for users who care about hardware longevity over cost.
+### Infrastructure
 
-- [ ] **Migrate energy agent to Anthropic Managed Agents** — once local version is stable; solves Mac-sleep scheduling problem via hosted infrastructure; MCP Tunnels enables reaching HA (localhost) securely; "Dreaming" feature could allow agent to self-improve from past decisions; relevant as Sol infrastructure layer for multi-tenant deployments ($0.08/session-hr + tokens)
+- [ ] **Watch Tessie reliability** — `tessie_soc_failed` logged in JSONL each cycle. If recurring (>1/day), investigate rate throttle or token renewal.
+- [ ] **Switch Pi boot to SSD** — Pi runs from SSD (`/dev/sda2`) but SD card may still be in boot order. Confirm in `raspi-config`.
+- [ ] **Tessie cost review** — ~A$10/month. Review savings achieved once first full peak month (June) data is analysed. Replace with Tesla Fleet API (personal OAuth) if cost isn't justified.
+- [ ] **Migrate HA to Pi** — Docker HA on Pi, restore from Mac backup. No urgency while Mac Studio stays on, but removes the single point of failure.
+- [ ] **Daikin AC integration** — AC load during demand window is the biggest unmodelled variable. If Daikin has a HA integration, it would let the agent anticipate load spikes at 3pm.
 
-- [ ] **Analyst agent — rules improvement loop** — a second agent that runs daily/weekly (not every 30 min) to review the full decision log + actual outcomes from InfluxDB (SoC at 3pm, grid import events, cost vs baseline). Identifies systemic gaps: *"on cloudy days the agent consistently starts charging too late"*, *"the flat-then-spike threshold is too tight"*. Outputs proposed rule changes in plain English for human review → approved changes update the system prompt → operational agent improves. Separate from the operational agent so it doesn't pollute real-time decision context. Complement with short-term memory (last 2-3 decisions) fed into the operational agent for intra-day tracking (*"I've been charging 2 cycles, SoC rising as expected"*). This is the self-improvement loop that makes the system genuinely learn rather than just execute.
+### Nice-to-have / low priority
 
-- [ ] Define service concept — multi-battery cloud control with dynamic tariff awareness
-- [ ] Research MPC architecture for multi-tenant battery optimisation service
-- [ ] Register as Tesla Fleet API developer — path to direct access without Tessie
-- [ ] Investigate multi-battery API support (Sonnen, BYD, etc.)
-- [ ] Investigate multi-tariff support (Amber AU, Octopus UK, Tibber EU)
+- [ ] **BOM solar forecast** — Solcast unreliable in winter. Investigate `api.weather.bom.gov.au` gridded solar radiation as an alternative or ensemble weight. Needs InfluxDB tracking of Solcast vs actual first.
+- [ ] **InfluxDB dashboards** — SoC history, charging patterns, price vs SoC correlation, 3pm accuracy over time. Foundation for the analyst agent.
+- [ ] **Dynamic demand-window target** — 85% is conservative. LP naturally computes a smarter target (cover just the 3–9pm load) when authoritative. Not worth building as a rule.
+- [ ] **LP `three_way_review.py` live-only filter** — add `--live-only` flag to filter out back-filled records with synthetic solar. Low value now that solar_unreliable is wired in.
+
+---
+
+## Product — Sol
+
+- [ ] **Savings dashboard** — see above; also the first Sol feature
+- [ ] **Analyst agent** — see above; directly reusable as Sol's learning layer
+- [ ] **Multi-tenant architecture** — define how Sol handles multiple sites with different tariffs, hardware, and grid operators
+- [ ] **Tesla Fleet API** — personal OAuth path; also the API Sol would use at scale (no Tessie dependency)
+- [ ] **Migrate to Anthropic Managed Agents** — hosted infra solves the Mac-sleep / cron reliability problem; MCP Tunnels for HA access; relevant as Sol's compute layer
+- [ ] **Multi-battery support** — Sonnen, BYD, generic Modbus
+- [ ] **Multi-tariff support** — Amber AU, Octopus UK, Tibber EU
+
+---
+
+## Done ✅ (key milestones)
+
+- Deterministic rule layer in control (`DETERMINISTIC_AUTHORITATIVE=True`, 2026-06-06)
+- LLM narrative-only + prompt slimmed 86% (Phase 6, 2026-06-09)
+- Selective narrative — routine cycles skip LLM (Phase 7, 2026-06-23)
+- Charge rate model from DB observations (Phase 2.5-A, 2026-06-23)
+- LP solar_unreliable fix — stops mpc_solar_only on cloudy mornings (2026-06-23)
+- peak_solar_cover_survival + peak_survival_wait_for_sponge rules (2026-06-23)
+- Emergency automation hardened: 20¢ ceiling + 85% peak target (2026-06-23)
+- Demand window warning debounced: 1-min sensor glitch guard (2026-06-23)
+- Three-way shadow layer: LLM vs deterministic vs LP (2026-06-01)
+- LP horizon extended to 22:00 with synthetic price model (2026-06-03)
+- data_logger.py wired in — energy_log.db accumulating (2026-06-06)
+- Tessie SoC=0 guard (2026-06-06)
+- Demand-window reserve guard + HA health check (2026-06-02)
+- Agent deployed to Pi on cron with auto git pull (2026-06-05)
+- Cloudflare Tunnel — agent.sol.io → HA (2026-06-05)
