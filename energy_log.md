@@ -1085,3 +1085,34 @@ Both tables now locked down. Security Advisor warning should clear.
 - Updated fill time formula in Rule 13 to reference model-based rates (not flat 1.7 kW)
 - Updated Phase 7 note in implementation section
 - Added charge rate model note explaining `model_params.json` data
+
+## 2026-06-24 (session 15 — Amber price update, 3 bug fixes)
+
+**Amber price update (July 1):**
+Reviewed Amber annual pricing update email. Key changes from July 1:
+- Network component: +0.42¢/kWh (EA116 TOU pass-through — peak and off-peak are identical rates, so no behavioural TOU effect)
+- Environmental: −0.23¢/kWh (carbon neutral offset removed)
+- Market charges: +0.14¢/kWh
+- **Net kWh change: +~0.22¢/kWh** — baked into Amber's real-time price, no agent changes needed
+- Daily supply: 61.04¢ → 73.71¢ (+$3.80/month fixed)
+- Metering: 44.47¢ → 47.25¢ (+$0.84/month fixed)
+- **Demand charge: 42.34 → 43.43¢/kW/day (+2.6%)** — demand avoidance strategy unchanged
+- Amber estimate: +$5.31/month for average 3,900 kWh/year residential customer
+- "Time-of-use" reference in email is the Ausgrid network layer (not the wholesale spot). EA116 peak and off-peak network rates are identical, so no TOU behaviour from user's perspective.
+
+**Bug observed — 23:00 autonomous charge at 19¢ with SoC=25%:**
+Battery drained to 25% at 23:00 and agent fired `nonpeak_deadline_autonomous`, setting reserve=50% in autonomous mode (~5 kW) at 19¢. Should have waited for Solar Sponge (~11¢ at 10am). Root cause: two bugs intersecting.
+
+**Three bugs fixed (commit 307e8c9):**
+
+1. **`hours_to_2_55` deadline rollover (lines 1428-1432):** `max(DEMAND_DEADLINE − now_h, 0)` goes to 0 after 2:55pm. At 23:00 this was 0.0h, making the deadline escalation logic think we were *at* the deadline → autonomous urgency fired. Fix: if `now_h > DEMAND_DEADLINE`, add 24h (e.g. 23:00 → 15.9h until tomorrow 2:55pm).
+
+2. **`overnight_hold` SoC boundary (line 1389):** condition was `soc > 25`, so at exactly 25% the hold didn't fire and fell through to the bugged deadline path. Fix: `soc >= 25`. At 25% SoC, 11h overnight drain at 0.5 kW still drains ~41% → hits the floor anyway, but Rule 7 handles the survival top-up correctly via self_consumption.
+
+3. **`peak_deadline_autonomous` wrong-mode-on-urgency (line 1565-1572):** when `fill_slow_85 >= hours_to_2_55` (self_consumption too slow to reach 85% by deadline), the code checked `price <= forward_min` and used self_consumption if prices were flat. Self_consumption physically can't make the deadline regardless of price. Fixed: removed price branch — always go autonomous when in deadline urgency. This also fixed two pre-existing test failures. One stale test expectation updated (Phase 2.5-A model raised avg charge rate 45%→85% fill time from 3.18h to 3.97h, pushing it past the 3.42h deadline at 11:30 — autonomous is now correct).
+
+**Tests:** 103/103 passed (up from 56 — new tests added during session 14 for Rules 24/25 plus the pre-existing failures now fixed).
+
+**energy_rules.md updated:**
+- Rule 20: `>= 25` boundary documented with rationale; deadline rollover bug explained
+- Rule 13: `peak_deadline_autonomous` always-autonomous-when-tight note added

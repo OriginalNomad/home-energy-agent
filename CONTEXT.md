@@ -128,6 +128,12 @@ Key agent capabilities added 2026-06-23 (session 14):
 - **Demand window warning debounced**: `for: "0:01:00"` added to both warning automation triggers. **Needs HA reload.**
 - **86 unit tests** (was 75).
 
+Key agent capabilities added 2026-06-24 (session 15):
+- **Deadline rollover fix**: `hours_to_2_55` now rolls over to next day when past 2:55pm (e.g. 23:00 → 15.9h). Previously clamped to 0.0h, causing overnight autonomous escalation.
+- **overnight_hold boundary fix**: `soc >= 25` (was `> 25`). At exactly 25% SoC the hold previously fell through to the bugged deadline path.
+- **peak_deadline_autonomous always-autonomous fix**: when `fill_slow_85 >= hours_to_2_55`, previously used self_consumption if prices were flat. Self_consumption can't physically reach 85% in time regardless of price. Now always goes autonomous when in deadline urgency.
+- **103 unit tests** (was 101; 2 pre-existing failures fixed by the autonomous fix).
+
 Key agent capabilities added 2026-06-03:
 - **Home load deduction in solar sufficiency check**: `compute_decision_context()` now computes `net_expected_solar = max(expected_solar - home_load_kw * window_h, 0)` and uses it in `kwh_needed_85`. Fixes the bug where `peak_target_met` fired at 25% SoC on sunny-forecast days because raw Solcast remaining was used without deducting home consumption.
 - **`peak_solar_will_cover` rule**: renamed from `peak_target_met` when SoC < 85%. The two cases are semantically distinct: one means the battery actually reached target; the other means the solar projection covers the remaining gap.
