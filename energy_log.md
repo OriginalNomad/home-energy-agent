@@ -1051,3 +1051,37 @@ Estimated API cost reduction: ~60-70% of cycles are routine holds overnight (14 
 **Tests**: 56 passed (test_decision.py) + 12 passed (test_optimizer.py). No regressions.
 
 **Pending**: HA automations from this session still need manual reload. Pi will pull commit on next cron cycle (max 30 min).
+
+## 2026-06-23 (session 14 continued — EV notification fixes, Supabase RLS, architecture discussion)
+
+**EV notification fixes (commits d558cad, 1bf90eb, dd5c59d):**
+
+Three iterations to get the EV notification right:
+1. First fix: `_build_auto_summary()` changed from returning a string to a `(battery_summary, ev_summary)` tuple; `battery SoC` label corrected to `battery {soc}%` to avoid ambiguity.
+2. Second fix: EV notification suppression when EV not plugged in — but realised the EV notification should always fire showing the Polestar SoC regardless.
+3. Final fix: `ev_soc_pct` now always read from `sensor.polestar_7853_battery_charge_level` (was conditional on `ev_plugged`); EV notification always shows `[auto] EV 31% (not plugged in) | mode n/a | hold`.
+
+**Architecture discussion:**
+Discussed the refinement path for the next 6 months of winter operation:
+- Phase 2.5-B solar corrector is the highest-value near-term item (OLS regression, Solcast vs SolarEdge actuals)
+- LP to control path is the medium-term goal once solar corrector calibrated
+- Analyst agent (weekly review of decisions.jsonl + daily_energy.jsonl) is the long-term self-improvement loop
+- Winter will stress-test: overnight survival thresholds, sponge price threshold (10¢), peak_survival_wait_for_sponge 3h/5¢ thresholds, fill time accuracy above 80% SoC
+
+**Tessie discussion:**
+Tessie (~A$10/month) is a proxy for Tesla Fleet API. Replacing it requires: register at developer.tesla.com, one-time OAuth browser flow for refresh_token, ~20 lines of token-refresh logic in agent. Worth doing only if savings analysis from June data doesn't justify the cost. Decision deferred to after June data reviewed.
+
+**todo.md rewrite:**
+Full restructure — pruned ~40 stale completed items, reorganised into Immediate / Architecture roadmap / Tune from winter data / Infrastructure / Product sections. 18 active items, clearly prioritised.
+
+**Supabase RLS fix (Sol project):**
+Received security advisory email: `public.profiles` and `public.conversations` tables had RLS disabled, exposing them to unauthenticated access via PostgREST. Fixed:
+- `public.profiles`: `ALTER TABLE ENABLE ROW LEVEL SECURITY` + SELECT/INSERT/UPDATE policies on `auth.uid() = id`
+- `public.conversations`: same + DELETE policy, using `profile_id` column (not `user_id` — confirmed via `information_schema.columns` query first)
+Both tables now locked down. Security Advisor warning should clear.
+
+**energy_rules.md updates (this close-out):**
+- Added Rule 24 (`peak_solar_cover_survival`) and Rule 25 (`peak_survival_wait_for_sponge`) — were missing entirely
+- Updated fill time formula in Rule 13 to reference model-based rates (not flat 1.7 kW)
+- Updated Phase 7 note in implementation section
+- Added charge rate model note explaining `model_params.json` data

@@ -6,7 +6,7 @@ These rules are implemented by three Python layers in `agent/energy_agent.py`, r
 
 **Layer A — Deterministic rule layer (IN CONTROL)**: `compute_decision_context()` + `_execute_deterministic_verdict()`. A pure Python `if/elif` rule tree that reads current state and executes all set_* API calls. This is the control path. Kill-switch: `DETERMINISTIC_AUTHORITATIVE = False`.
 
-**Layer B — LLM narrative logger (cosmetic only)**: Claude runs after the deterministic layer, reads the shadow block showing what was executed, and writes a plain-English log entry. Its `set_*` calls are no-ops. System prompt is ~65 lines (slimmed 2026-06-09 — all decision arithmetic removed).
+**Layer B — LLM narrative logger (selective, cosmetic only)**: Claude runs after the deterministic layer and writes a plain-English log entry. Its `set_*` calls are no-ops. System prompt is ~65 lines (slimmed 2026-06-09). **Phase 7 (2026-06-23):** on routine hold cycles (`overnight_hold_wait_for_sponge`, `demand_window_active`, `peak_target_met`, `peak_solar_will_cover`, `target_met`, `peak_on_track`, `nonpeak_on_track`) where no action was taken and the rule hasn't changed from the previous cycle, the LLM call is skipped entirely — `_build_auto_summary()` writes a one-line `[auto]` entry directly to JSONL and HA notifications. LLM runs on any action, unusual rule, or rule change.
 
 **Layer C — LP optimiser / MPC (shadow, not in control)**: `agent/optimizer.py`, a receding-horizon linear program. Runs every cycle, logs its verdict to `decisions.jsonl` alongside the deterministic verdict for comparison. Not yet in the control path.
 
@@ -144,6 +144,8 @@ The agent re-runs this calculation every 30-min cycle. It starts slow (cheap) an
 **Escalation:** once self_consumption charging has started, the agent rechecks each cycle. If `hours_to_cheap_end ≤ hours_to_fill_slow + 0.5h`, it switches to autonomous. Start slow and cheap; escalate automatically when the deadline demands it.
 
 *Example (non-peak): 36% SoC, 80% target, now 10:30am, price 15¢. Forecast: 15¢ until 4pm then rises to 19¢+. hours_to_cheap_end = 5.5h. kWh needed = 5.9, slow needs 3.5h, fast needs 1.2h. 5.5h > 3.5 + 1.5 = 5.0h → spread logic applies; 5¢ spread → self_consumption, monitor. At 2:30pm, battery at 55%: kWh_needed = 3.4, slow needs 2.0h, hours_to_cheap_end = 1.5h → 1.5 ≤ 2.0 + 0.5 → escalate to autonomous.*
+
+**Charge rate model (Phase 2.5-A, 2026-06-23):** `avg_charge_rate()` is no longer a flat constant. `agent/model_params.json` (built from 17 days / 179 observations in `energy_log.db`) gives SoC-dependent rates: ~1.30 kW at 40%, ~1.66 kW at 60%, tapering to 0.876 kW at 80% and 0.625 kW at 90%. `_avg_charge_rate_kw(soc_from, soc_to, mode)` segments the SoC range into 10% buckets and computes a weighted average. Falls back to flat SLOW_KW=1.7 / FAST_KW=5.0 for missing or low-sample buckets. Autonomous mode has no data yet — flat 5.0 kW assumed.
 
 **Why `hours_to_cheap_end` instead of `hours_to_spike`:**
 The old logic found the first interval exceeding 30¢ — which means it found nothing on mild-spike days (e.g. prices going 15¢ → 19¢) and gave incorrect 6h default deadlines. `hours_to_cheap_end` finds the first *sustained* price rise of ≥ 4¢, which correctly identifies when "cheap now" ends regardless of the absolute price level.
@@ -377,8 +379,8 @@ Every cycle from 9am, the agent calculates:
 net_solar = max(expected_solar_remaining − home_load_kw × hours_to_2:55pm, 0)
             (use 0 for solar if forecast is poor or unreliable)
 kWh_needed = max((0.85 − soc/100) × 13.5 − net_solar, 0)
-hours_to_fill_fast = kWh_needed / 5.0   (autonomous)
-hours_to_fill_slow = kWh_needed / 1.7   (self_consumption)
+hours_to_fill_fast = kWh_needed / avg_charge_rate(soc→85%, autonomous)
+hours_to_fill_slow = kWh_needed / avg_charge_rate(soc→85%, self_consumption)
 hours_remaining    = hours until 14:55
 ```
 
@@ -551,6 +553,43 @@ if kwh_needed_85 ≤ 0                         →  hold (peak_solar_will_cover)
 **Why:** as solar improves during the morning, the grid charge needed falls each cycle. A 5kW rate justified at 10:00am (SoC=40%, solar=0.3kW) may be unnecessary at 11:00am (SoC=65%, solar=2kW, fill_slow now 1.6h vs 4.4h deadline). Recalculating prevents over-charging from grid when solar is contributing.
 
 **`battery_grid_charge_target` floor (added 2026-06-05):** In peak months before 3pm, `sensor.battery_grid_charge_target` is clamped to a minimum of 85% regardless of Solcast remaining forecast. Without this, the Solcast-optimistic formula could return 13% on a cloudy day (thinking solar will cover everything), causing `battery_autonomous_revert_target_reached` to fire immediately after autonomous mode is set (battery already above 13%). The 85% floor ensures the automation only stops charging when the demand-window target is actually met.
+
+
+### Rule 24 — Peak Survival Charge: Battery Won't Reach Solar Sponge
+
+**Added 2026-06-23.** If the battery is projected to drain below 5% (Powerwall floor) before Solar Sponge opens (10am), and the conditions for waiting (Rule 25) aren't met, charge now rather than risk a forced emergency charge at a higher price later.
+
+```
+hours_to_sponge = max(10.0 − now_h, 0.0)
+projected_soc_at_sponge = soc − (home_load_kw × hours_to_sponge / 13.5 × 100)
+
+if kwh_needed_85 ≤ 0:          # solar covers gap to 85%
+    if projected_soc ≤ 5%:     # but battery won't survive to sponge
+        → Rule 25 check first
+        → if not worth waiting: charge now (self_consumption, target 85%)  → "peak_solar_cover_survival"
+```
+
+**Context this fires in:** overnight or early morning (7am) when battery drained during the night and Solar Sponge is too far away or not cheap enough to justify waiting.
+
+**Why 85% target:** emergency charge in peak months must hit the demand-window target in one pass. Setting a lower target risks needing a second charge cycle.
+
+### Rule 25 — Peak Survival Wait: Sponge Is Close and Meaningfully Cheaper
+
+**Added 2026-06-23.** If the battery can barely survive to Solar Sponge AND the Sponge is ≤3 hours away AND is ≥5¢ cheaper than the current price, hold and wait. Charging now at 20¢ when Solar Sponge at 11¢ is 2.5h away costs more and locks the charger during the cheapest grid window.
+
+```
+worth_waiting = (
+    hours_to_sponge ≤ 3.0
+    AND forward_min ≤ price − 5.0    # sponge will be at least 5¢ cheaper
+)
+
+if worth_waiting: hold  → "peak_survival_wait_for_sponge"
+else:             charge (Rule 24)
+```
+
+**Why 3h / 5¢:** 3h is enough time for the battery to drain to ~5% and then charge hard once Sponge opens. 5¢ is the minimum meaningful price gap — below that, the time cost of waiting and the uncertainty of the forecast aren't worth it.
+
+**Why this is a sub-rule of the `kwh_needed_85 ≤ 0` branch:** it only fires when solar is projected to cover the gap to 85%. If solar is unreliable (kwh_needed_85 > 0), standard deadline escalation (Rule 13) applies instead.
 
 
 ---
