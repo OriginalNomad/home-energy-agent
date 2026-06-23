@@ -396,6 +396,8 @@ If `kWh_needed ≤ 0`: fire `peak_solar_will_cover` (hold — net solar covers t
 
 Price spread is irrelevant. Demand charge ≈ $100/month ($3.30/day). Paying 5¢/kWh extra on 10 kWh costs 50¢. Always charge — the maths is obvious.
 
+**Implementation note (fixed 2026-06-24):** when `fill_slow ≥ hours_remaining` (self_consumption too slow), the code previously checked `price ≤ forward_min` and used `self_consumption` if prices were flat — but self_consumption physically cannot reach 85% in the available time regardless of price. Fixed: when in deadline urgency, always go `autonomous`. Rule `peak_deadline_autonomous`.
+
 Quick checks:
 - Past 12:30pm + battery < 40% + peak month → autonomous immediately
 - Past 1:30pm + battery < 70% + peak month → autonomous immediately
@@ -487,15 +489,19 @@ Solar Sponge (10am–3pm) is a structural tariff feature — always cheaper than
 `overnight_hold` fires when:
 - Time is 20:00–07:00 (nighttime)
 - Current price > 10¢ (`SOLAR_SPONGE_PRICE_THRESHOLD`)
-- SoC > 25% (battery not critically low)
+- SoC **≥ 25%** (battery not critically low)
 
 When `overnight_hold = True`, the deterministic layer returns `hold / overnight_hold_wait_for_sponge` regardless of `deferral_detected`.
 
 **Why:** Charging overnight at 13–17¢ when Solar Sponge at 6–8¢ is 8–12h away wastes ~55¢/night unnecessarily. Rule 13 morning deadline maths handles peak months from 9am — no pre-charge needed.
 
+**Why ≥ 25% (not > 25%):** at 25% SoC with ~11h until Solar Sponge, the battery will drain to the Powerwall floor (~5%) before morning at typical home load (0.5 kW × 11h = 41% drain). At exactly 25%, the old `> 25` boundary let the hold fall through to deadline escalation — which then fired autonomous charging due to the deadline rollover bug below. Fixed 2026-06-24 to `>= 25`.
+
+**Deadline rollover (fixed 2026-06-24):** `hours_to_2_55` previously computed as `max(DEMAND_DEADLINE − now_h, 0)`. After 2:55pm this goes negative and clamps to 0, making overnight cycles appear to be *at* the deadline and triggering urgent autonomous escalation. Fixed: if `now_h > DEMAND_DEADLINE`, roll over to next day — e.g. at 23:00, `hours_to_2_55 = 15.9h` (correct).
+
 **Exceptions where overnight charging IS appropriate:**
 1. Price ≤ 10¢ overnight — genuinely cheap, charging justified
-2. SoC ≤ 25% — emergency floor; handled by automation or deferral fallback
+2. SoC < 25% — survival top-up needed (Rule 7 handles this — self_consumption to survive-to-sponge SoC, NOT autonomous)
 3. Peak month + tomorrow solar outlook is overcast (< 150 W/m²) AND price < 15¢ — Solar Sponge alone may not fill battery; pre-charge justified
 
 **Rollback:** set `SOLAR_SPONGE_PRICE_THRESHOLD = 0` to disable, or set it very high (e.g. 30) to always apply.
