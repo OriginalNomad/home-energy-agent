@@ -87,7 +87,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 **Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://192.168.68.70:8123`. Systemd service, connects via Sydney edge.
 **HA external URL**: `https://agent.sol.io`. Trusted proxies configured for Pi subnet + Docker bridge.
 
-## System architecture (as of 2026-06-06)
+## System architecture (as of 2026-06-23)
 
 Three layers control the system. Read this before assuming any automation is "in charge":
 
@@ -117,6 +117,15 @@ Key agent capabilities added 2026-06-05:
 - **`battery_grid_charge_target` 85% floor (peak months)**: template sensor in `configuration.yaml` now clamps to 85% minimum in peak months before 3pm. Previously returned 13% on a cloudy day (Solcast-optimistic), which caused `battery_autonomous_revert_target_reached` to fire immediately after autonomous mode was set (battery already above 13%). Now the automation correctly waits until 85% is reached.
 - **Wait-and-go-hard strategy (Rule 22)**: `_cheapest_go_hard_slot()` scans price forecast each cycle for the cheapest slot where `hours_until + fill_fast_85h + 0.5h ≤ deadline`. If a slot ≥1¢ cheaper than current price exists and is feasible: `wait_for_cheap_go_hard` (hold). If no cheaper slot: `peak_charge_now` (self_consumption now). `go_hard_slot` exposed in REFERENCE block and JSONL.
 - **Receding horizon Solar Sponge rate selection (Rule 23)**: once in Solar Sponge with grid charge needed, mode is recalculated every cycle. Autonomous only when `fill_slow_85h ≥ deadline − 1h`. Otherwise self_consumption — next cycle will reassess as solar updates. Every cycle is an independent optimization; mode is never preserved from previous cycle.
+
+Key agent capabilities added 2026-06-23 (session 14):
+- **Rules 24 & 25 — peak survival charge/wait**: if battery projected to drain below 5% before Solar Sponge, either charge now (`peak_solar_cover_survival`) or wait for Sponge if ≤3h away and ≥5¢ cheaper (`peak_survival_wait_for_sponge`). Addresses Jun 23 case: battery drained to 8% at 7am and emergency-charged at 42¢.
+- **Phase 2.5-A — charge rate model**: `agent/model_params.json` built from 17 days of `energy_log.db`. SoC-dependent rates (1.66 kW at 60%, 0.876 kW at 80%, 0.625 kW at 90%). `_avg_charge_rate_kw()` replaces flat 1.7 kW in all fill-time calculations. Autonomous mode still uses flat 5.0 kW (no data yet).
+- **LP solar_unreliable fix**: `optimizer.py` zeros solar series when `state['solar_unreliable']=True`. Stops LP from firing `mpc_solar_only` on cloudy mornings (source of all LP divergences in prior analysis).
+- **Phase 7 — selective narrative**: routine hold cycles skip LLM API call; `_build_auto_summary()` writes `[auto]` entry directly. ~60-70% of cycles now skip the LLM.
+- **EV notification fix**: `log_decision()` always reads `sensor.polestar_7853_battery_charge_level` for EV SoC (was conditional on plug state); EV notification now always shows EV SoC + plug status, never battery SoC.
+- **Emergency automation hardened**: `battery_low_soc_emergency_charge` now has 20¢ absolute price ceiling + hardcoded 85% reserve target in peak months before 3pm. **Needs HA reload.**
+- **Demand window warning debounced**: `for: "0:01:00"` added to both warning automation triggers. **Needs HA reload.**
 - **86 unit tests** (was 75).
 
 Key agent capabilities added 2026-06-03:
