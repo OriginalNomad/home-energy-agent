@@ -309,15 +309,16 @@ def test_peak_cloudy_1330_autonomous():
 
 
 def test_peak_deferral_trap_selfcons():
-    # Deterministic picks self_consumption (3.18h fill fits 3.42h window) — the LLM
-    # over-escalated to autonomous here; this divergence is exactly what shadow mode surfaces.
+    # With Phase 2.5-A charge rate model, avg rate 45%→85% is ~1.36 kW (tapers above 80%),
+    # so fill_slow ≈ 3.97h vs 3.42h deadline at 11:30 — autonomous is now correct.
+    # (Pre-model: flat 1.7 kW gave 3.18h which fits, so self_consumption was right then.)
     holds = [{"actions": [], "price_c": 16, "ts": "2026-06-15T10:30", "solar_current_kw": 0.3},
              {"actions": [], "price_c": 16, "ts": "2026-06-15T11:00", "solar_current_kw": 0.3}]
     ctx = ea.compute_decision_context(
         mk_state(45, 11, "unreliable", 0.3, 1.5), flat(16), holds, now_at(11, 30))
     r = ctx["recommended"]
     check("peak deferral trap charges", r["action"] == "charge", r)
-    check("peak deferral trap self_consumption", r["mode"] == "self_consumption", r)
+    check("peak deferral trap autonomous", r["mode"] == "autonomous", r)
 
 
 def test_soc_gateway_divergence():
