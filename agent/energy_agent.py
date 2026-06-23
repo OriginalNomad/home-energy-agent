@@ -821,15 +821,16 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "message": f"{summary}\n\n**Actions:** {battery_actions_str}",
     })
 
-    # EV notification
+    # EV notification — suppressed when ev_summary is None (EV not plugged, auto cycle)
     ev_actions = [a for a in actions_taken if a.startswith("set_zappi")]
-    ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
-    ev_msg = ev_summary if ev_summary else summary
-    ha_service("persistent_notification", "create", {
-        "notification_id": "energy_agent_ev",
-        "title": f"🚗 EV — {now.strftime('%H:%M')}",
-        "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
-    })
+    if ev_summary is not None:
+        ev_msg = ev_summary if ev_summary else summary
+        ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
+        ha_service("persistent_notification", "create", {
+            "notification_id": "energy_agent_ev",
+            "title": f"🚗 EV — {now.strftime('%H:%M')}",
+            "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
+        })
 
     # Write a logbook entry — sequential history in HA History panel
     ha_service("logbook", "log", {
@@ -2010,14 +2011,25 @@ def _is_interesting_cycle(ctx: dict, actions: list[str], records: list[dict],
     return False
 
 
-def _build_auto_summary(ctx: dict) -> str:
-    """One-line summary for routine cycles where LLM is skipped."""
+def _build_auto_summary(ctx: dict) -> tuple[str, str]:
+    """One-line summaries for routine cycles where LLM is skipped.
+
+    Returns (battery_summary, ev_summary). ev_summary is empty string when EV
+    not plugged in so log_decision() can suppress the EV notification entirely.
+    """
     rule  = (ctx.get("recommended") or {}).get("rule_fired", "unknown")
     soc   = ctx.get("soc", "?")
     state = _cycle_context.get("state", {})
     price = (state.get("grid") or {}).get("price_cents_kwh", "?")
     solar = (state.get("solar") or {}).get("current_kw", "?")
-    return f"[auto] {rule} | SoC {soc}% | {price}¢/kWh | solar {solar}kW | hold — no action"
+    ev    = state.get("ev") or {}
+    battery_summary = f"[auto] {rule} | battery {soc}% | {price}¢/kWh | solar {solar}kW | hold"
+    if ev.get("plugged_in"):
+        ev_summary = (f"[auto] EV {ev.get('ev_soc_pct', '?')}% | "
+                      f"mode {ev.get('zappi_mode', '?')} | hold")
+    else:
+        ev_summary = None   # EV not plugged — suppress EV notification
+    return battery_summary, ev_summary
 
 
 def run_agent(dry_run: bool = False):
@@ -2134,8 +2146,8 @@ def run_agent(dry_run: bool = False):
             _interesting = _is_interesting_cycle(
                 _ctx, _det_executed_actions, _records, _demand_reserve_guard_fired)
             if not _interesting:
-                _auto = _build_auto_summary(_ctx)
-                log_decision(_auto, ["hold — no change needed"])
+                _auto_bat, _auto_ev = _build_auto_summary(_ctx)
+                log_decision(_auto_bat, ["hold — no change needed"], _auto_ev)
                 print(f"Cycle complete (routine — LLM skipped, rule: "
                       f"{(_ctx.get('recommended') or {}).get('rule_fired', '?')}).")
                 return
