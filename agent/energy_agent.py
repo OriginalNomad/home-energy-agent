@@ -821,9 +821,10 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "message": f"{summary}\n\n**Actions:** {battery_actions_str}",
     })
 
-    # EV notification — suppressed when ev_summary is None (EV not plugged, auto cycle)
+    # EV notification — only sent when EV is plugged in or a Zappi action was taken
     ev_actions = [a for a in actions_taken if a.startswith("set_zappi")]
-    if ev_summary is not None:
+    _ev_plugged = (state.get("ev") or {}).get("plugged_in", False)
+    if ev_actions or _ev_plugged:
         ev_msg = ev_summary if ev_summary else summary
         ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
         ha_service("persistent_notification", "create", {
