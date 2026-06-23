@@ -315,7 +315,7 @@ def get_current_state() -> dict:
             "plugged_in":  ev_plugged,
             "charging":    ev_plug_state == "Charging",
             "zappi_mode":  ha_state(ENTITIES["ev_zappi_mode"]) if ev_plugged else "n/a",
-            "ev_soc_pct":  _safe_int(ENTITIES["ev_soc"]) if ev_plugged else None,
+            "ev_soc_pct":  _safe_int(ENTITIES["ev_soc"]),
             "min_soc_pct": int(float(ha_state(ENTITIES["ev_min_soc"]) or 20)),
             "charge_target_pct": int(float(ha_state(ENTITIES["ev_charge_target"]) or 80)),
             "schedule":    _ev_schedule(now),
@@ -821,17 +821,15 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "message": f"{summary}\n\n**Actions:** {battery_actions_str}",
     })
 
-    # EV notification — only sent when EV is plugged in or a Zappi action was taken
+    # EV notification — always sent; ev_summary carries EV SoC from sensor.polestar_7853_battery_charge_level
     ev_actions = [a for a in actions_taken if a.startswith("set_zappi")]
-    _ev_plugged = (state.get("ev") or {}).get("plugged_in", False)
-    if ev_actions or _ev_plugged:
-        ev_msg = ev_summary if ev_summary else summary
-        ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
-        ha_service("persistent_notification", "create", {
-            "notification_id": "energy_agent_ev",
-            "title": f"🚗 EV — {now.strftime('%H:%M')}",
-            "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
-        })
+    ev_msg = ev_summary if ev_summary else summary
+    ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
+    ha_service("persistent_notification", "create", {
+        "notification_id": "energy_agent_ev",
+        "title": f"🚗 EV — {now.strftime('%H:%M')}",
+        "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
+    })
 
     # Write a logbook entry — sequential history in HA History panel
     ha_service("logbook", "log", {
@@ -2025,11 +2023,10 @@ def _build_auto_summary(ctx: dict) -> tuple[str, str]:
     solar = (state.get("solar") or {}).get("current_kw", "?")
     ev    = state.get("ev") or {}
     battery_summary = f"[auto] {rule} | battery {soc}% | {price}¢/kWh | solar {solar}kW | hold"
-    if ev.get("plugged_in"):
-        ev_summary = (f"[auto] EV {ev.get('ev_soc_pct', '?')}% | "
-                      f"mode {ev.get('zappi_mode', '?')} | hold")
-    else:
-        ev_summary = None   # EV not plugged — suppress EV notification
+    ev_soc = ev.get("ev_soc_pct", "?")
+    plug   = "plugged in" if ev.get("plugged_in") else "not plugged in"
+    mode   = ev.get("zappi_mode", "?")
+    ev_summary = f"[auto] EV {ev_soc}% ({plug}) | mode {mode} | hold"
     return battery_summary, ev_summary
 
 
