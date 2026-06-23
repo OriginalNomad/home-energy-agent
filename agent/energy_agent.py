@@ -1386,7 +1386,7 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     is_night = now_h >= 20 or now_h < 7
     overnight_hold = (is_night
                       and price > SOLAR_SPONGE_PRICE_THRESHOLD
-                      and soc > 25)
+                      and soc >= 25)
     # Accuracy-based unreliability only valid from SOLAR_START_HOUR — before then,
     # Solcast forecasts >0 but panels haven't started yet (low sun angle, flat roof).
     # zero_solar_day has its own time guard via _detect_zero_solar.
@@ -1426,7 +1426,13 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
 
     # Deadline maths
     hours_to_cheap_end = _hours_to_cheap_end(price_forecast, price)
-    hours_to_2_55      = max(DEMAND_DEADLINE - now_h, 0.0)
+    # Roll over to next day when past the deadline (e.g. 23:00 → 15.9h until tomorrow's 2:55pm).
+    # Without this, DEMAND_DEADLINE − now_h goes negative after 2:55pm and clamps to 0,
+    # which triggers deadline-urgency escalation overnight.
+    if now_h <= DEMAND_DEADLINE:
+        hours_to_2_55 = DEMAND_DEADLINE - now_h
+    else:
+        hours_to_2_55 = (24.0 - now_h) + DEMAND_DEADLINE
     hours_to_deadline  = min(hours_to_2_55, hours_to_cheap_end) if is_peak else hours_to_cheap_end
 
     # Net solar available for battery = gross remaining minus home load consumed over the window.
@@ -1557,13 +1563,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                 else:
                     rec = verdict("hold", None, None, "peak_solar_will_cover")
         elif fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55:
-            # Price already at or below the cheapest upcoming slot — no arbitrage benefit
-            # to going autonomous now vs self_consumption. Charge at self_consumption rate
-            # and re-evaluate next cycle as solar ramps and prices update.
-            if price <= forward_min:
-                rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons_cheap_now")
-            else:
-                rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
+            # Deadline urgency: self_consumption won't reach 85% in time (or even autonomous
+            # is very tight). Price arbitrage is irrelevant here — the demand charge penalty
+            # (~$100/month) dwarfs any charging cost differential. Always go autonomous.
+            rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
         elif (now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70):
             rec = verdict("charge", 100, "autonomous", "peak_deadline_quickcheck")
         elif in_sponge and now_h < 13 and soc < 50:
