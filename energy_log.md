@@ -1,5 +1,13 @@
 # Energy System Control Log
 
+## 2026-06-27 (session 16b — remote access, overseas)
+
+**Remote access attempt**: tried SSH to Pi (192.168.0.67) from iPad via Terminus while overseas on home VPN. VPN only routes 192.168.68.0/24 (TNAS/Mac subnet); Pi is on 192.168.0.x — unreachable directly. TNAS jump host attempt failed: Pi uses key-only SSH auth, key lives on Mac. Mac Studio (192.168.68.70) would work as jump host but Remote Login status unknown. Deferred to next month when back home.
+
+**Outstanding action**: run `build_models.py` on Pi to complete Phase 2.5-B activation. Commands captured in todo.md under "Immediate — DO FIRST when back at home".
+
+---
+
 ## 2026-06-27 (session 16 — Rule 26: physics-based overnight hold, 3× refinements)
 
 **Root cause investigation**: Battery charged at 5am at 24¢ despite cheaper prices at 4am and 6am (realized: 19¢ → 24¢ → 19¢). Root cause: in peak months, the peak block intercepts all decisions before `overnight_hold` (Rule 20) can fire. Inside the peak block, `_cheapest_go_hard_slot()` found no cheaper feasible slot — Amber's ~6h forecast window likely showed the spike continuing at 5am. `peak_charge_now` fired.

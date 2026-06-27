@@ -2,7 +2,18 @@
 
 ## Energy Agent — Active
 
-### Immediate
+### Immediate — DO FIRST when back at home (next month)
+
+- [ ] **Run `build_models.py` on Pi** — Phase 2.5-B is implemented and pushed but model_params.json needs to be rebuilt from live data to activate the solar corrector and autonomous charge rate model. SSH into Pi and run:
+  ```bash
+  cd ~/home-energy-agent
+  git pull
+  agent/venv/bin/python agent/build_models.py
+  git add agent/model_params.json
+  git commit -m "model_params: rebuild $(date +%Y-%m-%d)"
+  git push
+  ```
+  Output will show solar correction ratios (expect 0.5–1.5 range) and autonomous charge rates. Check numbers look sensible before committing. Note: autonomous rates may still be sparse — check the n= counts.
 
 - [x] **Reload HA automations** — `battery_low_soc_emergency_charge` (20¢ ceiling + 85% peak target) and both demand window warning automations (1-min debounce) were updated 2026-06-23. Reloaded 2026-06-24.
 - [ ] **Verify HA slider values** — confirm after June 2 restart: `ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`, `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`.
