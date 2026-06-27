@@ -1593,15 +1593,14 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             elif fill_slow_85 >= hours_to_2_55 - 1.0:
                 # No cheaper slot AND self_consumption is getting tight — must start now.
                 rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
-            elif is_night and hours_to_2_55 >= 6.0 and price > SOLAR_SPONGE_PRICE_THRESHOLD:
-                # Early morning (before 7am) or post-demand-window evening with 6+ hours
-                # to deadline and price above the Solar Sponge threshold. Amber's ~6h
-                # forecast doesn't yet reach Solar Sponge, so _cheapest_go_hard_slot found
-                # nothing — but that doesn't mean now is the best price. Hold at any SoC:
-                # peak_deadline_selfcons above already handles the urgency case, and
-                # deadline escalation at Solar Sponge handles low-SoC catch-up charging.
-                # No SoC floor: let the battery drain toward 5% if needed — grid covers
-                # home load at floor, then Solar Sponge charges cheaply.
+            elif fill_fast_85 < hours_to_2_55 - 2.0 and price > SOLAR_SPONGE_PRICE_THRESHOLD:
+                # Autonomous mode can reach 85% before the deadline with 2h+ to spare,
+                # so there's no need to start slow self_consumption at an above-threshold
+                # price now. Hold at any SoC and any time of day: let the battery drain
+                # toward the 5% floor if needed — grid covers home load there, then Solar
+                # Sponge deadline logic (peak_sponge_go_hard / peak_deadline_autonomous)
+                # catches up cheaply. The 2h margin means we only start charging early
+                # when autonomous mode itself is running short of time.
                 rec = verdict("hold", None, None, "peak_early_morning_hold")
             else:
                 # No cheaper slot; current price is as good as it gets. Charge at self_consumption.

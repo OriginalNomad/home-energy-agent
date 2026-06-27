@@ -210,12 +210,13 @@ def test_peak_wait_for_cheap_go_hard():
 
 
 def test_peak_charge_now_when_no_cheaper_slot():
-    # SoC=16%, 8:30am, all prices flat at 17¢. No cheaper slot available.
-    # → should charge now at self_consumption (peak_charge_now).
-    state = mk_state(16, 8, "poor", 0.3, 5.0, price=17.0)
-    ctx = ea.compute_decision_context(state, flat(17), [], now_at(8, 30))
+    # SoC=50%, 8:30am, all prices flat at 10¢ (at Solar Sponge threshold).
+    # Price is at/below threshold so Rule 26 doesn't apply — charge now.
+    # No cheaper slot exists (flat forecast, need 1¢ below 10¢ to find one).
+    state = mk_state(50, 8, "na", 0.0, 0.0, price=10.0)
+    ctx = ea.compute_decision_context(state, flat(10), [], now_at(8, 30))
     r = ctx["recommended"]
-    check("peak_charge_now when no cheaper slot", r["rule_fired"] == "peak_charge_now", r)
+    check("peak_charge_now when price at threshold", r["rule_fired"] == "peak_charge_now", r)
     check("action is charge", r["action"] == "charge", r)
     check("mode is self_consumption (not urgent enough for autonomous)", r["mode"] == "self_consumption", r)
 
