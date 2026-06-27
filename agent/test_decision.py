@@ -242,15 +242,15 @@ def test_peak_early_morning_hold_not_fired_when_cheap():
     check("action is charge", r["action"] == "charge", r)
 
 
-def test_peak_early_morning_hold_not_fired_low_soc():
-    # SoC=20%, 5am, price=24¢ — below 25% floor, overnight_hold doesn't apply.
-    # Emergency automation handles critically low SoC; early-morning guard stays out of it.
-    # → charge now (peak_charge_now).
+def test_peak_early_morning_hold_fires_at_low_soc():
+    # SoC=20%, 5am, price=24¢. No SoC floor on early-morning hold — deadline logic above
+    # already handles urgency, so the battery can drain toward 5% and catch up at Solar Sponge.
+    # → hold (peak_early_morning_hold).
     state = mk_state(20, 5, "na", 0.0, 0.0, price=24.0)
     ctx = ea.compute_decision_context(state, flat(24), [], now_at(5, 0))
     r = ctx["recommended"]
-    check("peak_charge_now when SoC < 25% at 5am", r["rule_fired"] == "peak_charge_now", r)
-    check("action is charge", r["action"] == "charge", r)
+    check("peak_early_morning_hold fires even at 20% SoC", r["rule_fired"] == "peak_early_morning_hold", r)
+    check("action is hold", r["action"] == "hold", r)
 
 
 def test_peak_sponge_go_hard():
@@ -804,7 +804,7 @@ if __name__ == "__main__":
                test_peak_wait_for_cheap_go_hard, test_peak_charge_now_when_no_cheaper_slot,
                test_peak_early_morning_hold_on_price_spike,
                test_peak_early_morning_hold_not_fired_when_cheap,
-               test_peak_early_morning_hold_not_fired_low_soc,
+               test_peak_early_morning_hold_fires_at_low_soc,
                test_peak_sponge_go_hard, test_peak_sponge_selfcons_then_escalates,
                test_peak_sponge_solar_improves_to_hold]:
         print(f"\n{fn.__name__}")

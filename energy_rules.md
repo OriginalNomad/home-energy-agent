@@ -605,11 +605,11 @@ else:             charge (Rule 24)
 **Fires when — all of:**
 - `is_night` (before 7am or after 8pm) — genuinely overnight
 - `hours_to_2:55pm ≥ 6.0h` — no urgency whatsoever
-- `overnight_hold = True` — price > 10¢ (Solar Sponge threshold) AND `soc ≥ 25%`
+- `price > SOLAR_SPONGE_PRICE_THRESHOLD (10¢)` — price is above Solar Sponge levels
 
-**Result:** `peak_early_morning_hold` (hold). The next cycle (30 min later) will re-evaluate with a fresh Amber forecast — if the spike has resolved, it will charge at the lower price or find a better go-hard slot.
+**No SoC floor.** The battery is allowed to drain toward 5% (Powerwall floor) while waiting. Once at the floor, the grid covers home load directly. When Solar Sponge opens, deadline escalation (`peak_deadline_autonomous`) catches up if needed. This is correct: `peak_deadline_selfcons` above this rule already handles any case where SoC is so low that self_consumption can't reach 85% in time.
 
-**Why `overnight_hold` as the condition (not a separate SoC check):** `overnight_hold` already encodes `price > 10¢` (so genuinely cheap early prices — 7–9¢ at Solar Sponge levels — still trigger `peak_charge_now`, not a hold) and `soc ≥ 25%` (so a critically-low battery at 5am still charges, since the emergency automation's 25% floor is the backstop).
+**Result:** `peak_early_morning_hold` (hold). The next cycle re-evaluates with a fresh Amber forecast — if the spike has resolved, `wait_for_cheap_go_hard` or Solar Sponge logic takes over.
 
 **Position in tree:** after `wait_for_cheap_go_hard` (hold for a known cheap slot) and `peak_deadline_selfcons` (charge because tight), before `peak_charge_now` (charge because no better option visible). In effect, this rule inserts "but if no urgency and price elevated, be patient overnight" between those two.
 
