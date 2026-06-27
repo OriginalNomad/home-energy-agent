@@ -128,6 +128,10 @@ Key agent capabilities added 2026-06-23 (session 14):
 - **Demand window warning debounced**: `for: "0:01:00"` added to both warning automation triggers. **Needs HA reload.**
 - **86 unit tests** (was 75).
 
+Key agent capabilities added 2026-06-27 (session 16):
+- **Rule 26 — peak early morning hold** (`peak_early_morning_hold`): in the peak month block, when no cheaper slot is found in the Amber forecast and price > 10¢, fires `hold` instead of `peak_charge_now` whenever autonomous mode has ≥2h of margin (`fill_fast_85 < hours_to_2:55 - 2h`). Prevents charging into transient overnight/early-morning price spikes when Solar Sponge is still hours away. Physics-based (not clock-based): works correctly from midnight through 9:30am+ regardless of SoC. `peak_charge_now` now fires primarily when price is already at/below Solar Sponge threshold (10¢) and no cheaper slot exists. 3 tests added; 1 updated. **109 unit tests**.
+- **Root cause**: 2026-06-27 5am charging at 24¢ (realized: spike from 19¢→24¢→19¢). Amber forecast at 5am showed spike continuing → `peak_charge_now` fired. Rule 26 would have held.
+
 Key agent capabilities added 2026-06-24 (session 15):
 - **Deadline rollover fix**: `hours_to_2_55` now rolls over to next day when past 2:55pm (e.g. 23:00 → 15.9h). Previously clamped to 0.0h, causing overnight autonomous escalation.
 - **overnight_hold boundary fix**: `soc >= 25` (was `> 25`). At exactly 25% SoC the hold previously fell through to the bugged deadline path.
@@ -273,7 +277,7 @@ Key agent capabilities added 2026-05-29:
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before June 1 |
-| `agent/test_decision.py` | 60 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/test_decision.py` | 109 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
 | `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. See PRODUCT.md "Optimisation Engine — Depth" |
 | `agent/test_optimizer.py` | 9 unit tests for the LP optimiser — pure, no API calls |
 | `agent/.env` | API keys (gitignored — not in repo) |
