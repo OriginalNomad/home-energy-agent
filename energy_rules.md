@@ -6,7 +6,7 @@ These rules are implemented by three Python layers in `agent/energy_agent.py`, r
 
 **Layer A — Deterministic rule layer (IN CONTROL)**: `compute_decision_context()` + `_execute_deterministic_verdict()`. A pure Python `if/elif` rule tree that reads current state and executes all set_* API calls. This is the control path. Kill-switch: `DETERMINISTIC_AUTHORITATIVE = False`.
 
-**Layer B — LLM narrative logger (selective, cosmetic only)**: Claude runs after the deterministic layer and writes a plain-English log entry. Its `set_*` calls are no-ops. System prompt is ~65 lines (slimmed 2026-06-09). **Phase 7 (2026-06-23):** on routine hold cycles (`overnight_hold_wait_for_sponge`, `demand_window_active`, `peak_target_met`, `peak_solar_will_cover`, `target_met`, `peak_on_track`, `nonpeak_on_track`) where no action was taken and the rule hasn't changed from the previous cycle, the LLM call is skipped entirely — `_build_auto_summary()` writes a one-line `[auto]` entry directly to JSONL and HA notifications. LLM runs on any action, unusual rule, or rule change.
+**Layer B — LLM narrative logger (selective, cosmetic only)**: Claude runs after the deterministic layer and writes a plain-English log entry. Its `set_*` calls are no-ops. System prompt is ~65 lines (slimmed 2026-06-09). **Phase 7 (2026-06-23):** on routine hold cycles (`overnight_hold_wait_for_sponge`, `peak_early_morning_hold`, `demand_window_active`, `peak_target_met`, `peak_solar_will_cover`, `target_met`, `peak_on_track`, `nonpeak_on_track`) where no action was taken and the rule hasn't changed from the previous cycle, the LLM call is skipped entirely — `_build_auto_summary()` writes a one-line `[auto]` entry directly to JSONL and HA notifications. LLM runs on any action, unusual rule, or rule change.
 
 **Layer C — LP optimiser / MPC (shadow, not in control)**: `agent/optimizer.py`, a receding-horizon linear program. Runs every cycle, logs its verdict to `decisions.jsonl` alongside the deterministic verdict for comparison. Not yet in the control path.
 
@@ -596,6 +596,32 @@ else:             charge (Rule 24)
 **Why 3h / 5¢:** 3h is enough time for the battery to drain to ~5% and then charge hard once Sponge opens. 5¢ is the minimum meaningful price gap — below that, the time cost of waiting and the uncertainty of the forecast aren't worth it.
 
 **Why this is a sub-rule of the `kwh_needed_85 ≤ 0` branch:** it only fires when solar is projected to cover the gap to 85%. If solar is unreliable (kwh_needed_85 > 0), standard deadline escalation (Rule 13) applies instead.
+
+
+### Rule 26 — Peak Early Morning Hold: Don't Charge on Pre-Dawn Price Spikes
+
+**Added 2026-06-27.** In the peak month block, when grid charge is needed (`kwh_needed_85 > 0`) but no cheaper slot appears in the Amber forecast, the fallback was `peak_charge_now`. This was correct for mid-morning (9am+) but wrong for the pre-dawn hours (midnight–7am) where Amber's ~6h forecast window doesn't yet reach Solar Sponge. A transient overnight spike would cause charging at 24¢ when Solar Sponge at 10am will be 9–12¢.
+
+**Fires when — all of:**
+- `is_night` (before 7am or after 8pm) — genuinely overnight
+- `hours_to_2:55pm ≥ 6.0h` — no urgency whatsoever
+- `overnight_hold = True` — price > 10¢ (Solar Sponge threshold) AND `soc ≥ 25%`
+
+**Result:** `peak_early_morning_hold` (hold). The next cycle (30 min later) will re-evaluate with a fresh Amber forecast — if the spike has resolved, it will charge at the lower price or find a better go-hard slot.
+
+**Why `overnight_hold` as the condition (not a separate SoC check):** `overnight_hold` already encodes `price > 10¢` (so genuinely cheap early prices — 7–9¢ at Solar Sponge levels — still trigger `peak_charge_now`, not a hold) and `soc ≥ 25%` (so a critically-low battery at 5am still charges, since the emergency automation's 25% floor is the backstop).
+
+**Position in tree:** after `wait_for_cheap_go_hard` (hold for a known cheap slot) and `peak_deadline_selfcons` (charge because tight), before `peak_charge_now` (charge because no better option visible). In effect, this rule inserts "but if no urgency and price elevated, be patient overnight" between those two.
+
+```
+is_night AND hours_to_2:55 ≥ 6h AND overnight_hold
+    → "peak_early_morning_hold"  (hold — let the next cycle re-evaluate)
+
+else
+    → "peak_charge_now"  (charge — truly no better option)
+```
+
+**Root cause that motivated this rule:** 2026-06-27, battery charged at 5am at 24¢. Realized prices were 19¢ at 4am, 24¢ at 5am, 19¢ at 6am (a transient spike). But Amber's forecast at 5am showed the spike continuing, so `_cheapest_go_hard_slot` found nothing cheaper and `peak_charge_now` fired. The 10am Solar Sponge was outside the ~6h Amber window, or forecast at a similar price to the spike.
 
 
 ---

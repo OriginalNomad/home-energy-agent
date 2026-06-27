@@ -220,6 +220,39 @@ def test_peak_charge_now_when_no_cheaper_slot():
     check("mode is self_consumption (not urgent enough for autonomous)", r["mode"] == "self_consumption", r)
 
 
+def test_peak_early_morning_hold_on_price_spike():
+    # SoC=35%, 5am, price=24¢ (spike), flat forecast — Amber can't see past the spike.
+    # No cheaper slot in window, but it's nighttime with 9.9h to deadline.
+    # → hold rather than charging into the spike (peak_early_morning_hold).
+    state = mk_state(35, 5, "na", 0.0, 0.0, price=24.0)
+    ctx = ea.compute_decision_context(state, flat(24), [], now_at(5, 0))
+    r = ctx["recommended"]
+    check("peak_early_morning_hold fires on pre-dawn spike", r["rule_fired"] == "peak_early_morning_hold", r)
+    check("action is hold", r["action"] == "hold", r)
+
+
+def test_peak_early_morning_hold_not_fired_when_cheap():
+    # SoC=35%, 5am, price=8¢ — genuinely cheap, below Solar Sponge threshold.
+    # overnight_hold requires price > 10¢, so the early-morning guard doesn't apply.
+    # → charge now (peak_charge_now).
+    state = mk_state(35, 5, "na", 0.0, 0.0, price=8.0)
+    ctx = ea.compute_decision_context(state, flat(8), [], now_at(5, 0))
+    r = ctx["recommended"]
+    check("peak_charge_now when price genuinely cheap at 5am", r["rule_fired"] == "peak_charge_now", r)
+    check("action is charge", r["action"] == "charge", r)
+
+
+def test_peak_early_morning_hold_not_fired_low_soc():
+    # SoC=20%, 5am, price=24¢ — below 25% floor, overnight_hold doesn't apply.
+    # Emergency automation handles critically low SoC; early-morning guard stays out of it.
+    # → charge now (peak_charge_now).
+    state = mk_state(20, 5, "na", 0.0, 0.0, price=24.0)
+    ctx = ea.compute_decision_context(state, flat(24), [], now_at(5, 0))
+    r = ctx["recommended"]
+    check("peak_charge_now when SoC < 25% at 5am", r["rule_fired"] == "peak_charge_now", r)
+    check("action is charge", r["action"] == "charge", r)
+
+
 def test_peak_sponge_go_hard():
     # SoC=40%, 10:30am (in Solar Sponge), poor solar → solar_unreliable=True → expected_solar=0.
     # kwh_needed_85 = (0.85-0.4)*13.5 = 6.075, fill_slow=3.57h, deadline=4.42h, buffer=0.85h < 1h.
@@ -769,6 +802,9 @@ if __name__ == "__main__":
                test_peak_solar_cover_no_survival_holds_when_soc_ok,
                test_wait_for_cheap_go_hard_holds_when_sponge_close_and_cheaper,
                test_peak_wait_for_cheap_go_hard, test_peak_charge_now_when_no_cheaper_slot,
+               test_peak_early_morning_hold_on_price_spike,
+               test_peak_early_morning_hold_not_fired_when_cheap,
+               test_peak_early_morning_hold_not_fired_low_soc,
                test_peak_sponge_go_hard, test_peak_sponge_selfcons_then_escalates,
                test_peak_sponge_solar_improves_to_hold]:
         print(f"\n{fn.__name__}")
