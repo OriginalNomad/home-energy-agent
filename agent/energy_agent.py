@@ -1593,6 +1593,15 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             elif fill_slow_85 >= hours_to_2_55 - 1.0:
                 # No cheaper slot AND self_consumption is getting tight — must start now.
                 rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
+            elif is_night and hours_to_2_55 >= 6.0 and overnight_hold:
+                # Early morning (before 7am) or post-demand-window evening with 6+ hours
+                # to deadline. Amber's ~6h forecast doesn't reach Solar Sponge yet, so
+                # _cheapest_go_hard_slot found nothing — but that doesn't mean now is the
+                # best price. A transient spike that clears in the next cycle (or overnight
+                # hold at above-sponge prices) shouldn't trigger grid charging at 5am.
+                # overnight_hold already requires price > 10¢ and soc >= 25%, so this is
+                # safe against genuinely cheap prices and critically-low-SoC cases.
+                rec = verdict("hold", None, None, "peak_early_morning_hold")
             else:
                 # No cheaper slot; current price is as good as it gets. Charge at self_consumption.
                 rec = verdict("charge", 85, "self_consumption", "peak_charge_now")
@@ -1987,6 +1996,7 @@ TOOL_MAP = {
 
 _ROUTINE_HOLD_RULES = {
     "overnight_hold_wait_for_sponge",
+    "peak_early_morning_hold",
     "peak_target_met",
     "peak_on_track",
     "peak_solar_will_cover",
