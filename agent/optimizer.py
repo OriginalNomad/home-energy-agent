@@ -85,14 +85,53 @@ def _slot_hour(t: str) -> int | None:
         return None
 
 
-def _build_solar_series(price_forecast, solar_forecast, n, fallback_kw):
-    """Align solar (kW) to the price-forecast time grid; 0 where unknown."""
+def _model_avg_rate_kw(soc_from: float, soc_to: float,
+                       rate_table: dict, fallback: float, min_samples: int = 5) -> float:
+    """Weighted-average charge rate from soc_from% to soc_to% using a model bucket table.
+
+    Mirrors _avg_charge_rate_kw() in energy_agent.py but works standalone on a
+    {bucket_str: {kw, n}} dict so the optimizer doesn't need to import the agent.
+    Falls back to `fallback` for buckets with insufficient samples.
+    """
+    _USABLE_KWH = 13.5
+    if soc_to <= soc_from or not rate_table:
+        return fallback
+    total_kwh  = (soc_to - soc_from) / 100.0 * _USABLE_KWH
+    total_time = 0.0
+    bucket     = int(soc_from / 10) * 10
+    while bucket < soc_to:
+        seg_bot = max(float(bucket), soc_from)
+        seg_top = min(float(bucket + 10), soc_to)
+        if seg_top > seg_bot:
+            seg_kwh = (seg_top - seg_bot) / 100.0 * _USABLE_KWH
+            entry   = rate_table.get(str(bucket), {})
+            rate    = entry.get("kw", fallback) if entry.get("n", 0) >= min_samples else fallback
+            total_time += seg_kwh / rate
+        bucket += 10
+    return round(total_kwh / total_time, 3) if total_time > 0 else fallback
+
+
+def _build_solar_series(price_forecast, solar_forecast, n, fallback_kw,
+                        solar_correction=None, min_samples=5):
+    """Align solar (kW) to the price-forecast time grid; 0 where unknown.
+
+    If solar_correction is provided (from model_params.json), multiplies each
+    slot's kW estimate by the per-hour-of-day ratio to correct for site-specific
+    Solcast bias. Correction is skipped for hours with fewer than min_samples
+    observations — those hours use the raw Solcast value.
+    """
     smap = {_norm_time(s.get("time", "")): float(s.get("kw_est", 0.0))
             for s in (solar_forecast or [])}
     out = []
     for f in price_forecast[:n]:
         key = _norm_time(f.get("time", ""))
-        out.append(smap.get(key, fallback_kw if not smap else 0.0))
+        kw  = smap.get(key, fallback_kw if not smap else 0.0)
+        if solar_correction and key and len(key) >= 13:
+            hour_str = key[11:13]
+            corr     = solar_correction.get(hour_str, {})
+            if corr.get("n", 0) >= min_samples:
+                kw = kw * corr["ratio"]
+        out.append(kw)
     return out
 
 
@@ -103,7 +142,8 @@ def optimize_battery(state: dict,
                      solar_forecast: list[dict],
                      now: datetime,
                      params: OptParams | None = None,
-                     feedin_forecast: list[float] | None = None) -> dict:
+                     feedin_forecast: list[float] | None = None,
+                     model_params: dict | None = None) -> dict:
     """Solve the receding-horizon dispatch LP and return a verdict + diagnostics.
 
     Returns the same outer shape as compute_decision_context():
@@ -124,8 +164,24 @@ def optimize_battery(state: dict,
     if H < 3:
         return _verdict_only("hold", None, None, "insufficient_forecast", H, soc0_pct)
 
+    # Pull calibration data from model_params (populated by build_models.py on the Pi)
+    _mp          = model_params or {}
+    _min_samples = _mp.get("min_samples", 5)
+    _solar_corr  = _mp.get("solar_correction")
+    _auto_rates  = _mp.get("charge_rate_kw", {}).get("autonomous", {})
+
+    # Effective autonomous charge rate — weighted average from current SoC to 85%
+    # using per-bucket model data. Falls back to p_charge_max_kw (5 kW) when no
+    # autonomous observations have been collected yet.
+    if _auto_rates:
+        _eff_rate = _model_avg_rate_kw(soc0_pct, 85.0, _auto_rates,
+                                       fallback=p.p_charge_max_kw,
+                                       min_samples=_min_samples)
+        p = OptParams(**{**asdict(p), "p_charge_max_kw": _eff_rate})
+
     # forecasts on the price grid, with the robustness knob applied
-    solar = _build_solar_series(price_forecast, solar_forecast, H, fallback_kw=0.0)
+    solar = _build_solar_series(price_forecast, solar_forecast, H, fallback_kw=0.0,
+                                solar_correction=_solar_corr, min_samples=_min_samples)
     solar = [s * (1.0 - 0.5 * p.risk) for s in solar]            # conservative solar
     if bool(state.get("solar_unreliable", False)):
         solar = [0.0] * H                                         # cloudy morning — no solar credit

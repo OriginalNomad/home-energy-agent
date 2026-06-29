@@ -973,10 +973,12 @@ DEMAND_DEADLINE  = 14 + 55 / 60   # 2:55pm as a decimal hour
 # Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
 # Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
 MODEL_PARAMS_FILE = Path(__file__).parent / "model_params.json"
+_model_params: dict = {}
 _charge_rate_model: dict = {}
 try:
     with MODEL_PARAMS_FILE.open() as _f:
-        _charge_rate_model = json.load(_f).get("charge_rate_kw", {})
+        _model_params      = json.load(_f)
+        _charge_rate_model = _model_params.get("charge_rate_kw", {})
 except Exception:
     pass
 
@@ -1593,6 +1595,15 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             elif fill_slow_85 >= hours_to_2_55 - 1.0:
                 # No cheaper slot AND self_consumption is getting tight — must start now.
                 rec = verdict("charge", 85, "self_consumption", "peak_deadline_selfcons")
+            elif fill_fast_85 < hours_to_2_55 - 2.0 and price > SOLAR_SPONGE_PRICE_THRESHOLD:
+                # Autonomous mode can reach 85% before the deadline with 2h+ to spare,
+                # so there's no need to start slow self_consumption at an above-threshold
+                # price now. Hold at any SoC and any time of day: let the battery drain
+                # toward the 5% floor if needed — grid covers home load there, then Solar
+                # Sponge deadline logic (peak_sponge_go_hard / peak_deadline_autonomous)
+                # catches up cheaply. The 2h margin means we only start charging early
+                # when autonomous mode itself is running short of time.
+                rec = verdict("hold", None, None, "peak_early_morning_hold")
             else:
                 # No cheaper slot; current price is as good as it gets. Charge at self_consumption.
                 rec = verdict("charge", 85, "self_consumption", "peak_charge_now")
@@ -1987,6 +1998,7 @@ TOOL_MAP = {
 
 _ROUTINE_HOLD_RULES = {
     "overnight_hold_wait_for_sponge",
+    "peak_early_morning_hold",
     "peak_target_met",
     "peak_on_track",
     "peak_solar_will_cover",
@@ -2133,7 +2145,8 @@ def run_agent(dry_run: bool = False):
                 _opt_prices_ext = _extend_forecast_to_demand_window(
                     _opt_prices, datetime.now(SYDNEY_TZ), _hourly_model)
                 _opt = optimize_battery(_opt_state, _opt_prices_ext,
-                                        get_solar_forecast(), datetime.now(SYDNEY_TZ))
+                                        get_solar_forecast(), datetime.now(SYDNEY_TZ),
+                                        model_params=_model_params)
                 _cycle_context["optimizer_verdict"]  = _opt["verdict"]
                 _cycle_context["optimizer_context"]  = {
                     k: v for k, v in _opt.items() if k != "verdict"}
