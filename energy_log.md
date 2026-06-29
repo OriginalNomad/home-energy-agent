@@ -1,5 +1,31 @@
 # Energy System Control Log
 
+## 2026-06-29 (session 17 — morning queries, session 16 work merged to main)
+
+**Session 16 work merged to main**: Rule 26 (`peak_early_morning_hold`) and Phase 2.5-B code (solar corrector wiring, `build_models.py`) were on `claude/morning-standup-uajwpd` but hadn't been merged to `main`. Pi cron was still running the pre-Rule-26 code. Merged to main and pushed — Pi will pick up on next cron cycle.
+
+**7am charging incident (2026-06-29) — root cause analysis**:
+
+Battery charged for 30 minutes at 7am (16¢), despite 12¢ available at 4am and 10am. User observation: narrative said "reserve set to grid charge target 34%".
+
+Root cause: two layers fired simultaneously.
+
+1. **`battery_low_soc_emergency_charge` automation** fired at exactly 07:00:00 (first eligible moment — automation has `condition: after 07:00:00`). Conditions met: SoC=19% < 20%, price=16¢ < 20¢ ceiling, `amber_in_cheap_window = "True"` (Amber classifies 7am as cheap relative to June peak prices). Set reserve to **85%** (peak month, before 3pm — hardcoded in automation YAML). The LLM narrative incorrectly reported "34%" — it read `sensor.battery_grid_charge_target` (the solar shortfall sensor, value 34%) and cited that instead of the actual reserve set (85%).
+
+2. **DET layer at 7:30am** (next cycle): SoC now ~24%, 2.5h to sponge. Survival check: `19% → 24%` SoC, `projected_soc_at_sponge > 5%` → `peak_solar_will_cover` (hold). Reset reserve to 5%. Charging stopped. Total charge time: ~30 min.
+
+**Why not 4am at 12¢**: `overnight_hold` (Rule 20) fires when `is_night AND price > 10¢ AND SoC ≥ 25%`. At 4am: price=12¢ > 10¢, SoC above 25% → hold correctly. Automation also has `condition: after 07:00:00` so it can't fire overnight.
+
+**Why not wait for 10am at 12¢**: Rule 25 (`peak_survival_wait_for_sponge`) requires `forward_min ≤ price − 5¢ = 11¢`. Forward min at 10am = 12¢ > 11¢. Gap (4¢) is below the 5¢ threshold. Rule 24 survival check: at home_load ≈ 0.7 kW, `projected_soc = 19 − (0.7 × 3h / 13.5 × 100) = 3.4%` — hits floor before sponge → Rule 24 fires.
+
+**Rule 26 would have helped**: the Rule 26 condition (`fill_fast_85 < hours_to_2:55 − 2h`) at 7am with SoC=19% checks whether autonomous can reach 85% by 12:55pm. At 19% SoC, autonomous rate ~5 kW, fill_fast_85 ≈ 1.8h; hours_to_2:55 = 7.9h; `1.8 < 7.9 − 2 = 5.9h` → Rule 26 fires → hold. However Rule 26 only intercepts the DET layer `peak_charge_now` path — the automation fires independently of the det layer and cannot be intercepted by Rule 26. The automation's `condition: or [amber_in_cheap_window=True]` is the gap: when Amber's cheap window signal extends through the 16¢ morning period, the emergency automation fires before the det layer gets a chance to decide.
+
+**Cost of the incident**: ~0.7 kWh × 4¢ differential = 2.8¢. Not material.
+
+**Potential fix if desired**: narrow the automation's cheap window OR condition to require `price < 14¢` (not just `amber_in_cheap_window = "True"`) to avoid firing when the det layer would hold. Lower priority given negligible cost.
+
+**build_models.py still pending**: must be run on Pi when back at home (see todo.md). Until then solar_correction is empty and autonomous rates are flat 5.0 kW.
+
 ## 2026-06-27 (session 16b — remote access, overseas)
 
 **Remote access attempt**: tried SSH to Pi (192.168.0.67) from iPad via Terminus while overseas on home VPN. VPN only routes 192.168.68.0/24 (TNAS/Mac subnet); Pi is on 192.168.0.x — unreachable directly. TNAS jump host attempt failed: Pi uses key-only SSH auth, key lives on Mac. Mac Studio (192.168.68.70) would work as jump host but Remote Login status unknown. Deferred to next month when back home.
