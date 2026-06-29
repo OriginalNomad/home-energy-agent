@@ -35,6 +35,44 @@ in the control path. Comparison data accumulates for Phase 5 cutover validation.
 ~12 Home Assistant automations that fire independently of the agent. Demand window guard,
 export safety net, autonomous revert. These cannot be overridden by any layer above.
 
+---
+
+### How Layer A and Layer C differ
+
+**Deterministic layer (Layer A)** is a hand-coded `if/elif` decision tree. It matches
+the current situation against named rules in priority order — first rule that fires wins.
+Rules encode explicit business logic accumulated from observed failure modes: deadline
+maths, Solar Sponge timing, fill-time projections, price threshold comparisons.
+
+- **Strength**: transparent, testable (109 unit tests), never surprises you. Each rule
+  has a name (`peak_early_morning_hold`, `wait_for_cheap_go_hard`) that appears in the
+  log — you always know exactly why it did what it did.
+- **Weakness**: rules are brittle approximations. The right answer to "should I charge
+  now?" is really "what's the cheapest sequence of actions over the next N hours?" — and
+  a rule tree can only approximate that with fixed thresholds and heuristics.
+
+**LP optimiser (Layer C)** is a receding-horizon linear program (LP = Linear Programming).
+It formulates the next ~22 hours as a cost minimisation problem: decision variables are
+charge/discharge amounts per 30-min slot, constraints are SoC bounds and demand window
+limits, objective is minimise total electricity cost. It finds the globally cheapest
+*sequence* of decisions rather than the cheapest *next action*.
+
+- **Strength**: mathematically optimal given the forecast. Trade-offs that require
+  explicit rules in Layer A (e.g. "charge a bit now to avoid importing at a spike later")
+  emerge naturally from the objective without any special-casing.
+- **Weakness**: only as good as its inputs. Amber's ~6h horizon, the synthetic price
+  extension (7-day medians), and solar forecast uncertainty are all approximations. It
+  also doesn't yet replicate a few edge-case protections the det layer learned the hard
+  way (survival checks, sliding forecast detector, deferral limit).
+
+**Why both**: the LP is the right long-term architecture. The deterministic layer encodes
+constraints and hard-won edge cases that are difficult to express as LP penalties — and
+where getting them wrong is costly (demand window breach, Tessie API quirks). The plan is
+to track LP divergence in `decisions.jsonl`, get it below ~5% on peak-day decisions, then
+cut over with the det layer as a safety backstop.
+
+---
+
 ```
 Every 30 min cycle:
   ┌──────────────────────────────────────────────────┐

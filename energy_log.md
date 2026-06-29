@@ -1,5 +1,31 @@
 # Energy System Control Log
 
+## 2026-06-27 (session 16b — remote access, overseas)
+
+**Remote access attempt**: tried SSH to Pi (192.168.0.67) from iPad via Terminus while overseas on home VPN. VPN only routes 192.168.68.0/24 (TNAS/Mac subnet); Pi is on 192.168.0.x — unreachable directly. TNAS jump host attempt failed: Pi uses key-only SSH auth, key lives on Mac. Mac Studio (192.168.68.70) would work as jump host but Remote Login status unknown. Deferred to next month when back home.
+
+**Outstanding action**: run `build_models.py` on Pi to complete Phase 2.5-B activation. Commands captured in todo.md under "Immediate — DO FIRST when back at home".
+
+---
+
+## 2026-06-27 (session 16 — Rule 26: physics-based overnight hold, 3× refinements)
+
+**Root cause investigation**: Battery charged at 5am at 24¢ despite cheaper prices at 4am and 6am (realized: 19¢ → 24¢ → 19¢). Root cause: in peak months, the peak block intercepts all decisions before `overnight_hold` (Rule 20) can fire. Inside the peak block, `_cheapest_go_hard_slot()` found no cheaper feasible slot — Amber's ~6h forecast window likely showed the spike continuing at 5am. `peak_charge_now` fired.
+
+**Rule 26 — three design iterations:**
+
+**Version 1** (`is_night AND hours_to_2:55 ≥ 6h AND overnight_hold`): time-based, with 25% SoC floor inherited from overnight_hold. Catches the 5am case.
+
+**Version 2** (`is_night AND hours_to_2:55 ≥ 6h AND price > 10¢`): removed the 25% SoC floor — battery should be allowed to drain toward 5% while waiting for Solar Sponge, not forced to charge just because SoC is below 25%.
+
+**Version 3 — final** (`fill_fast_85 < hours_to_2:55 - 2h AND price > 10¢`): replaced `is_night` time-boundary with physics. Key insight: at 7am when `is_night` flips False, `peak_deadline_selfcons` fires if `fill_slow_85 ≥ hours_to_2:55 - 1h`. At 7am, SoC=5%: fill_slow_85≈7.4h ≥ 6.9h → fires and starts slow charging at 24¢. But fill_fast_85=2.16h: autonomous mode can reach 85% from 5% by 12:10pm. The agent should hold, wait for Solar Sponge (10am), then go hard cheaply. The condition `fill_fast_85 < hours_to_2:55 - 2h` means "autonomous has ≥2h of margin" — no point charging at elevated prices when Solar Sponge will be cheaper and we have ample time.
+
+**`peak_charge_now` semantics after Rule 26**: now fires primarily when price ≤ 10¢ (already at Solar Sponge floor, no point waiting). For above-threshold prices, Rule 26 intervenes whenever autonomous has ≥2h of margin.
+
+**Unit tests**: 3 Rule 26 tests added; 1 existing test (`test_peak_charge_now_when_no_cheaper_slot`) updated from 17¢/8:30am scenario (which Rule 26 now correctly intercepts) to 10¢/8:30am (at Solar Sponge floor — charge now). 109 tests, all pass.
+
+**decisions.jsonl / daily_energy.jsonl not available** in this remote session (Pi-only, gitignored). Three-way shadow analysis and daily energy journal review could not be completed. Run `/morning` from Pi or Mac for those.
+
 ## 2026-06-10 (session 13 — LLM narrative prompt fixes: FIT/EV confusion, spread definition, Rule 10 deprioritised)
 
 **Morning review**: three demand window passes Jun 7–9 confirmed on Pi (daily_energy.jsonl synced via SSH — Mac copy stale at Jun 5 due to Pi cron not pushing data back to git). Jun 6 recorded as borderline fail (0.56 kW peak, below billing threshold) during the Phase 5 cutover day. data_logger healthy: 178 rows Jun 6–10, 0 undecided rows. Phase 2.5-A (charge rate model) buildable ~2026-06-13.

@@ -38,7 +38,7 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 - Set to `20%` → normal floor, self-consumption mode
 - Set to `5%` → deep discharge floor during demand window (peak months only)
 
-**Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode. **Phase 2.5-A data (17 days)** shows: peak ~1.66 kW at 60% SoC, tapering to 0.876 kW at 80% and 0.625 kW at 90%. `_avg_charge_rate_kw()` now uses these model rates (from `agent/model_params.json`) for fill time projections instead of a flat 1.7 kW assumption. Full rate control requires Tesla Fleet API or MPC.
+**Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode. **Phase 2.5-A data (17 days)** shows: peak ~1.66 kW at 60% SoC, tapering to 0.876 kW at 80% and 0.625 kW at 90%. `_avg_charge_rate_kw()` now uses these model rates (from `agent/model_params.json`) for fill time projections instead of a flat 1.7 kW assumption. **Autonomous mode** (`charge_rate_kw.autonomous`) wired in (Phase 2.5-B) but still falls back to flat 5.0 kW — no autonomous data yet in model_params.json. Will populate once `build_models.py` is run on Pi. Full rate control requires Tesla Fleet API or MPC.
 
 **Dynamic grid charge target**: `sensor.battery_grid_charge_target`
 - Formula: `clamp(95 − (net_solar_kWh / 13.5 × 100), 5, 95)`
@@ -127,6 +127,11 @@ Key agent capabilities added 2026-06-23 (session 14):
 - **Emergency automation hardened**: `battery_low_soc_emergency_charge` now has 20¢ absolute price ceiling + hardcoded 85% reserve target in peak months before 3pm. **Needs HA reload.**
 - **Demand window warning debounced**: `for: "0:01:00"` added to both warning automation triggers. **Needs HA reload.**
 - **86 unit tests** (was 75).
+
+Key agent capabilities added 2026-06-27 (session 16):
+- **Rule 26 — peak early morning hold** (`peak_early_morning_hold`): in the peak month block, when no cheaper slot is found in the Amber forecast and price > 10¢, fires `hold` instead of `peak_charge_now` whenever autonomous mode has ≥2h of margin (`fill_fast_85 < hours_to_2:55 - 2h`). Prevents charging into transient overnight/early-morning price spikes when Solar Sponge is still hours away. Physics-based (not clock-based): works correctly from midnight through 9:30am+ regardless of SoC. `peak_charge_now` now fires primarily when price is already at/below Solar Sponge threshold (10¢) and no cheaper slot exists. 3 tests added; 1 updated. **109 unit tests**.
+- **Root cause**: 2026-06-27 5am charging at 24¢ (realized: spike from 19¢→24¢→19¢). Amber forecast at 5am showed spike continuing → `peak_charge_now` fired. Rule 26 would have held.
+- **Phase 2.5-B — solar corrector + autonomous charge rate wiring**: LP optimizer (`optimizer.py`) now applies per-hour-of-day Solcast bias correction from `model_params.json["solar_correction"]` in `_build_solar_series()`. Autonomous charge rate in `optimize_battery()` now uses `_model_avg_rate_kw()` (bucket-weighted average over SoC range) from `model_params.json["charge_rate_kw"]["autonomous"]` instead of flat 5.0 kW. `energy_agent.py` loads full `model_params.json` at startup and passes it to `optimize_battery()`. New `agent/build_models.py` script builds both models from `energy_log.db` and writes `model_params.json` — **must be run on Pi once home** (autonomous data still empty; solar_correction not yet built). Commands in `todo.md`.
 
 Key agent capabilities added 2026-06-24 (session 15):
 - **Deadline rollover fix**: `hours_to_2_55` now rolls over to next day when past 2:55pm (e.g. 23:00 → 15.9h). Previously clamped to 0.0h, causing overnight autonomous escalation.
@@ -273,7 +278,7 @@ Key agent capabilities added 2026-05-29:
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before June 1 |
-| `agent/test_decision.py` | 60 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/test_decision.py` | 109 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
 | `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. See PRODUCT.md "Optimisation Engine — Depth" |
 | `agent/test_optimizer.py` | 9 unit tests for the LP optimiser — pure, no API calls |
 | `agent/.env` | API keys (gitignored — not in repo) |
@@ -284,6 +289,8 @@ Key agent capabilities added 2026-05-29:
 | `agent/demand_window_summary.py` | Pushes `sensor.demand_window_monitor` into HA via REST API (month peak kW + rolling per-day history). Reads daily_energy.jsonl. Crons: 21:05 + hourly. Feeds two Markdown dashboard cards |
 | `agent/data_logger.py` | Closed-loop SQLite logger — one row per cycle in `energy_log.db`. Foundation for self-calibrating models (Phase 2.5-A+). Wired in 2026-06-06. |
 | `agent/energy_log.db` | SQLite DB on Pi only (gitignored). Accumulates state + price forecasts + decisions each cycle. Inspect: `ssh energypi.local "agent/venv/bin/python home-energy-agent/agent/data_logger.py"` |
+| `agent/build_models.py` | Calibration model builder — run on Pi after 2+ weeks of `energy_log.db` data. Builds solar_correction (per-hour Solcast bias ratio) and charge_rate_kw (autonomous rates by SoC bucket) and writes to `model_params.json`. Run: `cd ~/home-energy-agent && agent/venv/bin/python agent/build_models.py` |
+| `agent/model_params.json` | Calibration parameters loaded at agent startup. Contains `solar_correction` (per-hour Solcast ratio), `charge_rate_kw.self_consumption` (17-day data, 179 obs), `charge_rate_kw.autonomous` (empty — needs rebuild after autonomous charging accumulates). |
 
 ---
 
@@ -318,7 +325,7 @@ Key agent capabilities added 2026-05-29:
 
 **HA automation YAML vs UI discrepancy**: automations.yaml has no `enabled: false` entries — all 21 battery automations show as enabled in the file. HA UI enable/disable state is stored separately in HA's internal storage. Confirmed via HA UI: `battery_winter_overnight_precharge` and `battery_cloudy_day_topup` are disabled. The other 10 "agent handles" automations need verification in HA UI. Most critical to confirm disabled: `battery_cheap_window_autonomous_charge` (sets reserve=100% when Amber cheap window opens).
 
-**LP solar_unreliable gap** — LP still doesn't consume the `solar_unreliable` flag. On cloudy mornings LP would hold while det correctly charges. Not a control issue now (det is authoritative), but blocks LP-authoritative cutover if/when that's pursued.
+**LP solar correction gap (Phase 2.5-B)** — `optimizer.py` now applies per-hour Solcast bias correction from `model_params.json`, but `solar_correction` is not yet populated (build_models.py hasn't been run on the Pi). LP also now uses autonomous charge rate model from `model_params.json`, but `autonomous` bucket is empty. Both activate once `build_models.py` is run at home. Expected impact: LP will stop over-trusting Solcast on winter mornings and hold less aggressively during peak pre-charge.
 
 **Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
 

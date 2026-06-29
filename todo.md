@@ -2,14 +2,25 @@
 
 ## Energy Agent — Active
 
-### Immediate
+### Immediate — DO FIRST when back at home (next month)
+
+- [ ] **Run `build_models.py` on Pi** — Phase 2.5-B is implemented and pushed but model_params.json needs to be rebuilt from live data to activate the solar corrector and autonomous charge rate model. SSH into Pi and run:
+  ```bash
+  cd ~/home-energy-agent
+  git pull
+  agent/venv/bin/python agent/build_models.py
+  git add agent/model_params.json
+  git commit -m "model_params: rebuild $(date +%Y-%m-%d)"
+  git push
+  ```
+  Output will show solar correction ratios (expect 0.5–1.5 range) and autonomous charge rates. Check numbers look sensible before committing. Note: autonomous rates may still be sparse — check the n= counts.
 
 - [x] **Reload HA automations** — `battery_low_soc_emergency_charge` (20¢ ceiling + 85% peak target) and both demand window warning automations (1-min debounce) were updated 2026-06-23. Reloaded 2026-06-24.
 - [ ] **Verify HA slider values** — confirm after June 2 restart: `ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`, `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`.
 
 ### Architecture roadmap (in order)
 
-- [ ] **Phase 2.5-B — solar corrector** — OLS regression on Solcast vs SolarEdge actuals from `energy_log.db`. Data threshold (2 weeks) crossed 2026-06-20. SQL query and design in `ARCHITECTURE.md`. Produces a per-hour-of-day correction factor that feeds into `net_expected_solar`. Especially important in winter where Solcast overestimates by 2–3×. Highest-value item right now.
+- [x] **Phase 2.5-B — solar corrector (wired in, 2026-06-27)** — `optimizer.py` now applies per-hour Solcast correction from `model_params.json["solar_correction"]`; autonomous rate uses `_model_avg_rate_kw()` from `model_params.json["charge_rate_kw"]["autonomous"]`. `build_models.py` created. **Pending**: run `build_models.py` on Pi (see "DO FIRST" item above) to populate the model data — until then both models fall back to their priors (Solcast uncorrected, autonomous flat 5.0 kW).
 - [ ] **LP to control path** — LP shadow has been running since Jun 1. Blocker: timing divergence (LP defers to cheapest slot; det charges at first acceptable slot). Once solar corrector is wired in and LP has calibrated solar, this gap should close. Plan: LP-authoritative with deterministic layer as hard-constraint backstop (Rule 2, survival floor, reserve guard). Kill-switch already in place.
 - [ ] **Analyst agent** — weekly agent that reads `decisions.jsonl` + `daily_energy.jsonl` and surfaces systematic patterns: "cloudy mornings consistently start charging 1h late", "sponge threshold too tight 3 weeks in a row". Outputs proposed rule changes in plain English for human review. This is the feedback loop that makes the system self-improving rather than just self-executing.
 - [ ] **Savings dashboard** — daily/weekly $ saved vs naive baseline (flat-rate charging, no demand management, no solar optimisation). Broken down by: demand charge avoided, cheap-window differential, solar self-consumption. Core product metric; also the first Sol feature users need to see.
