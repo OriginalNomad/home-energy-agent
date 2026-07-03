@@ -1142,3 +1142,49 @@ Battery drained to 25% at 23:00 and agent fired `nonpeak_deadline_autonomous`, s
 **energy_rules.md updated:**
 - Rule 20: `>= 25` boundary documented with rationale; deadline rollover bug explained
 - Rule 13: `peak_deadline_autonomous` always-autonomous-when-tight note added
+
+## 2026-07-03 (session 17 — Jul 3 "demand breach" investigation + monitor re-banding)
+
+**Investigation (from a web session — no Pi access; worked entirely from user-supplied
+downloads: `site_power` history CSV + June bill PDF):**
+
+The 2026-07-03 dashboard flagged a demand-window **breach: 0.208 kW @ 18:00, min SoC 43%**.
+Investigated whether this was a control failure. Conclusion: **it was not** — the agent,
+reserve (5%), mode (self_consumption) and battery discharge all behaved correctly.
+
+- Reproduced the billed figure from the raw `site_power` CSV: clock-aligned 18:00 half-hour
+  = **0.198 kW net** (matches dashboard 0.208); worst *sliding* 30-min all day = 0.243 kW.
+- Shape of the 18:00 half-hour: one ~6-min sustained ~1.3 kW grid draw (17:59–18:05) + a
+  single ~30-s 2.0 kW blip at 18:15. Only 15% of the half-hour imported >0.5 kW.
+- **Key user question — "won't the 2 kW spike cost ~$30?"** No. The June bill states demand
+  is billed on the **highest 30-*minute average*** import in the month. June's actual demand
+  charge: **Network – Peak Demand 2.69 kW × $11.5479/kW = $31.11** (that 2.69 kW was the Jun 2
+  stranded-reserve breach — a *sustained* half-hour). A 30-s 2 kW blip adds only 0.034 kW to a
+  30-min average → Jul 3's worst is ~$2.5–2.8/mo, not $30.
+- **Conclusion on "can NDC ever be $0?"** No, and it shouldn't be chased. Demand = the month's
+  single worst 30-min avg over ~360 window-intervals; the Powerwall's sub-second regulation lag
+  means any dinner half-hour nets slightly positive. Jul 3 was already ≤0 in 11 of 12 intervals.
+  Practical floor ≈ the spikiest dinner's regulation noise (~$1–3/mo). The money is in never
+  repeating a Jun-2-class *sustained* breach (~$28 above floor), which the reserve guards now
+  prevent.
+
+**Change made — demand-window monitor re-banded by $ materiality (not near-perfection):**
+- `agent/log_daily_energy.py`: replaced single `PASS_KW_THRESHOLD = 0.10` with three-way bands
+  `classify_demand()` + `demand_cost_estimate()`. Rate from the June bill: `$11.5479/kW`.
+  Bands: **pass <0.5 kW** (~<$6/mo, regulation floor) · **marginal 0.5–1.5** · **breach ≥1.5 kW**
+  (~≥$17/mo, sustained/preventable). Record now carries `status` + `cost_est_dollars`; `passed`
+  kept for back-compat.
+- `agent/demand_window_summary.py`: imports the same bands (single source of truth), **re-scores
+  all historical days from `peak_kw`** so old records adopt the new bands, and exposes
+  `days_passed`/`days_marginal`/`days_failed` (breaches only) + `this_month_cost_est_dollars`.
+- Dashboard markdown card updated to a 3-way icon (✅/🟡/⚠️) + est. $/mo column + month cost.
+- Effect: Jul 3 (0.208 kW) now reads **✅ pass ~$2.40/mo** instead of ⚠️ breach; a 2.69 kW day
+  still reads **⚠️ breach ~$31/mo**. 121 tests unchanged (109 decision + 12 optimizer, all pass).
+
+**To deploy on Pi:** `git pull` → run `log_daily_energy.py` (rewrites JSONL with status/cost)
+→ `demand_window_summary.py --post` (reposts sensor). Crons pick it up otherwise.
+
+**Flagged (not actioned):** both cron scripts have a long-lived HA bearer token hardcoded as a
+default (`demand_window_summary.py:42`, `log_daily_energy.py:55`) and committed to the repo —
+worth rotating + moving to `.env`/`secrets.yaml`. Also still pending: `build_models.py` run on
+Pi (Phase 2.5-B activation), unchanged from session 16.

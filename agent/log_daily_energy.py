@@ -73,7 +73,36 @@ DEMAND_START_H = 15
 DEMAND_END_H   = 21
 SPONGE_START_H = 10
 SPONGE_END_H   = 15
-PASS_KW_THRESHOLD = 0.10   # EA116: peak 30-min-average import kW
+
+# --- Demand-window classification (EA116: peak 30-min-average import kW) ------
+# The network demand charge is the month's single worst 30-min-average import,
+# billed at ~$11.55/kW/month (Ausgrid EA116, Jun 2026 bill: 2.69 kW -> $31.11).
+# A literal-zero charge is unreachable: the Powerwall's regulation lag means any
+# load step draws briefly from grid before the battery ramps, so a dinner
+# half-hour nets slightly positive no matter what the agent does. Classify by
+# economic materiality, not near-perfection, so a ~$2 regulation-noise day does
+# not wear the same red flag as a ~$30 sustained control failure (e.g. the Jun 2
+# stranded-reserve breach, which was 2.69 kW held for a full half-hour):
+#   pass     < 0.50 kW   (< ~$6/mo)    physics floor / regulation noise
+#   marginal 0.50-1.50   (~$6-17/mo)   partial cover -- worth a look
+#   breach   >= 1.50 kW  (>= ~$17/mo)  sustained draw -- real, preventable
+DEMAND_MARGINAL_KW = 0.50
+DEMAND_BREACH_KW   = 1.50
+DEMAND_RATE_DOLLARS_PER_KW = 11.5479   # ex-GST, Ausgrid EA116 (Jun 2026 bill)
+
+
+def classify_demand(peak_kw: float) -> str:
+    """Three-way demand-window verdict from the billed 30-min-avg import (kW)."""
+    if peak_kw >= DEMAND_BREACH_KW:
+        return "breach"
+    if peak_kw >= DEMAND_MARGINAL_KW:
+        return "marginal"
+    return "pass"
+
+
+def demand_cost_estimate(peak_kw: float) -> float:
+    """Rough $ this 30-min peak would add to the month's demand charge (ex-GST)."""
+    return round(max(peak_kw, 0.0) * DEMAND_RATE_DOLLARS_PER_KW, 2)
 
 # --- Paths ------------------------------------------------------------------
 OUT_FILE      = Path(__file__).parent / "daily_energy.jsonl"
@@ -423,6 +452,8 @@ def compute_day(day) -> dict:
     peak_kw, peak_at = (0.0, "")
     if peak_day:
         peak_kw, peak_at = peak_30min_import(grid_num, demand_start, demand_end)
+    demand_status = classify_demand(peak_kw) if peak_day else None
+    demand_cost   = demand_cost_estimate(peak_kw) if peak_day else None
 
     # --- Agent decision rollup ---
     cycles = load_day_cycles(day)
@@ -434,7 +465,9 @@ def compute_day(day) -> dict:
 
         # --- Demand window (Rule 2) ---
         "demand_window": {
-            "passed": peak_kw < PASS_KW_THRESHOLD if peak_day else None,
+            "status": demand_status,                       # pass / marginal / breach
+            "passed": (demand_status == "pass") if peak_day else None,
+            "cost_est_dollars": demand_cost,               # $ this peak adds to the month (ex-GST)
             "peak_30min_import_kw": peak_kw,
             "peak_at": peak_at,
             "import_kwh": grid_import_demand_kwh,
@@ -545,13 +578,14 @@ def main() -> int:
         grid = rec["grid"]
         px = rec["price"]["day"]
 
-        status = ("PASS" if dw["passed"] else "FAIL") if rec["peak_day"] else "off-pk"
+        status = (dw.get("status") or "?").upper() if rec["peak_day"] else "off-pk"
         print(f"[{rec['date']}] {status}"
               f"  solar={sol['actual_kwh']}/{sol['forecast_kwh']}kWh"
               f"  soc={batt['soc_midnight']}→{batt['soc_9am']}→{batt['soc_3pm']}→{batt['soc_9pm']}%"
               f"  grid_in={grid['import_kwh']}kWh out={grid['export_kwh']}kWh"
               f"  price={px['min_c']}–{px['max_c']}¢"
-              f"  demand_pk={dw['peak_30min_import_kw']}kW")
+              f"  demand_pk={dw['peak_30min_import_kw']}kW"
+              f"{' ~$%s/mo' % dw['cost_est_dollars'] if dw.get('cost_est_dollars') else ''}")
 
     write_all(records)
     print(f"-> {OUT_FILE} ({len(records)} day records)")
