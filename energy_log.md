@@ -1188,3 +1188,18 @@ reserve (5%), mode (self_consumption) and battery discharge all behaved correctl
 default (`demand_window_summary.py:42`, `log_daily_energy.py:55`) and committed to the repo —
 worth rotating + moving to `.env`/`secrets.yaml`. Also still pending: `build_models.py` run on
 Pi (Phase 2.5-B activation), unchanged from session 16.
+
+**Dashboard card — bug then fix:** first card version referenced `d.status` and errored
+(`UndefinedError: 'dict object' has no attribute 'status'`) because the live sensor is still the
+*old* `demand_window_summary.py` (branch not yet merged → Pi hasn't pulled), so its `days` list
+lacks the new attributes. Rewrote the card to be **self-contained**: it computes status, $, and
+the pass/marginal/breach counts from `peak_kw` (present on the old sensor), so it renders
+correctly *before* and *after* deploy and can never disagree with the sensor. Also switched the
+YAML scalar from folded `>` to literal `|` (folded scalars mangle newlines and break markdown
+tables). Rendered/verified with a jinja2 harness before handing over.
+
+**PR opened:** `originalnomad/home-energy-agent` **PR #1** (`claude/morning-standup-q0ylqm` →
+`main`) so the user can merge from an iPad (overseas, no Pi/SSH access). Once merged, the Pi's
+30-min `git pull` + hourly summary cron deploy the re-banding automatically — no manual run needed.
+`energy_rules.md` Rule 2 verification bullet and `CONTEXT.md` (key files + What to watch for)
+updated to reflect the 3-way bands and pending-deploy state.

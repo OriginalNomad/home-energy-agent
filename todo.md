@@ -4,6 +4,9 @@
 
 ### Immediate — DO FIRST when back at home (next month)
 
+- [ ] **Merge PR #1 + deploy demand-monitor re-banding (2026-07-03)** — `claude/morning-standup-q0ylqm` → `main` ([PR #1](https://github.com/OriginalNomad/home-energy-agent/pull/1)). Mergeable from iPad (green "Merge pull request" → "Confirm merge"). Once on `main`, the Pi's 30-min `git pull` + hourly `demand_window_summary.py` cron deploy it automatically (no SSH). Then **paste the updated HA dashboard card** (self-contained markdown, computes pass/marginal/breach + $/mo from `peak_kw`) into the Energy Agent view — provided in the session-17 chat.
+- [ ] **Rotate the hardcoded HA bearer token** out of `agent/demand_window_summary.py:42` and `agent/log_daily_energy.py:55` (long-lived token committed as a default in git history). Move to `.env`/`secrets.yaml` and regenerate a fresh token in HA. Security hygiene — do before any repo-visibility change.
+
 - [ ] **Run `build_models.py` on Pi** — Phase 2.5-B is implemented and pushed but model_params.json needs to be rebuilt from live data to activate the solar corrector and autonomous charge rate model. SSH into Pi and run:
   ```bash
   cd ~/home-energy-agent

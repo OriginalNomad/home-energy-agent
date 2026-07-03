@@ -296,6 +296,8 @@ Key agent capabilities added 2026-05-29:
 
 ## What to watch for
 
+**Demand monitor re-banded (2026-07-03) — DEPLOY PENDING.** Jul 3 flagged a "breach" (0.208 kW @ 18:00) that was **not** a control failure — battery discharged correctly (reserve 5%), it was ~$2.40/mo of unavoidable Powerwall regulation lag. The monitor was re-banded by dollar impact: `pass <0.5 kW / marginal 0.5–1.5 / breach ≥1.5 kW` (`classify_demand()` in `log_daily_energy.py`; EA116 rate $11.5479/kW from the Jun bill). **Changes are on branch `claude/morning-standup-q0ylqm` / PR #1, not yet merged to `main`** — the Pi still runs the old single-0.10-kW threshold until the PR is merged (then the 30-min agent pull + hourly summary cron deploy it automatically). The self-contained HA dashboard card (computes status/$ from `peak_kw`) also needs pasting into the HA UI. See todo.md "DO FIRST".
+
 **June 1 demand window — PASSED ✅ (2026-06-01).** Agent correctly held overnight (Rule 20), charged via Solar Sponge 09:30–14:30 (39%→96% at 7–11¢), entered demand window at 99% SoC, zero grid imports 3–9pm. Rule 2 maintained. Backstop automation did not need to fire.
 
 **June 2 demand window — PARTIAL BREACH ⚠️ (2026-06-02).** SoC reached 81% (target 85%). `battery_pre_demand_window_reset` (2:55pm automation) errored silently — `rest_command` had failed to load at the June 1 HA restart due to a truncated payload. Reserve stuck at 80% all evening; battery couldn't discharge; grid covered cooking load at 7pm (~2.7 kW peak 30-min import). Fixed: Tessie API direct call + HA restart. **Agent pre-flight demand-window reserve guard now prevents recurrence** — drops reserve to 5% via Tessie directly at the start of every demand-window cycle, independent of HA.
