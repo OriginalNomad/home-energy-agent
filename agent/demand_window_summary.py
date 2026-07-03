@@ -28,6 +28,26 @@ from pathlib import Path
 import pytz
 import requests
 
+# Single source of truth for the demand-window bands / rate lives in
+# log_daily_energy.py so the JSONL writer and this publisher never drift.
+try:
+    from log_daily_energy import (
+        classify_demand, demand_cost_estimate, DEMAND_RATE_DOLLARS_PER_KW,
+    )
+except Exception:  # pragma: no cover - fallback if run in isolation
+    DEMAND_MARGINAL_KW, DEMAND_BREACH_KW = 0.50, 1.50
+    DEMAND_RATE_DOLLARS_PER_KW = 11.5479
+
+    def classify_demand(peak_kw: float) -> str:
+        if peak_kw >= DEMAND_BREACH_KW:
+            return "breach"
+        if peak_kw >= DEMAND_MARGINAL_KW:
+            return "marginal"
+        return "pass"
+
+    def demand_cost_estimate(peak_kw: float) -> float:
+        return round(max(peak_kw, 0.0) * DEMAND_RATE_DOLLARS_PER_KW, 2)
+
 # Load .env if present (same pattern as energy_agent.py)
 _env_file = Path(__file__).parent / ".env"
 if _env_file.exists():
@@ -76,32 +96,45 @@ def build_summary(records: list[dict]) -> dict:
     def dw(r):
         return r.get("demand_window") or {}
 
+    def status_of(r):
+        # Always classify from the billed 30-min-avg kW so old records (written
+        # before the three-way bands existed) are re-scored under current rules.
+        return classify_demand(dw(r).get("peak_30min_import_kw", 0.0) or 0.0)
+
     month_peaks = [dw(r).get("peak_30min_import_kw", 0) for r in records
                    if r.get("peak_day") and r.get("date", "").startswith(this_month)]
     month_peak_kw = round(max(month_peaks), 3) if month_peaks else 0.0
+    month_cost_est = demand_cost_estimate(month_peak_kw)
 
     peak_days = [r for r in recent if r.get("peak_day")]
-    days_passed = sum(1 for r in peak_days if dw(r).get("passed"))
-    days_failed = sum(1 for r in peak_days if dw(r).get("passed") is False)
+    days_passed   = sum(1 for r in peak_days if status_of(r) == "pass")
+    days_marginal = sum(1 for r in peak_days if status_of(r) == "marginal")
+    days_breached = sum(1 for r in peak_days if status_of(r) == "breach")
 
     last = records[-1] if records else {}
-    last_dw = dw(last)
-    last_status = ("pass" if last_dw.get("passed") else "fail") if last.get("peak_day") else "off-peak"
+    last_status = status_of(last) if last.get("peak_day") else "off-peak"
 
     days = [{
         "date": r["date"],
         "peak_day": r.get("peak_day", False),
-        "passed": dw(r).get("passed"),
+        "status": status_of(r) if r.get("peak_day") else None,
+        "passed": (status_of(r) == "pass") if r.get("peak_day") else None,
         "peak_kw": dw(r).get("peak_30min_import_kw", 0.0),
         "peak_at": dw(r).get("peak_at", ""),
+        "cost_est_dollars": demand_cost_estimate(dw(r).get("peak_30min_import_kw", 0.0) or 0.0)
+                            if r.get("peak_day") else None,
         "min_soc_pct": dw(r).get("min_soc_pct"),
     } for r in recent]
 
     return {
         "this_month": this_month,
         "this_month_peak_kw": month_peak_kw,
+        "this_month_cost_est_dollars": month_cost_est,
+        "demand_rate_dollars_per_kw": round(DEMAND_RATE_DOLLARS_PER_KW, 4),
         "days_passed": days_passed,
-        "days_failed": days_failed,
+        "days_marginal": days_marginal,
+        "days_failed": days_breached,   # kept as days_failed for card back-compat: breaches only
+        "days_breached": days_breached,
         "last_date": last.get("date"),
         "last_status": last_status,
         "days": days,
@@ -122,7 +155,9 @@ def post_to_ha(summary: dict) -> None:
                       json=body, timeout=15)
     r.raise_for_status()
     print(f"posted {ENTITY} = {summary['this_month_peak_kw']} kW "
-          f"({summary['days_passed']} passed / {summary['days_failed']} failed this window)")
+          f"(~${summary['this_month_cost_est_dollars']}/mo demand charge) — "
+          f"{summary['days_passed']} pass / {summary['days_marginal']} marginal / "
+          f"{summary['days_failed']} breach this window")
 
 
 def main() -> int:
