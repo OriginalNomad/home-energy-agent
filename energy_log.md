@@ -1188,3 +1188,44 @@ reserve (5%), mode (self_consumption) and battery discharge all behaved correctl
 default (`demand_window_summary.py:42`, `log_daily_energy.py:55`) and committed to the repo —
 worth rotating + moving to `.env`/`secrets.yaml`. Also still pending: `build_models.py` run on
 Pi (Phase 2.5-B activation), unchanged from session 16.
+
+
+## 2026-07-07 (session 18 — morning standup + survival-charge economics review)
+
+**Web session, no Pi access** — live logs (`decisions.jsonl`, `daily_energy.jsonl`,
+`energy_log.db`) are all Pi-only/gitignored, so the `/morning` three-way shadow analysis and
+daily-journal review could not be run from this checkout. Summary given from committed state
+only. Same constraint as session 17.
+
+**Standup flags (unchanged, still blocked on being home):**
+- `build_models.py` still not run on Pi → Phase 2.5-B (solar corrector + autonomous charge-rate
+  model) coded/pushed but inert; `model_params.json` still has no `solar_correction` and empty
+  `autonomous` bucket. Single highest-value blocked item.
+- Session-17 monitor re-banding not yet deployed on Pi (git pull → run `log_daily_energy.py` →
+  `demand_window_summary.py --post`).
+- Hardcoded HA bearer token still committed in `demand_window_summary.py:42` +
+  `log_daily_energy.py:55` — rotate + move to `.env`/`secrets.yaml`.
+
+**Live-incident discussion — 8am cycle: LLM narrative said "hold", system charged at 5% SoC.**
+- Clarified this is the expected Phase-6 layer split: LLM is narrative-only (`set_*` no-op'd);
+  `compute_decision_context()` is the control path. Not a control bug. Likely `rule_fired`:
+  `peak_solar_cover_survival` (`energy_agent.py:1564`) — battery at 5% floor, projected to hit
+  floor before the 10am Solar Sponge, and the `worth_waiting` break-even
+  (`forward_min ≤ price − 5.0`, Rule 25) failed because the upcoming window was <5¢ cheaper.
+  Confirm exact rule via `rule_fired` in `decisions.jsonl` when back at Pi.
+- Flagged a narrative-quality gap: the slimmed LLM prompt no longer describes the survival-floor
+  exception, so its commentary can contradict the control action on low-SoC peak mornings.
+  Deferred (user will fix prompt at home; must mirror in `energy_rules.md` per project rules).
+
+**Economics correction (user, agreed):** the code comment at `energy_agent.py:1551-1553`
+claiming charging now is "strictly cheaper" is wrong. Only the home-load draw during the drain
+is a wash; the ~10.8 kWh top-up (5%→85%) is timing-discretionary and buying it at ~20¢ vs a
+~10¢ sponge is a real ~$1 loss — worse in this branch because `peak_solar_cover_survival` only
+fires when `kwh_needed_85 <= 0` (net solar *forecast to cover* the gap), so it's buying energy
+solar would deliver ~free and then clipping/exporting that solar. Reframed the rule as
+**insurance against solar-forecast failure**, but that failure is arguably already caught by the
+downstream deadline escalators (`peak_deadline_autonomous`, `peak_sponge_go_hard`) — so the
+survival charge may be redundant over-caution. Logged as a design item in `todo.md`: consider
+holding (mirroring `peak_early_morning_hold`) in the solar-covered branch, and making the 5¢ gate
+scale with top-up size + forecast reliability rather than a flat threshold. No code changed —
+design review only, to be picked up at home.
