@@ -4,31 +4,36 @@
 
 ### Immediate — DO FIRST when back at home (next month)
 
-- [ ] **🐛 BUG — `solar_unreliable` throws away a good solar day on the morning ramp (control-path)**
-  **Observed live 2026-07-12** (~19% SoC, peak month, via `agent.sol.io`): battery grid-charging
-  at **14¢** on a genuine big-solar-day (`solcast ... remaining_today = 16.8 kWh`) instead of holding
-  for the ~6¢ Solar Sponge and going hard later.
-  **Root cause:** `_solar_accuracy()` (`energy_agent.py:2278`) compares *instantaneous* SolarEdge
-  output against the Solcast hourly forecast. On the morning ramp the panel lags (measured:
-  actual **114 W** vs Solcast power-now **1456 W** / this-hour **1167 Wh** → ratio ~9%), so it
-  returns `"unreliable"`. In `compute_decision_context()` that sets `solar_unreliable=True`
-  — guarded *only* by `now_h >= 9` (`:1395`) — which zeroes `expected_solar` (`:1427`), so
-  `kwh_needed_85` becomes the full ~8.9 kWh gap (`:1449`). The deadline maths then fires
-  `peak_charge_now` / `peak_deadline_autonomous`, and the wait-for-cheap branches
-  (`wait_for_cheap_go_hard` `:1594`, `peak_early_morning_hold` `:1606`) are bypassed. The 16.8 kWh
-  forecast plays no part.
-  **Why it's a bug, not just bad input:** `_detect_zero_solar()` (`:1163`) *already* guards this
-  correctly — ignores a near-zero reading before 10am when Solcast `remaining > 2 kWh`, and needs
-  2+ zero cycles. The accuracy-based path has none of that; a single ramp-lagged sample flips it.
-  **Impact:** usually transient (clears once panels catch the forecast) but wastes grid import at
-  peak-of-morning prices every marginal-looking morning, and at low SoC can escalate to autonomous
-  (5 kW) unnecessarily.
-  **Proposed fix:** give the accuracy path the same guard as `_detect_zero_solar` — don't treat
-  `poor`/`unreliable` as decisive while `remaining_today` is still healthy (e.g. `> 2 kWh`) during
-  the ramp, and/or require the low reading to persist 2+ cycles before zeroing the forecast.
-  **Test to add:** 19% SoC, ~9:30am peak month, actual 0.11 kW, Solcast remaining 16.8 kWh,
-  price 14¢ with 6¢ ahead → expect **hold**, not charge.
-  **Confirm on Pi:** pull this cycle's `rule_fired` + `forecast_accuracy` from `decisions.jsonl`.
+- [ ] **🐛 BUG — the `now_h >= 9` solar-unreliable guard is a cliff: a good solar day gets thrown
+  away the moment the clock passes 9am if the panel is still ramping (control-path)**
+  **Observed live 2026-07-12** (peak month, via `agent.sol.io` + the 08:30 agent narrative):
+  20% SoC, 8:30am, `remaining_today = 17.1 kWh` (genuine big-solar-day), actual output **0.09 kW**
+  vs Solcast this-hour **1.18 kW** → `_solar_accuracy()` returns **"unreliable"** (8% of forecast).
+  **At 08:30 the agent HELD correctly** (rule `peak_solar_will_cover`, cleared reserve 20%→5%) —
+  *only* because `now_h < 9` keeps `solar_unreliable = False` despite the "unreliable" string.
+  (The 14¢ charging the user first saw was separate: reserve sitting at the 20% floor while SoC was
+  19–20%, so the Powerwall trickled from grid to hold the floor — "hold ≠ arming". The 08:30 hold
+  cleared it.)
+  **The defect:** `solar_unreliable = (accuracy in ("poor","unreliable") and now_h >= 9) or
+  zero_solar_day` (`energy_agent.py:1395`) flips as a **step function at exactly 9:00am**. With the
+  accuracy string *already* "unreliable" at 08:30, the **09:00/09:30 cycle** — same 20% SoC, same
+  17 kWh forecast, if the panel is still lagging — will set `solar_unreliable=True`, zero
+  `expected_solar` (`:1427`), make `kwh_needed_85` the full ~8.8 kWh gap (`:1449`), and fire a grid
+  charge (`peak_charge_now` / `peak_deadline_autonomous`), bypassing the wait-for-cheap branches
+  (`wait_for_cheap_go_hard` `:1594`, `peak_early_morning_hold` `:1606`). Flat 6–13¢ prices made it
+  low-harm *today*, but on a higher-priced slow-ramp morning it's a real, repeatable cost.
+  **Why it's a bug, not just bad input:** `_detect_zero_solar()` (`:1163`) already guards this
+  correctly — ignores near-zero output before 10am while Solcast `remaining > 2 kWh`, and needs 2+
+  zero cycles. The accuracy path has neither guard: one ramp-lagged sample at/after 9am flips it.
+  **Proposed fix:** give the accuracy path the same protection — don't treat `poor`/`unreliable` as
+  decisive while `remaining_today` is still healthy (e.g. `> 2 kWh`) and it's early ramp (before
+  ~10–10:30am), and/or require the low reading to persist 2+ cycles before zeroing the forecast.
+  Smooth the 9am cliff rather than hard-gating on it.
+  **Test to add:** 20% SoC, **9:30am** peak month, actual 0.09 kW, Solcast remaining 17 kWh,
+  prices flat 6–13¢ → expect **hold** (`peak_solar_will_cover`), not charge. Add a matched 08:30
+  case that already passes, to lock the boundary behaviour.
+  **Confirm on Pi:** pull the 09:00 + 09:30 `rule_fired` + `forecast_accuracy` from `decisions.jsonl`
+  to see whether the cliff actually bit today once the guard opened.
 
 - [ ] **Run `build_models.py` on Pi** — Phase 2.5-B is implemented and pushed but model_params.json needs to be rebuilt from live data to activate the solar corrector and autonomous charge rate model. SSH into Pi and run:
   ```bash

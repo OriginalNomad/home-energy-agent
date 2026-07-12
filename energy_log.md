@@ -1227,3 +1227,14 @@ confirmed. No code changed to the control path.
 token still committed in `demand_window_summary.py:42` + `log_daily_energy.py:55` (rotate + move to
 env). Three-way decision analysis + daily-journal schema review could not run — `decisions.jsonl` /
 `daily_energy.jsonl` are gitignored (Pi-only).
+
+**Correction (same session, after seeing the 08:30 agent narrative):** my mid-session claim that
+the accuracy bug was *actively firing* was wrong. The 08:30 cycle **held correctly**
+(`peak_solar_will_cover`, cleared reserve 20%→5%) — the `now_h < 9` guard kept `solar_unreliable`
+False even though the accuracy string was already "unreliable" (0.09 kW actual vs 1.18 kW Solcast).
+The earlier 14¢ charging was the reserve floor (20%) vs SoC 19–20% trickle-charging to hold the
+floor ("hold ≠ arming"), which the 08:30 hold cleared. **Refined the bug**: the real defect is that
+`solar_unreliable`'s `now_h >= 9` guard (`:1395`) is a *step function* — with the accuracy string
+already "unreliable" pre-9am, the 09:00/09:30 cycle can flip it True on the same SoC/forecast and
+zero a genuine 17 kWh solar day. Today it was low-harm (flat 6–13¢ prices). `todo.md` entry rewritten
+to frame it as the "9am guard cliff" with a boundary-pair test (08:30 holds / 09:30 must also hold).
