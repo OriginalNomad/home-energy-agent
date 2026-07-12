@@ -1188,3 +1188,42 @@ reserve (5%), mode (self_consumption) and battery discharge all behaved correctl
 default (`demand_window_summary.py:42`, `log_daily_energy.py:55`) and committed to the repo —
 worth rotating + moving to `.env`/`secrets.yaml`. Also still pending: `build_models.py` run on
 Pi (Phase 2.5-B activation), unchanged from session 16.
+
+## 2026-07-12 (session 18 — morning standup + live diagnosis of 14¢ charge on a solar day)
+
+**Web session, no Pi/SSH access** (VPN/Terminus couldn't reach the Pi — likely `.local`
+resolution or split-tunnel; `agent.sol.io` tunnel loaded fine). Diagnosis done from live HA
+sensor reads via `agent.sol.io` + code trace.
+
+**Symptom (user-reported, confirmed live):** battery grid-charging at **14¢** at **19% SoC**,
+peak month, on a day the user knew was a big-solar day — instead of holding for the ~6¢ Solar
+Sponge and going hard later. User's instinct (wait → reassess at noon → go hard if still short)
+matches the system's *intended* behaviour (`peak_early_morning_hold` / `wait_for_cheap_go_hard`).
+
+**Live values pulled from `agent.sol.io` States:**
+- `sensor.tessie_powerwall_charge` = **19%**
+- `sensor.solcast_pv_forecast_forecast_remaining_today` = **16.8 kWh** (genuine big-solar-day)
+- `sensor.solaredge_current_power` = **114 W** (0.11 kW — morning-ramp signature)
+- Solcast `power_now` = **1456 W**, `forecast_this_hour` = **1167 Wh**
+
+**Root cause (identified, not yet fixed):** `_solar_accuracy()` (`energy_agent.py:2278`) compares
+instantaneous inverter output vs the Solcast hourly forecast → ratio ~9% (0.11/1.17) → returns
+`"unreliable"`. That flips `solar_unreliable=True` in `compute_decision_context()` (guarded only by
+`now_h >= 9`, `:1395`), which zeroes `expected_solar` (`:1427`). At 19% SoC that makes
+`kwh_needed_85` the full ~8.9 kWh gap, so the peak deadline maths fires a grid charge and bypasses
+the wait-for-cheap branches. The 16.8 kWh forecast is discarded on a *single* ramp-lagged sample.
+Contrast `_detect_zero_solar()` (`:1163`), which is properly guarded (ignores pre-10am near-zero
+while Solcast remaining > 2 kWh; needs 2+ zero cycles). The accuracy path lacks that symmetry.
+
+**Status:** likely a transient false-negative (clears as panels catch the forecast) but wastes
+peak-of-morning grid import and can over-escalate to autonomous at low SoC. Logged as a **control-path
+bug in `todo.md`** (DO-FIRST section) with proposed fix (mirror the `_detect_zero_solar` guard on the
+accuracy path + require persistence) and a unit-test spec. Not patched this session — deferred until
+home/Pi access so the fix can be validated against live `decisions.jsonl` and the exact `rule_fired`
+confirmed. No code changed to the control path.
+
+**Standup also flagged (unchanged):** `build_models.py` still not run on Pi (Phase 2.5-B dormant —
+`model_params.json` still 17-day self_consumption only, no `solar_correction`); hardcoded HA bearer
+token still committed in `demand_window_summary.py:42` + `log_daily_energy.py:55` (rotate + move to
+env). Three-way decision analysis + daily-journal schema review could not run — `decisions.jsonl` /
+`daily_energy.jsonl` are gitignored (Pi-only).
