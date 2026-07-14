@@ -34,6 +34,17 @@
   case that already passes, to lock the boundary behaviour.
   **Confirm on Pi:** pull the 09:00 + 09:30 `rule_fired` + `forecast_accuracy` from `decisions.jsonl`
   to see whether the cliff actually bit today once the guard opened.
+  **Live manifestation later the same day (2026-07-12):** the cliff appears to have bitten — battery
+  went 20% (08:30 hold) → **99% via `autonomous` grid-charge**, i.e. ~8 kWh pulled from grid on a
+  17 kWh solar day the sun would have covered for free. Then it got **stranded in autonomous at 99%**:
+  (a) a `hold` verdict carries `mode=None` so the agent never reverts autonomous→self_consumption, and
+  (b) `battery_autonomous_revert_target_reached` did not fire. Because `autonomous` runs with
+  `reserve=100%` (the export guard suppresses grid export below the Zappi's ~1.44 kW floor), a
+  plugged-in EV in **Eco+ got no surplus** — solar was exporting/curtailing instead of charging the
+  car. Manually switching the Powerwall to Self-Powered fixed the EV immediately. **Two follow-on
+  items this exposed:** (1) make a `hold` verdict revert a stale `autonomous` mode to self_consumption
+  when `soc >= target` (don't rely solely on the HA revert automation); (2) verify
+  `battery_autonomous_revert_target_reached` is actually enabled in the HA UI.
 
 - [ ] **Run `build_models.py` on Pi** — Phase 2.5-B is implemented and pushed but model_params.json needs to be rebuilt from live data to activate the solar corrector and autonomous charge rate model. SSH into Pi and run:
   ```bash

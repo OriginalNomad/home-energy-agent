@@ -1238,3 +1238,16 @@ floor ("hold ≠ arming"), which the 08:30 hold cleared. **Refined the bug**: th
 already "unreliable" pre-9am, the 09:00/09:30 cycle can flip it True on the same SoC/forecast and
 zero a genuine 17 kWh solar day. Today it was low-harm (flat 6–13¢ prices). `todo.md` entry rewritten
 to frame it as the "9am guard cliff" with a boundary-pair test (08:30 holds / 09:30 must also hold).
+
+**Later same day — the cliff bit, and it stranded the battery in autonomous:** battery went
+20% (08:30 hold) → **99% via autonomous grid-charge** (~8 kWh from grid on a 17 kWh solar day),
+consistent with `peak_deadline_autonomous` firing at the 09:00/09:30 cycle once the `now_h>=9`
+guard opened and zeroed the solar. It then sat stranded in `autonomous`/`reserve=100%` at 99%
+because a `hold` verdict doesn't revert mode and `battery_autonomous_revert_target_reached` didn't
+fire. Side-effect: plugged-in EV in **Eco+ got no solar surplus** — reserve=100% (export guard)
+regulates export below the Zappi's ~1.44 kW floor, so incoming solar exported/curtailed instead of
+charging the car. Manually switching the Powerwall to Self-Powered restored EV solar charging
+immediately. Added two follow-on items to the bug entry: (1) `hold` should revert a stale
+`autonomous` mode to self_consumption when `soc >= target`; (2) verify
+`battery_autonomous_revert_target_reached` is enabled in the HA UI. Still no control-path code
+changed this session — all deferred to home/Pi.
