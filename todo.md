@@ -4,8 +4,37 @@
 
 ### Immediate — DO FIRST when back at home (next month)
 
-- [ ] **🐛 BUG — the `now_h >= 9` solar-unreliable guard is a cliff: a good solar day gets thrown
-  away the moment the clock passes 9am if the panel is still ramping (control-path)**
+> **📋 HOME UNPACK CHECKLIST (early next week)** — ordered; details for each are in the entries below.
+>
+> **A. Patches (code — review → `python agent/test_decision.py` → deploy):**
+> 1. **[DRAFTED]** Cliff-guard patch — on branch `claude/morning-standup-arsr82`, **113 tests green**.
+>    Review the diff to `energy_agent.py` + `test_decision.py` + `energy_rules.md`, run the tests,
+>    merge to `main`, then `git pull` on the Pi. *This is the fix for the morning grid-charge you've
+>    been seeing — it stops the 9am cliff. Highest value.*
+> 2. **[NOT YET WRITTEN]** "hold reverts stale autonomous" patch — make a `hold` verdict switch a
+>    stranded `autonomous` mode back to `self_consumption` when `soc >= target`, so a full battery
+>    can't sit in reserve=100% starving the EV (today's second bug). Ask me to draft it.
+> 3. Verify **`battery_autonomous_revert_target_reached`** is actually enabled in the HA UI — it
+>    didn't fire on 2026-07-12.
+>
+> **B. Pi / data (need SSH or on-LAN access):**
+> 4. **Run `build_models.py`** — populate `solar_correction` + autonomous charge rate.
+>    ⚠️ NB: this only feeds the *shadow* LP (`optimizer.py`), **not** the control path — it does
+>    *not* by itself fix the morning grid-charge (patch A1 does). It's the prerequisite for the
+>    eventual LP-to-control cutover.
+> 5. **Rotate the hardcoded HA bearer token** committed in `demand_window_summary.py:42` +
+>    `log_daily_energy.py:55` → move to `.env`/`secrets.yaml`. (Secret in git — do early.)
+> 6. **Deploy the Jul-3 demand re-banding**: `git pull` → run `log_daily_energy.py` →
+>    `demand_window_summary.py --post` (crons pick it up otherwise).
+> 7. **Pull recent `decisions.jsonl` + `daily_energy.jsonl`** back to a synced location (or paste me
+>    a slice) so the **three-way decision analysis** and **daily-journal schema review** can finally
+>    run — both have been blocked in every web session (files are gitignored, Pi-only).
+> 8. Confirm the **09:00/09:30 rule_fired for 2026-07-12** to prove the cliff bit (see A1 entry).
+> 9. Verify **HA slider values** (below).
+
+- [~] **🐛 BUG (FIX DRAFTED — on branch `claude/morning-standup-arsr82`, 113 decision tests green;
+  needs review + deploy) — the `now_h >= 9` solar-unreliable guard is a cliff: a good solar day gets
+  thrown away the moment the clock passes 9am if the panel is still ramping (control-path)**
   **Observed live 2026-07-12** (peak month, via `agent.sol.io` + the 08:30 agent narrative):
   20% SoC, 8:30am, `remaining_today = 17.1 kWh` (genuine big-solar-day), actual output **0.09 kW**
   vs Solcast this-hour **1.18 kW** → `_solar_accuracy()` returns **"unreliable"** (8% of forecast).
@@ -25,15 +54,20 @@
   **Why it's a bug, not just bad input:** `_detect_zero_solar()` (`:1163`) already guards this
   correctly — ignores near-zero output before 10am while Solcast `remaining > 2 kWh`, and needs 2+
   zero cycles. The accuracy path has neither guard: one ramp-lagged sample at/after 9am flips it.
-  **Proposed fix:** give the accuracy path the same protection — don't treat `poor`/`unreliable` as
-  decisive while `remaining_today` is still healthy (e.g. `> 2 kWh`) and it's early ramp (before
-  ~10–10:30am), and/or require the low reading to persist 2+ cycles before zeroing the forecast.
-  Smooth the 9am cliff rather than hard-gating on it.
-  **Test to add:** 20% SoC, **9:30am** peak month, actual 0.09 kW, Solcast remaining 17 kWh,
-  prices flat 6–13¢ → expect **hold** (`peak_solar_will_cover`), not charge. Add a matched 08:30
-  case that already passes, to lock the boundary behaviour.
+  **Fix (DRAFTED 2026-07-15):** added a morning-ramp guard in `compute_decision_context()` — during
+  `SOLAR_START_HOUR ≤ now < SOLAR_RAMP_SETTLE_HOUR (10.0)`, a `poor`/`unreliable` reading no longer
+  flips `solar_unreliable` while `remaining_today > SOLAR_HEALTHY_REMAINING_KWH (2.0)`. Mirrors the
+  pre-10am guard `_detect_zero_solar` already has, so the two solar-distrust paths agree. New consts
+  by `SOLAR_START_HOUR`; logic replaces the old one-line `solar_unreliable` assignment (~`:1395`).
+  Documented in `energy_rules.md` (Rule 11 "Morning-ramp guard"). **Tests added:**
+  `test_solar_unreliable_ramp_guard_holds_good_solar_day` (the live 9:30am repro → holds),
+  `_expires_after_settle` (10:30 still escalates), `_not_when_remaining_low` (≤2 kWh → still trusts
+  the unreliable label). Full suite **113 passed, 0 failed**.
+  **At home:** review the diff, run `python agent/test_decision.py`, then deploy. *Tuning:* if the
+  flat roof still ramps past 10am in winter, nudge `SOLAR_RAMP_SETTLE_HOUR` → ~10.5 (and update
+  `test_solar_unreliable_after_9am`, which pins the 10:00 boundary).
   **Confirm on Pi:** pull the 09:00 + 09:30 `rule_fired` + `forecast_accuracy` from `decisions.jsonl`
-  to see whether the cliff actually bit today once the guard opened.
+  to verify the cliff actually bit on 2026-07-12 (expected: `peak_deadline_autonomous` once past 9am).
   **Live manifestation later the same day (2026-07-12):** the cliff appears to have bitten — battery
   went 20% (08:30 hold) → **99% via `autonomous` grid-charge**, i.e. ~8 kWh pulled from grid on a
   17 kWh solar day the sun would have covered for free. Then it got **stranded in autonomous at 99%**:

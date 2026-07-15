@@ -1159,6 +1159,13 @@ def _detect_sliding_forecast(recent_records: list[dict], current_price: float,
 
 
 SOLAR_START_HOUR = 9  # flat roof in Sydney: panels don't produce meaningfully before ~9am
+# Morning-ramp settle hour: by this time the flat roof has ramped, so a low actual-vs-Solcast
+# reading after it is a genuine bad-solar signal, not ramp lag. Kept equal to the
+# _detect_zero_solar pre-10am guard boundary for consistency (single implicit source of truth).
+SOLAR_RAMP_SETTLE_HOUR      = 10.0
+# Solcast remaining_today above this (kWh) is a forecast worth protecting from a single
+# ramp-lagged accuracy reading — don't discard a healthy solar day on one low sample.
+SOLAR_HEALTHY_REMAINING_KWH = 2.0
 
 def _detect_zero_solar(recent_records: list[dict], current_solar_kw: float,
                        now_h: float, sensor_unavailable: bool = False,
@@ -1392,7 +1399,19 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     # Accuracy-based unreliability only valid from SOLAR_START_HOUR — before then,
     # Solcast forecasts >0 but panels haven't started yet (low sun angle, flat roof).
     # zero_solar_day has its own time guard via _detect_zero_solar.
-    solar_unreliable  = (accuracy in ("poor", "unreliable") and now_h >= SOLAR_START_HOUR) or zero_solar_day
+    _accuracy_unreliable = accuracy in ("poor", "unreliable") and now_h >= SOLAR_START_HOUR
+    # Morning-ramp guard (mirrors _detect_zero_solar's pre-10am guard): during the ramp window
+    # a single low actual-vs-Solcast reading is ramp lag, not a bad-solar day — the flat roof
+    # under-produces vs the hourly forecast until the sun is properly up. Don't discard a
+    # still-healthy remaining_today forecast on that evidence alone; wait until the ramp has
+    # settled (SOLAR_RAMP_SETTLE_HOUR) before trusting the "unreliable" label. Without this, a
+    # 9:00–9:30 sample (0.1 kW actual vs ~1.5 kW Solcast) zeroed a genuine 17 kWh solar day and
+    # drove a needless autonomous grid-charge to 85% — the "9am cliff" (energy_log 2026-07-15).
+    if (_accuracy_unreliable
+            and now_h < SOLAR_RAMP_SETTLE_HOUR
+            and remaining > SOLAR_HEALTHY_REMAINING_KWH):
+        _accuracy_unreliable = False
+    solar_unreliable = _accuracy_unreliable or zero_solar_day
 
     # Confidence factor for solar forecast
     confidence_factor = {"good": 1.0, "poor": 0.5, "unreliable": 0.0, "na": 1.0}.get(accuracy, 1.0)

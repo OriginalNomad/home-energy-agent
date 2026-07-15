@@ -1251,3 +1251,32 @@ immediately. Added two follow-on items to the bug entry: (1) `hold` should rever
 `autonomous` mode to self_consumption when `soc >= target`; (2) verify
 `battery_autonomous_revert_target_reached` is enabled in the HA UI. Still no control-path code
 changed this session — all deferred to home/Pi.
+
+## 2026-07-15 (session 18 cont. — morning-ramp guard patch drafted for the 9am cliff)
+
+**Recurring symptom (2026-07-15, another day):** agent grid-charging in the morning on a good solar
+day; by noon the battery is full with solar still producing → forced export into negative afternoon
+prices. Same root cause as 2026-07-12: the `now_h >= 9` accuracy-`solar_unreliable` cliff.
+
+**Verified the model rebuild is NOT the fix for this:** `grep` confirms `solar_correction` is used
+only in `optimizer.py` (shadow LP) — `compute_decision_context()` (the control layer) reads raw
+`remaining` gated by the binary `solar_unreliable` flag. So `build_models.py` improves only the
+shadow layer; the direct fix is the code change below.
+
+**Patch DRAFTED (branch `claude/morning-standup-arsr82`, not yet on Pi):**
+- `energy_agent.py`: new consts `SOLAR_RAMP_SETTLE_HOUR = 10.0`, `SOLAR_HEALTHY_REMAINING_KWH = 2.0`.
+  Replaced the one-line `solar_unreliable` assignment with a morning-ramp guard: during
+  `9 ≤ now < 10`, a `poor`/`unreliable` accuracy reading no longer flips `solar_unreliable` while
+  `remaining_today > 2 kWh`. Mirrors the pre-10am guard `_detect_zero_solar` already has.
+- `test_decision.py`: +3 tests (`test_solar_unreliable_ramp_guard_*`) — the 9:30am live repro holds
+  (`peak_solar_will_cover`), 10:30 still escalates, `remaining ≤ 2 kWh` still trusts the label.
+  **Suite: 113 passed, 0 failed** (was 109/110). Optimizer suite unchanged: 12 passed.
+- `energy_rules.md`: Rule 11 "Morning-ramp guard" documents the fix + the `SOLAR_RAMP_SETTLE_HOUR`
+  tuning note.
+- `todo.md`: bug marked DRAFTED; added a 9-item "HOME UNPACK CHECKLIST" (patches A1–A3 + Pi/data
+  items 4–9) so next week's on-LAN session has a clear ordered list.
+
+**Still to write (not drafted):** the "hold reverts stale autonomous" patch (today's second bug —
+full battery stranded in autonomous/reserve=100% starving the EV). Deferred; flagged in the checklist.
+No code deployed this session — all on the branch for review + `test_decision.py` before it touches
+the Pi.

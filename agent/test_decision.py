@@ -648,6 +648,39 @@ def test_solar_unreliable_after_9am():
           ctx["solar_unreliable"])
 
 
+def test_solar_unreliable_ramp_guard_holds_good_solar_day():
+    # The "9am cliff" repro (energy_log 2026-07-15): 20% SoC, 9:30am peak month, panel still
+    # ramping (0.09 kW actual → Solcast-vs-actual flags "unreliable"), but 17 kWh still forecast
+    # for the day. The morning-ramp guard must keep solar TRUSTED so the agent HOLDS rather than
+    # zeroing the forecast and grid-charging to 85%.
+    state = mk_state(20, 9, accuracy="unreliable", solar_kw=0.09, remaining=17.0, price=13)
+    ctx = ea.compute_decision_context(
+        state, fc([13, 12, 11, 10, 8, 6, 6, 6, 8, 10]), [], now_at(9, 30))
+    check("ramp guard: solar_unreliable False at 9:30 with healthy remaining",
+          ctx["solar_unreliable"] is False, ctx["solar_unreliable"])
+    check("ramp guard: holds (peak_solar_will_cover), does not grid-charge",
+          ctx["recommended"]["rule_fired"] == "peak_solar_will_cover", ctx["recommended"])
+
+
+def test_solar_unreliable_ramp_guard_expires_after_settle():
+    # After SOLAR_RAMP_SETTLE_HOUR a sustained low reading IS a bad-solar day — the guard must
+    # NOT suppress it, even with a healthy-looking remaining forecast. 10:30am, still 0.1 kW.
+    state = mk_state(40, 10, accuracy="unreliable", solar_kw=0.1, remaining=8.0, price=16)
+    ctx = ea.compute_decision_context(state, flat(16), [], now_at(10, 30))
+    check("ramp guard expires: solar_unreliable True at 10:30",
+          ctx["solar_unreliable"] is True, ctx["solar_unreliable"])
+
+
+def test_solar_unreliable_ramp_guard_not_when_remaining_low():
+    # In the ramp window, but Solcast itself forecasts almost nothing left (1 kWh) — there is no
+    # healthy forecast to protect, so a poor/unreliable reading should still count.
+    state = mk_state(30, 9, accuracy="unreliable", solar_kw=0.1, remaining=1.0,
+                     is_peak=False, grid_target=30, price=13)
+    ctx = ea.compute_decision_context(state, flat(13), [], now_at(9, 30))
+    check("ramp guard skipped when remaining <= 2 kWh",
+          ctx["solar_unreliable"] is True, ctx["solar_unreliable"])
+
+
 def make_sliding_records(n, price, forward_min):
     """Build n recent records where cheap window was forecast but never arrived."""
     return [{"actions": [], "price_c": price,
@@ -789,6 +822,9 @@ if __name__ == "__main__":
                test_ev_battery_full_solar_absorb_not_when_no_solar,
                test_ev_battery_full_solar_absorb_not_when_battery_not_full,
                test_solar_unreliable_not_before_9am, test_solar_unreliable_after_9am,
+               test_solar_unreliable_ramp_guard_holds_good_solar_day,
+               test_solar_unreliable_ramp_guard_expires_after_settle,
+               test_solar_unreliable_ramp_guard_not_when_remaining_low,
                test_nonpeak_solar_unreliable_escalates_autonomous,
                test_nonpeak_solar_good_stays_selfcons,
                test_sliding_forecast_fires, test_sliding_forecast_not_enough_cycles,
