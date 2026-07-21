@@ -1,5 +1,34 @@
 # Energy System Control Log
 
+## 2026-07-22 (session 17 — LP optimiser was blind to SoC for 7 weeks)
+
+**Found via `/morning` three-way analysis.** `optimizer_context.soc_now_pct` was **50.0 on all 196 recent cycles** while real SoC ranged 4–95%. Not a tuning artefact — the LP never saw the battery.
+
+**Root cause**: `optimize_battery()` read `state.get("soc_pct", state.get("soc", 50.0))`, but `energy_agent.py` passes the full state dict, where SoC lives at `state["battery"]["soc_pct"]`. Neither top-level key existed, so it silently took the 50.0 default every cycle from the 2026-06-01 wire-in until today. `is_peak_month`, `home_load_kw` and `solar_unreliable` are all genuinely top-level, so only SoC was affected — and only SoC had a plausible-looking default that never raised.
+
+**Why the 12 unit tests never caught it**: they construct a *flat* state dict (`{"soc_pct": 40, ...}`), which is not the shape production passes. The tests and the call site disagreed about the contract and nothing checked.
+
+**This explains the divergence pattern exactly:**
+- 13× `peak_deadline_autonomous` → `mpc_hold`: Jul 21 09:00, real SoC **8%**, LP assumed 50% → saw no urgency and held on a peak day with unreliable solar.
+- 7× `target_met` → `mpc_charge_grid`: Jul 21 14:00, real SoC **87%**, LP assumed 50% → proposed charging *to 73%*, below where the battery already sat. Incoherent output, same cause.
+
+**Fix (two parts):**
+1. `energy_agent.py` now flattens SoC explicitly before the call: `_opt_state["soc_pct"] = (_opt_state.get("battery") or {}).get("soc_pct")`.
+2. `optimizer.py` gained `_require_soc_pct()`, which reads top-level `soc_pct`/`soc` and **raises `ValueError` if absent** rather than defaulting. The caller's try/except logs the failure and skips the shadow verdict — recording no verdict is strictly better than recording a confident one computed from a fictional battery.
+
+**Tests**: 4 regression tests added (nested state raises, absent state raises, LP distinguishes 8% from 95%, reports real SoC). 16 optimizer + 109 decision = **125 pass**.
+
+**Consequence — prior LP conclusions are void.** Every three-way divergence finding from 2026-06-01 to today was computed against a constant-SoC solver:
+- The `todo.md` blocker "LP defers to cheapest slot; det charges at first acceptable slot" was never validated.
+- Session 13's "divergences predominantly cause (c), LP trusts the Solcast point forecast" does not hold.
+- The 2026-06-23 `solar_unreliable` LP fix was tuned against corrupted comparisons — it is probably still correct on its own merits, but it was not the cause of the divergences it was credited with fixing.
+
+**Phase 4 divergence clock restarts today.** Need a fresh week of clean three-way data before the LP-to-control-path question is discussable.
+
+**First clean observation**: with real SoC wired in, at 33% SoC / peak month / zero solar / flat 12¢, the LP holds for 4.5h then charges 33%→55% immediately before the demand window — economically indifferent under flat prices, but it takes *zero* margin against forecast error. That is a genuine cause-(c) robustness question (the `risk` knob / conservative solar quantile), and now for the first time it is actually measurable.
+
+---
+
 ## 2026-06-27 (session 16b — remote access, overseas)
 
 **Remote access attempt**: tried SSH to Pi (192.168.0.67) from iPad via Terminus while overseas on home VPN. VPN only routes 192.168.68.0/24 (TNAS/Mac subnet); Pi is on 192.168.0.x — unreachable directly. TNAS jump host attempt failed: Pi uses key-only SSH auth, key lives on Mac. Mac Studio (192.168.68.70) would work as jump host but Remote Login status unknown. Deferred to next month when back home.

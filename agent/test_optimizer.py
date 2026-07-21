@@ -152,5 +152,41 @@ traj_ext = r_ext.get("soc_trajectory_pct") or []
 check("  ...extended horizon lifts SoC meaningfully",
       len(traj_ext) > 12 and traj_ext[11] > 30 + 10, traj_ext[:14])
 
+# 13. Regression — SoC must never silently default.
+# From 2026-06-01 to 2026-07-22 optimize_battery() read
+#   state.get("soc_pct", state.get("soc", 50.0))
+# while energy_agent.py passed SoC nested under state["battery"]["soc_pct"].
+# The LP therefore ran on a constant 50% for ~2000 shadow cycles. These tests
+# pin the contract: a flat dict works, a nested one raises rather than guessing.
+pf_reg = _prices([6, 6, 6, 7, 18, 19, 20, 21])
+
+nested_state = {"battery": {"soc_pct": 8}, "is_peak_month": True, "home_load_kw": 0.5}
+try:
+    optimize_battery(nested_state, pf_reg, _flat_solar(pf_reg), now)
+    check("nested SoC raises instead of defaulting to 50%", False,
+          "no exception — the 2026-06/07 blind-LP bug has regressed")
+except ValueError as exc:
+    check("nested SoC raises instead of defaulting to 50%", "soc_pct" in str(exc))
+
+try:
+    optimize_battery({"is_peak_month": True}, pf_reg, _flat_solar(pf_reg), now)
+    check("absent SoC raises instead of defaulting to 50%", False, "no exception")
+except ValueError:
+    check("absent SoC raises instead of defaulting to 50%", True)
+
+# The LP must actually respond to SoC — a near-empty peak-month battery and a
+# near-full one cannot produce the same verdict.
+low  = optimize_battery({"soc_pct": 8,  "is_peak_month": True, "home_load_kw": 0.5},
+                        pf_reg, _flat_solar(pf_reg), now)
+high = optimize_battery({"soc_pct": 95, "is_peak_month": True, "home_load_kw": 0.5},
+                        pf_reg, _flat_solar(pf_reg), now)
+check("  ...LP distinguishes 8% from 95% SoC",
+      low["verdict"]["action"] != high["verdict"]["action"]
+      or (low.get("grid_charge_now_kw") or 0) > (high.get("grid_charge_now_kw") or 0),
+      f"low={low['verdict']} high={high['verdict']}")
+check("  ...and reports the real SoC, not 50%",
+      low.get("soc_now_pct") == 8 and high.get("soc_now_pct") == 95,
+      f"low={low.get('soc_now_pct')} high={high.get('soc_now_pct')}")
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

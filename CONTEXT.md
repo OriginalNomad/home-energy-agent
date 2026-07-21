@@ -325,6 +325,8 @@ Key agent capabilities added 2026-05-29:
 
 **HA automation YAML vs UI discrepancy**: automations.yaml has no `enabled: false` entries — all 21 battery automations show as enabled in the file. HA UI enable/disable state is stored separately in HA's internal storage. Confirmed via HA UI: `battery_winter_overnight_precharge` and `battery_cloudy_day_topup` are disabled. The other 10 "agent handles" automations need verification in HA UI. Most critical to confirm disabled: `battery_cheap_window_autonomous_charge` (sets reserve=100% when Amber cheap window opens).
 
+**LP was blind to SoC — fixed 2026-07-22.** From its 2026-06-01 wire-in until 2026-07-22 the LP received a hardcoded **50% SoC** on every cycle (`optimize_battery()` read a top-level `soc_pct`; `energy_agent.py` passes it nested under `state["battery"]`, so the default fired every time). **All three-way divergence analysis before 2026-07-22 is void** — including the "LP defers to cheapest slot" blocker and session 13's "cause (c)" conclusion. Fixed at the call site; `_require_soc_pct()` now raises instead of defaulting. Phase 4 divergence clock restarted 2026-07-22 — a fresh week of clean data is needed before the LP-to-control question can be reopened.
+
 **LP solar correction gap (Phase 2.5-B)** — `optimizer.py` now applies per-hour Solcast bias correction from `model_params.json`, but `solar_correction` is not yet populated (build_models.py hasn't been run on the Pi). LP also now uses autonomous charge rate model from `model_params.json`, but `autonomous` bucket is empty. Both activate once `build_models.py` is run at home. Expected impact: LP will stop over-trusting Solcast on winter mornings and hold less aggressively during peak pre-charge.
 
 **Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
@@ -335,7 +337,8 @@ Key agent capabilities added 2026-05-29:
 - Does overnight_hold (Rule 20) prevent high-price overnight charging each night?
 - Does agent correctly escalate to autonomous on a cloudy peak morning?
 - Does `battery_autonomous_export_safety_net` catch any misbehaviour within 30s?
-- **Three-way shadow**: does the LP (once horizon is fixed) agree with LLM+rules on peak-day pre-charge decisions? Review via `/morning`.
+- **Three-way shadow**: now that the LP actually sees SoC (fixed 2026-07-22), does it agree with the rule layer on peak-day pre-charge decisions? Review via `/morning`. Note LLM↔det is tautologically 100% since the Phase 5 cutover — the only real signal is LP↔det.
+- **LP timing margin**: under flat prices the LP defers charging to the last feasible slot with no buffer against forecast error. Watch whether the `risk` knob / a conservative solar quantile is needed.
 
 ---
 

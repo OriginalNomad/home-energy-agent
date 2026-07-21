@@ -2139,6 +2139,11 @@ def run_agent(dry_run: bool = False):
                 # deterministic layer correctly charged — all divergences were this bug).
                 _det_ctx = _cycle_context.get("decision_context") or {}
                 _opt_state["solar_unreliable"] = _det_ctx.get("solar_unreliable", False)
+                # Flatten SoC to the top level — optimize_battery() expects a flat
+                # state dict and has no knowledge of our nested "battery" sub-dict.
+                # Without this the LP ran on a hardcoded 50% default for every cycle
+                # from its 2026-06-01 wire-in to 2026-07-22 (fixed 2026-07-22).
+                _opt_state["soc_pct"] = (_opt_state.get("battery") or {}).get("soc_pct")
                 # Extend the ~6h Amber forecast with synthetic historical prices so the LP
                 # can see the 15:00–21:00 demand-window block and apply its demand_penalty.
                 _hourly_model = _build_hourly_price_model()

@@ -137,6 +137,29 @@ def _build_solar_series(price_forecast, solar_forecast, n, fallback_kw,
 
 # ───────────────────────────── core LP ─────────────────────────────
 
+def _require_soc_pct(state: dict) -> float:
+    """Read starting SoC from a *flat* state dict, or raise.
+
+    Deliberately does NOT fall back to a default. Between 2026-06-01 and
+    2026-07-22 this read was `state.get("soc_pct", state.get("soc", 50.0))`,
+    and energy_agent.py passes a state dict with SoC nested under
+    state["battery"]["soc_pct"] — so the LP silently ran on a constant 50%
+    for every one of ~2000 shadow cycles while real SoC ranged 4–95%.
+    Every logged LP divergence in that window is attributable to it.
+
+    A missing SoC must fail loudly: the caller's try/except logs the failure
+    and skips the shadow verdict, which is strictly better than recording a
+    confident verdict computed from a fictional battery.
+    """
+    for key in ("soc_pct", "soc"):
+        if state.get(key) is not None:
+            return float(state[key])
+    raise ValueError(
+        "optimize_battery: state has no top-level 'soc_pct' or 'soc'. "
+        "Flatten it at the call site (see energy_agent.py) — do not nest "
+        "SoC under state['battery'].")
+
+
 def optimize_battery(state: dict,
                      price_forecast: list[dict],
                      solar_forecast: list[dict],
@@ -154,7 +177,7 @@ def optimize_battery(state: dict,
 
     prices = [float(f.get("cents_kwh", 0.0)) for f in price_forecast]
     H = len(prices)
-    soc0_pct = float(state.get("soc_pct", state.get("soc", 50.0)) or 50.0)
+    soc0_pct = _require_soc_pct(state)
     soc0_kwh = soc0_pct / 100.0 * p.capacity_kwh
     is_peak = bool(state.get("is_peak_month"))
     home_load = float(state.get("home_load_kw", 0.5) or 0.5)
