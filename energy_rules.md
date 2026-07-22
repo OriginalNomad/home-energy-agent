@@ -145,7 +145,18 @@ The agent re-runs this calculation every 30-min cycle. It starts slow (cheap) an
 
 *Example (non-peak): 36% SoC, 80% target, now 10:30am, price 15¢. Forecast: 15¢ until 4pm then rises to 19¢+. hours_to_cheap_end = 5.5h. kWh needed = 5.9, slow needs 3.5h, fast needs 1.2h. 5.5h > 3.5 + 1.5 = 5.0h → spread logic applies; 5¢ spread → self_consumption, monitor. At 2:30pm, battery at 55%: kWh_needed = 3.4, slow needs 2.0h, hours_to_cheap_end = 1.5h → 1.5 ≤ 2.0 + 0.5 → escalate to autonomous.*
 
-**Charge rate model (Phase 2.5-A, 2026-06-23):** `avg_charge_rate()` is no longer a flat constant. `agent/model_params.json` (built from 17 days / 179 observations in `energy_log.db`) gives SoC-dependent rates: ~1.30 kW at 40%, ~1.66 kW at 60%, tapering to 0.876 kW at 80% and 0.625 kW at 90%. `_avg_charge_rate_kw(soc_from, soc_to, mode)` segments the SoC range into 10% buckets and computes a weighted average. Falls back to flat SLOW_KW=1.7 / FAST_KW=5.0 for missing or low-sample buckets. Autonomous mode has no data yet — flat 5.0 kW assumed.
+**Charge rate model (rebuilt from instantaneous power, 2026-07-22):** `_avg_charge_rate_kw(soc_from, soc_to, mode)` segments the SoC range into 10% buckets and computes a weighted average from `agent/model_params.json`. Rates are now measured from `sensor.tesla_powerwall_2_battery_power` at ~30 s resolution over 10 days (n=53–432 per bucket), not from 30-minute SoC deltas.
+
+| mode | rate |
+|------|------|
+| `self_consumption` | **1.67 kW**, flat across 0–70% SoC (p10≈p25≈median — a very tight distribution). 80%/90% retain the older, slower 0.96/0.71 kW as a conservative fallback |
+| `autonomous` | **5.0 kW to 70%**, then tapering: **2.92 kW at 80%, 1.84 kW at 90%** |
+
+**Why the method changed:** the previous model measured *SoC gained per 30-minute cycle*, which conflates the charge rate with how long charging actually ran, and it gated on `sensor.powerwall_backup_reserve` — a Tessie-polled sensor with ~2 minutes of lag (observed reporting 5% while the true value was 80%). Both flaws biased the result.
+
+**Why the autonomous taper matters:** it previously had n=2–5, below `MIN_SAMPLES`, so the agent assumed a flat 5.0 kW across the whole range. It was therefore *optimistic* about fill time in exactly the 80–100% band where the 2:55pm deadline is decided. Fill time for 80→95% went from 0.41 h to 0.83 h. Being optimistic there risks a demand charge (~$100/month); being pessimistic costs cents — so the model deliberately errs slow, and buckets with fewer than 20 samples keep their older, slower values.
+
+> **Open anomaly (2026-07-22).** Raising `backup_reserve_percent` above SoC was observed pulling a sustained **5 kW** while `default_real_mode` stayed `self_consumption` — three times, including once triggered manually with the agent uninvolved. Ten days of 30-second data give a median of 1.67 kW for the same operation, with a clean date boundary at 07-22. Cause unknown (mode switch, automations, Storm Watch, SmartShift, reserve−SoC gap and SoC level all eliminated). **If this persists, every fill-time projection below is ~3× too pessimistic and the agent will keep starting to charge earlier than it needs to.** `self_consumption` is deliberately left at 1.67 kW until more than one day of evidence exists. See the 2026-07-22 log entry.
 
 **Why `hours_to_cheap_end` instead of `hours_to_spike`:**
 The old logic found the first interval exceeding 30¢ — which means it found nothing on mild-spike days (e.g. prices going 15¢ → 19¢) and gave incorrect 6h default deadlines. `hours_to_cheap_end` finds the first *sustained* price rise of ≥ 4¢, which correctly identifies when "cheap now" ends regardless of the absolute price level.
@@ -630,6 +641,45 @@ else
 
 **Root cause that motivated this rule:** 2026-06-27, battery charged at 5am at 24¢. Realized prices were 19¢ at 4am, 24¢ at 5am, 19¢ at 6am (a transient spike). But Amber's forecast at 5am showed the spike continuing, so `_cheapest_go_hard_slot` found nothing cheaper and `peak_charge_now` fired. The 10am Solar Sponge was outside the ~6h Amber window, or forecast at a similar price to the spike. Rule 26 would have held instead — next cycle would have seen the spike resolve.
 
+
+### Rule 27 — Manual Override: Human Takes the Wheel
+
+**Control:** `input_boolean.agent_manual_override` (toggle on the HA dashboard).
+
+While ON, the deterministic layer still computes and logs its verdict — shadow and
+divergence data keep accumulating, and cycles are tagged `manual_override` in
+`decisions.jsonl` so they can be excluded from accuracy analysis — but it **sends no
+commands**, leaving whatever reserve and mode the user set in place.
+
+```
+override ON  → compute verdict, log it, send nothing
+override OFF → normal control
+```
+
+**Hold verdicts are suppressed too.** This is the non-obvious part: a HOLD verdict
+unconditionally drives reserve to 5%, so without suppressing it the agent would silently
+undo a manual setting on the very next cycle while appearing to "do nothing".
+
+**What it does NOT suspend:**
+- the **Rule 2 demand-window reserve guard**, which runs earlier in `run_agent()`
+- any **HA automation** (Layer 0), which fire independently of the agent
+
+So the override can cost money; it cannot cause a demand-charge breach. That asymmetry
+is deliberate — the whole point of Layer 0 is that no reasoning layer above it, human or
+machine, can switch it off.
+
+**Auto-expiry:** 12 hours (`MANUAL_OVERRIDE_MAX_HOURS`), after which the agent resumes
+control and says so loudly. A forgotten toggle must not silently disable the agent for
+days — the failure mode is arriving at a peak-month demand window with a flat battery.
+
+**Fails open:** if HA is unreachable the agent keeps control rather than going passive.
+A 404 (helper not defined in this HA instance) is treated as "off", silently.
+
+**Why it exists:** 2026-07-22 — the user watched the agent grid-charge at 12¢ while 7¢
+was visible three hours ahead, and had no way to intervene. The only prior route was
+calling `rest_command.powerwall_set_backup_reserve` by hand, which the agent then undid
+at the next 30-minute cycle. A human who can see the agent is wrong should be able to
+stop it without fighting it every half hour.
 
 ---
 

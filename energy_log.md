@@ -1,5 +1,73 @@
 # Energy System Control Log
 
+## 2026-07-22 (session 17e — dashboard sensors: remaining-to-full, bias-corrected solar)
+
+### `sensor.battery_remaining_to_full`
+
+Template sensor in `configuration.yaml`: kWh still needed to reach 100% SoC. Uses
+**13.5 kWh usable** — the same `USABLE_KWH` the agent uses — so the dashboard and the
+agent can never disagree about how much is left. Deliberately kWh, not kW: it sits
+directly beneath `battery_power` on the card, which is power, and mixing the two would be
+easy to misread. Deployed via `deploy_ha_config.sh`; `--check` reports zero drift.
+
+### `sensor.solar_forecast_corrected` — Solcast weighted by measured site bias
+
+The Solar Forecast dashboard card was showing raw Solcast, which over-forecasts this
+flat-roof site badly in winter. Whole-day ratios measured over 12 days: **0.26–0.53,
+median 0.42**.
+
+**A single flat scalar would have been wrong in both directions**, because the error is
+strongly hour-dependent (0.143 at 08:00, 0.164 at 09:00, 0.736 at 13:00). Applied to
+"remaining today" it is far too harsh in the morning, when the good midday hours are still
+ahead, and far too generous late in the day. So `push_corrected_solar_forecast()` weights
+**each remaining hour by its own measured ratio**, using Solcast's `detailedHourly`
+breakdown — verified to sum to the headline figure (18.70 vs 18.7011).
+
+Pushed to HA each cycle (same REST pattern as `sensor.demand_window_monitor`) with
+attributes: `solcast_raw_kwh`, `effective_ratio`, `hours_corrected`, `today_total_kwh`,
+`tomorrow_kwh` and their raw counterparts. Ratios are read from `model_params.json`
+rather than hardcoded, so re-running `build_models.py` updates the card automatically.
+Hours with fewer than `min_samples` observations stay uncorrected rather than guessing.
+
+First live values: remaining **6.08 kWh** (raw 9.21, effective ratio 0.661), today
+**8.75** (raw 18.70), tomorrow **8.46** (raw 18.35).
+
+**Tomorrow is the consequential number** — it drives the card's "overnight top-up likely
+needed" advice, and had been read off a forecast running ~2× optimistic.
+
+### Card thresholds recalibrated
+
+The Solar Forecast card's bands (<10 cloudy / <20 partly / ≥20 good) were tuned on *raw*
+Solcast; against corrected values every winter day would have read "Cloudy". Rebuilt from
+56 days of **actual** output (p33 = 5.1 kWh, median 6.3, p67 = 6.8) → **<5 / 5–7 / ≥7 kWh**.
+Card also gained a live accuracy line: actual inverter watts vs Solcast's, as a percentage
+(2043 W vs 3132 W = 65% at midday, matching the model's 0.613 ratio for that hour).
+
+Both dashboard cards are `mode: storage` (UI-managed), so the card YAML is supplied to the
+user to paste rather than committed here — only the sensors behind them are in the repo.
+
+### Bug caught in my own work
+
+`push_corrected_solar_forecast()` was first written with a `float | None` return
+annotation (PEP 604), which needs Python 3.10. The Pi runs 3.13 so production was fine,
+but it broke module import on the Mac, where the test suites run. **It was pushed before
+the failure was noticed** — the verification command piped test output through `tail`, so
+the `&&` chain saw `tail`'s exit code rather than the test's and committed anyway. Fixed
+by quoting the annotation. Lesson: capture the exit code explicitly when gating a commit
+on a test run.
+
+### Observed behaviour — the anomaly did not recur at 12:00
+
+The 12:00 cycle raised reserve with SoC at 74% (gap 6 points) and drew only **0.5 kW**
+from grid, with the battery's 2.0 kW made up mostly of solar surplus. Contrast with the
+three morning events (gaps of 48, 12, 11 points) which all pulled 3.7–5.0 kW. That hints
+at the Powerwall throttling as it closes on the *reserve target* rather than on full — a
+hypothesis, and one my earlier gap analysis could not have detected because it bucketed
+gaps as "1–20", averaging exactly this effect away. Left running to gather more evidence;
+the user is leaving the override off for the rest of today and tomorrow.
+
+---
+
 ## 2026-07-22 (session 17d — 5 kW self_consumption anomaly; charge rate model rebuilt from power)
 
 ### The anomaly: reserve > SoC now pulls 5 kW in self_consumption

@@ -1,0 +1,10 @@
+
+** To run the agent now **
+        ssh energypi.local "cd home-energy-agent && git pull -q && agent/venv/bin/python agent/energy_agent.py 2>&1"
+
+
+
+
+** To pull .md files across onto local Mac Studio for review **
+
+          git -C "/Users/simonmonk/Simon Projects/Home Energy Console" pull
