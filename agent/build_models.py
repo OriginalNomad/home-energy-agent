@@ -36,19 +36,29 @@ def build_solar_correction(conn: sqlite3.Connection) -> dict:
     to avoid noise from dawn/dusk transitions and night readings.
     Caps individual ratios at 3.0 to guard against outliers.
     """
+    # NOTE: hour is extracted in Python, NOT via SQLite strftime('%H', ts).
+    # `ts` is stored offset-aware ("2026-07-22T09:30:04.865371+10:00") and
+    # SQLite's date functions normalise to UTC, so strftime returns 23 for
+    # local 09:30 and 0 for local 10:00 — every key shifted 10 hours, putting
+    # midday ratios under midnight keys. datetime.fromisoformat() keeps the
+    # offset, so .hour is the local wall-clock hour and stays DST-correct.
+    # (Bug found 2026-07-22 on this script's first successful run.)
     rows = conn.execute("""
         SELECT
-            CAST(strftime('%H', ts) AS INT) AS hour,
+            ts,
             solar_actual_kw,
             solcast_power_now_kw
         FROM observations
         WHERE solcast_power_now_kw > 0.3
           AND solar_actual_kw IS NOT NULL
-        ORDER BY hour
     """).fetchall()
 
     by_hour: dict[int, list[float]] = defaultdict(list)
-    for hour, actual, forecast in rows:
+    for ts, actual, forecast in rows:
+        try:
+            hour = datetime.fromisoformat(ts).hour
+        except (TypeError, ValueError):
+            continue
         if forecast and forecast > 0:
             ratio = actual / forecast
             if 0.0 <= ratio <= 3.0:
@@ -132,10 +142,12 @@ def build_charge_rate_model(conn: sqlite3.Connection) -> dict:
 
             # "kw" stays the mean so existing readers (energy_agent's
             # _avg_charge_rate_kw, optimizer's _model_avg_rate_kw) are
-            # unaffected. Percentiles are added alongside because the observed
-            # distribution is wide — median ~1.4 kW vs p90 ~4 kW in
-            # self_consumption — so a single point estimate is misleading for
-            # deadline projections. Nothing reads these yet; see todo.md.
+            # unaffected. Percentiles are recorded so the spread is visible
+            # rather than assumed — cheap to keep, and they make it obvious if
+            # a bucket ever does develop a tail. As measured on 2026-07-22 the
+            # self_consumption distribution is tight (p25 1.35 / median 1.61 /
+            # p90 1.89 kW), so the mean is a fair summary today. Nothing reads
+            # these yet.
             result[mode][str(bucket)] = {
                 "kw":     round(sum(rates) / n, 3),
                 "p25":    round(_q(0.25), 3),
