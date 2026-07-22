@@ -131,6 +131,7 @@ ENTITIES = {
     "cheap_window":         "sensor.amber_in_cheap_window",
     "solar_power":          "sensor.solar_power_w",                    # W — Powerwall gateway, real-time (no cloud lag)
     "solar_remaining":      "sensor.solcast_pv_forecast_forecast_remaining_today",  # kWh
+    "solcast_today":        "sensor.solcast_pv_forecast_forecast_today",  # kWh + detailedHourly attr
     "solar_forecast_today":  "sensor.solcast_pv_forecast_forecast_today",
     "solcast_power_now":     "sensor.solcast_pv_forecast_power_now",    # W — Solcast's instantaneous estimate (÷1000 for kW)
     "solcast_this_hour":     "sensor.solcast_pv_forecast_forecast_this_hour",  # Wh — expected for current hour (÷1000 for kWh)
@@ -1922,6 +1923,76 @@ Zappi mode except Case 6 above. Never cite FIT when explaining a standard Eco/Fa
 # Agent loop
 # ---------------------------------------------------------------------------
 
+def push_corrected_solar_forecast() -> float | None:
+    """Push `sensor.solar_forecast_corrected` — Solcast, corrected for site bias.
+
+    Solcast systematically over-forecasts this flat-roof site in winter, and the
+    error is strongly hour-dependent: measured actual/forecast runs ~0.14 at
+    08:00 and ~0.16 at 09:00, rising to ~0.74 by 13:00 (see
+    model_params.json["solar_correction"], built by build_models.py).
+
+    A single whole-day scalar would therefore be wrong in both directions — too
+    harsh in the morning when the good midday hours are still ahead, too
+    generous late in the day when only poor hours remain. So this weights each
+    *remaining* hour by its own measured ratio, using Solcast's `detailedHourly`
+    breakdown (verified to sum to the headline forecast).
+
+    Ratios are read from model_params.json rather than hardcoded here, so
+    rebuilding the model updates this automatically. Hours with fewer than
+    min_samples observations fall back to 1.0 (uncorrected) rather than guessing.
+
+    Returns the corrected kWh, or None if unavailable. Never raises.
+    """
+    try:
+        attrs = ha_attrs(ENTITIES["solcast_today"])
+        hourly = attrs.get("detailedHourly") or []
+        if not hourly:
+            return None
+        corr_map = (_model_params or {}).get("solar_correction") or {}
+        min_n    = (_model_params or {}).get("min_samples", 5)
+
+        now      = datetime.now(SYDNEY_TZ)
+        hour_now = now.replace(minute=0, second=0, microsecond=0)
+
+        raw = corrected = 0.0
+        applied = 0
+        for slot in hourly:
+            try:
+                start = datetime.fromisoformat(slot["period_start"])
+                pv    = float(slot["pv_estimate"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start < hour_now:
+                continue
+            raw += pv
+            entry = corr_map.get(start.strftime("%H"))
+            if entry and entry.get("n", 0) >= min_n:
+                corrected += pv * float(entry["ratio"])
+                applied   += 1
+            else:
+                corrected += pv                      # no data for this hour — don't guess
+
+        ratio = round(corrected / raw, 3) if raw > 0 else None
+        ha_set_state(
+            "sensor.solar_forecast_corrected",
+            f"{corrected:.2f}",
+            {
+                "unit_of_measurement": "kWh",
+                "friendly_name": "Solar Forecast Remaining (bias-corrected)",
+                "icon": "mdi:weather-sunny-alert",
+                "state_class": "measurement",
+                "solcast_raw_kwh": round(raw, 2),
+                "effective_ratio": ratio,
+                "hours_corrected": applied,
+                "model_built_at": (_model_params or {}).get("built_at"),
+            },
+        )
+        return round(corrected, 2)
+    except Exception as exc:
+        print(f"  Warning: corrected solar forecast push failed: {exc}", file=sys.stderr)
+        return None
+
+
 def _manual_override_active() -> tuple[bool, str]:
     """True when the user has taken manual control of the battery.
 
@@ -2143,6 +2214,13 @@ def run_agent(dry_run: bool = False):
                 _demand_reserve_guard_fired = True
     except Exception as _exc:
         print(f"  Warning: demand-window reserve guard failed: {_exc}", file=sys.stderr)
+
+    # 1b. Bias-corrected solar forecast → sensor.solar_forecast_corrected.
+    # Dashboard/diagnostic only; nothing in the control path reads it.
+    if not dry_run:
+        _corr_kwh = push_corrected_solar_forecast()
+        if _corr_kwh is not None:
+            print(f"  Corrected solar remaining: {_corr_kwh} kWh")
 
     # 2. HA rest_command health check — warn if the safety automations are broken.
     try:
