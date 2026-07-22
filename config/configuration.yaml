@@ -47,6 +47,16 @@ input_boolean:
   ev_schedule_active:
     name: "EV — Schedule active"
     icon: mdi:car-clock
+  agent_manual_override:
+    # While ON the agent computes and logs its verdict but sends no commands,
+    # leaving whatever reserve/mode you set in place. Auto-expires after 12h
+    # (MANUAL_OVERRIDE_MAX_HOURS in energy_agent.py) so a forgotten toggle
+    # can't disable the agent for days.
+    # Does NOT disable: the 3-9pm demand-window reserve guard (Rule 2), or any
+    # HA safety automation. Manual override can cost money; it cannot cause a
+    # demand-charge breach.
+    name: "Agent — Manual override"
+    icon: mdi:hand-back-right
 
 input_datetime:
   ev_departure_time:

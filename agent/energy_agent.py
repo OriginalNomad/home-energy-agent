@@ -109,6 +109,9 @@ SOLAR_SPONGE_PRICE_THRESHOLD = 10.0   # ¢ — if overnight price > this, wait f
 _cycle_context: dict = {}
 _demand_reserve_guard_fired: bool = False
 
+# Manual override — user takes the wheel. See _manual_override_active().
+MANUAL_OVERRIDE_MAX_HOURS = 12.0
+
 SYDNEY_TZ   = pytz.timezone("Australia/Sydney")
 PEAK_MONTHS = {11, 12, 1, 2, 3, 6, 7, 8}   # months with demand window
 
@@ -121,6 +124,7 @@ ENTITIES = {
     "battery_soc_gateway":  "sensor.tesla_powerwall_2_charge",
     "battery_mode":         "sensor.powerwall_mode",
     "battery_reserve":      "sensor.powerwall_backup_reserve",
+    "manual_override":      "input_boolean.agent_manual_override",
     "battery_target":       "sensor.battery_grid_charge_target",
     "grid_price":           "sensor.1a_wigram_road_glebe_general_price",
     "grid_forecast":        "sensor.1a_wigram_road_glebe_general_forecast",
@@ -729,6 +733,10 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "actions":              actions_taken,
         "summary":              summary,
         "demand_reserve_guard_fired": _demand_reserve_guard_fired,
+        # True on cycles where the user held manual control, so these can be
+        # excluded from divergence/accuracy analysis — the rule layer's verdict
+        # was computed but never acted on.
+        "manual_override":           bool(_cycle_context.get("manual_override", False)),
     }
 
     goal_3pm, proj_3pm = _compute_projected_3pm(now)
@@ -1914,6 +1922,52 @@ Zappi mode except Case 6 above. Never cite FIT when explaining a standard Eco/Fa
 # Agent loop
 # ---------------------------------------------------------------------------
 
+def _manual_override_active() -> tuple[bool, str]:
+    """True when the user has taken manual control of the battery.
+
+    Toggled via `input_boolean.agent_manual_override` (dashboard switch). While
+    on, the rule layer still computes and logs its verdict — so shadow/divergence
+    data keeps accumulating — but sends no commands, leaving whatever reserve and
+    mode the user set in place.
+
+    Auto-expires after MANUAL_OVERRIDE_MAX_HOURS so a forgotten toggle cannot
+    silently disable the agent for days. On expiry the agent resumes control and
+    says so loudly.
+
+    NOT suppressed by this: the demand-window reserve guard (Rule 2 backstop),
+    which runs earlier in run_agent(), and the HA safety automations, which are
+    independent of the agent entirely. Manual override can cost money; it cannot
+    cause a demand-charge breach.
+
+    Fails open — if HA is unreachable the agent keeps control rather than
+    silently going passive on a peak day.
+    """
+    try:
+        obj = ha_get(ENTITIES["manual_override"])
+    except Exception as exc:
+        # A 404 just means the input_boolean isn't defined in this HA instance
+        # yet — the normal state before deployment. Stay quiet for that; warn
+        # for anything else (auth, timeout, HA down).
+        if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+            return False, ""
+        return False, f"override check failed ({exc}) — keeping control"
+
+    if str(obj.get("state") or "").lower() != "on":
+        return False, ""
+
+    try:
+        held_h = (datetime.now(SYDNEY_TZ)
+                  - datetime.fromisoformat(obj["last_changed"])).total_seconds() / 3600.0
+    except (KeyError, TypeError, ValueError):
+        held_h = 0.0
+
+    if held_h > MANUAL_OVERRIDE_MAX_HOURS:
+        return False, (f"manual override ON for {held_h:.1f}h "
+                       f"(limit {MANUAL_OVERRIDE_MAX_HOURS:.0f}h) — EXPIRED, resuming control")
+
+    return True, f"manual override ON ({held_h:.1f}h of {MANUAL_OVERRIDE_MAX_HOURS:.0f}h)"
+
+
 def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str]:
     """
     Execute battery and EV actions from the deterministic verdict.
@@ -1924,6 +1978,17 @@ def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str
     ev_rec = ctx.get("ev_recommended", {})
     state  = _cycle_context.get("state", {})
     executed = []
+
+    _override, _ov_msg = _manual_override_active()
+    _cycle_context["manual_override"] = _override
+    if _ov_msg:
+        print(f"  [det] {_ov_msg}", file=sys.stderr)
+    if _override:
+        _note = (f"MANUAL OVERRIDE — no commands sent (verdict was "
+                 f"{rec.get('action')}/{rec.get('rule_fired')}, "
+                 f"target={rec.get('target_pct')}, mode={rec.get('mode')})")
+        print(f"  [det] {_note}")
+        return [_note]
 
     # Battery
     if rec.get("action") == "charge":

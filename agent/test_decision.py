@@ -763,8 +763,79 @@ def test_overnight_hold_not_fired_during_day():
     check("overnight hold not fired during day", r["rule_fired"] != "overnight_hold_wait_for_sponge", r)
 
 
+def _with_override_state(obj):
+    """Swap ea.ha_get for a stub returning `obj` (or raising if it's an Exception)."""
+    def _stub(entity_id):
+        if isinstance(obj, Exception):
+            raise obj
+        return obj
+    return _stub
+
+
+def test_manual_override():
+    from datetime import timedelta
+    real_ha_get = ea.ha_get
+    real_set_reserve = ea.set_powerwall_reserve
+    real_ctx = ea._cycle_context
+    try:
+        now = ea.datetime.now(ea.SYDNEY_TZ)
+
+        ea.ha_get = _with_override_state({"state": "off", "last_changed": now.isoformat()})
+        active, _ = ea._manual_override_active()
+        check("manual override off → agent keeps control", active is False)
+
+        ea.ha_get = _with_override_state({
+            "state": "on", "last_changed": (now - timedelta(hours=1)).isoformat()})
+        active, msg = ea._manual_override_active()
+        check("manual override on (1h) → active", active is True, msg)
+
+        ea.ha_get = _with_override_state({
+            "state": "on", "last_changed": (now - timedelta(hours=13)).isoformat()})
+        active, msg = ea._manual_override_active()
+        check("manual override expires after 12h", active is False, msg)
+        check("  ...and says why", "EXPIRED" in msg, msg)
+
+        # Fail open — a broken HA must not silently make the agent passive.
+        ea.ha_get = _with_override_state(RuntimeError("HA unreachable"))
+        active, msg = ea._manual_override_active()
+        check("manual override fails open when HA unreachable", active is False, msg)
+
+        # End-to-end: an active override must send no commands.
+        sent = []
+        ea.set_powerwall_reserve = lambda pct: sent.append(pct)
+        ea._cycle_context = {"state": {"battery": {"soc_pct": 47, "reserve_pct": 85,
+                                                   "mode": "self_consumption"}}}
+        ea.ha_get = _with_override_state({
+            "state": "on", "last_changed": (now - timedelta(hours=1)).isoformat()})
+        ctx = {"recommended": {"action": "charge", "target_pct": 85,
+                               "mode": "self_consumption", "rule_fired": "solar_sponge_floor"},
+               "ev_recommended": {}}
+        out = ea._execute_deterministic_verdict(ctx, dry_run=False)
+        check("override blocks a charge verdict", sent == [], f"sent={sent}")
+        check("  ...and reports the suppressed verdict", "MANUAL OVERRIDE" in out[0], out)
+
+        # A hold verdict must also be suppressed — otherwise the agent would
+        # yank reserve back to 5% and undo the user's manual setting.
+        sent.clear()
+        ctx_hold = {"recommended": {"action": "hold", "rule_fired": "target_met"},
+                    "ev_recommended": {}}
+        ea._execute_deterministic_verdict(ctx_hold, dry_run=False)
+        check("override blocks a hold verdict clearing reserve", sent == [], f"sent={sent}")
+
+        # Control returns the moment it's switched off.
+        ea.ha_get = _with_override_state({"state": "off", "last_changed": now.isoformat()})
+        sent.clear()
+        ea._execute_deterministic_verdict(ctx, dry_run=False)
+        check("control resumes when override is off", sent == [85], f"sent={sent}")
+    finally:
+        ea.ha_get = real_ha_get
+        ea.set_powerwall_reserve = real_set_reserve
+        ea._cycle_context = real_ctx
+
+
 if __name__ == "__main__":
-    for fn in [test_ev_case6_negative_fit_solar_dump,
+    for fn in [test_manual_override,
+               test_ev_case6_negative_fit_solar_dump,
                test_ev_case6_not_fired_when_battery_low,
                test_historical_model_cheap_price_raises_target,
                test_historical_model_expensive_price_lowers_target,
