@@ -31,25 +31,64 @@
 
 ---
 
-### Charge rate model is mis-specified — point estimate hides a long right tail
+### RETRACTED: "charge rate model is mis-specified"
 
-Spotted while sanity-checking the 2:55pm deadline. SoC went **33% → 47% in one 30-min cycle** in `self_consumption` (~3.8 kW net, ~4.6 kW gross) while `model_params.json` predicts ~1.3–1.5 kW at that SoC.
+**I claimed earlier today that the self_consumption charge rate model was mis-specified, with a long right tail to p90 ~4 kW. That was wrong, and the error was mine.**
 
-Queried all 2193 `energy_log.db` rows for self_consumption charging intervals with solar < 0.3 kW. Tested three hypotheses for the discrepancy — **all rejected**:
+The trigger was real: SoC went 33% → 47% in one 30-min cycle where both endpoint records read `self_consumption`. I queried the DB for self_consumption charging intervals and found mean 1.94 / median 1.62 / **p90 4.05** / max 5.13 kW, and concluded the model's ~1.4 kW point estimates hid a fat tail.
 
-| Covariate | Result |
-|---|---|
-| reserve − SoC gap (≤10 / 10–30 / >30) | mean 1.91 / 2.10 / 1.89 kW — no effect |
-| reserve just raised vs steady | mean 2.27 vs 1.83 kW — weak, nowhere near 3.8 |
-| in cheap window vs not | mean 1.90 vs 2.43 kW — no effect |
+**The query was wrong.** It filtered on `battery_mode` at the *start* of each interval only, never checking the mode at the end. Re-running with `a.mode == b.mode` enforced:
 
-The real finding is the **distribution**: median **1.35–1.62 kW**, p90 **~3.8–4.3 kW**, max **~5.1 kW**. The Phase 2.5-A per-SoC-bucket numbers capture roughly the median; they do not describe a tight distribution. Today's rate sits around p90 — high, not anomalous. No available covariate predicts which regime a given cycle lands in.
+| Query | n | mean | median | p90 | max |
+|---|---|---|---|---|---|
+| mode at start only (mine, wrong) | 166 | 1.94 | 1.62 | **4.05** | 5.13 |
+| mode same at both ends (correct) | 139 | 1.51 | 1.61 | **1.89** | 3.78 |
 
-**Why it matters**: `_avg_charge_rate_kw()` feeds every fill-time projection and therefore every deadline-escalation decision (Rules 13, 16, 24, 25, 26). Using a median-ish point estimate systematically *over*-predicts fill time, so the agent escalates to autonomous earlier and more often than physics requires. Erring conservative is the right direction for demand-charge protection, but it costs money — autonomous is ~5 kW grid import, and some of those escalations are unnecessary.
+Listing every interval above 3 kW under the bad query: **23 of 24 are `self_consumption → autonomous` transitions.** The battery escalated to autonomous mid-interval and charged at ~5 kW; I attributed that to self_consumption. `build_models.py` had this right all along — its SQL requires `a.battery_mode = b.battery_mode`.
 
-**Consequence for today's 2:55pm deadline**: not at risk. At the observed rate 47%→85% is ~1.4h, hitting target around 11:30am. The "marginal" call in this morning's brief was an artefact of trusting the point estimate — the model, not the battery, was the pessimist.
+**The existing model is accurate.** self_consumption is genuinely ~1.35–1.68 kW with a tight spread (p25 1.35 / median 1.61 / p90 1.89). No systematic tail exists. The three covariate tests (reserve−SoC gap, reserve-raise transient, cheap-window state) were run on the same contaminated sample and carry no weight either way.
 
-**Not yet actioned.** Feeds the existing "Update charge rate model" todo. Options: store per-bucket percentiles rather than a mean, and pick the quantile by decision context (conservative p10–p25 for deadline safety, median for cost projections). Worth doing as part of the `build_models.py` run rather than separately.
+**Consequences of the retraction:**
+- The claim that this morning's "deadline is marginal" warning was a model artefact is **withdrawn**. The model was not being pessimistic.
+- Today's deadline does look fine, but for the plain reason that SoC reached 47% by 10:00 — from there 85% is ~3.4h at ~1.5 kW, i.e. ~13:25, inside the 2:55pm deadline.
+- Today's 33%→47% jump remains **unexplained**. One genuine same-mode interval above 3 kW exists in 45 days (2026-07-08, 33%→45%), so it is a rare outlier rather than a tail. A SoC sensor glitch at the 09:30 reading (which broke an otherwise smooth decline) is at least as likely. Not worth chasing on one data point — note and move on.
+- The percentile fields added to `build_models.py` are kept, but as cheap visibility rather than the fix I argued for. The distribution is tight; the mean is a fair summary today.
+
+**Lesson**: I trusted an ad-hoc query over a reviewed script that disagreed with it, and wrote the conclusion into three files before checking which was right. When a quick query contradicts existing tested code, the query is the likelier suspect.
+
+---
+
+### `build_models.py` had never run — three bugs on first execution
+
+Attempting the Phase 2.5-B activation surfaced that the script (written in a cloud session, commit `fc77fea`) had never once been executed.
+
+1. **SyntaxError, line 180** — backslash-escaped quote inside an f-string expression. Invalid on *every* Python version: PEP 701 (3.12) permits quote reuse, but the expression is still parsed as real Python where `\"` is a line continuation. Fixed by hoisting the date out.
+
+2. **Solar correction keys shifted 10 hours (critical)** — `ts` is stored offset-aware (`+10:00`) and SQLite's `strftime('%H', ts)` normalises to UTC. Local 09:30 → `"23"`, local 10:00 → `"0"`. The first run emitted ratios only under hours 00–06 and 22–23 — Sydney daylight seen from UTC. `optimizer._build_solar_series()` looks up local `"09"`…`"16"`, would have found nothing, and applied no correction at all during daylight. Inert rather than dangerous, but the corrector would silently never have worked. Now uses `datetime.fromisoformat(ts).hour`, which respects the stored offset and is DST-correct.
+
+3. **Solar keys not zero-padded** — wrote `str(9)` = `"9"`; the optimizer looks up `key[11:13]` = `"09"`. Hours 00–09 would miss even after the UTC fix. Now `f"{hour:02d}"`.
+
+4. *(latent)* **Charge rate joined `b.id = a.id + 1` and divided by a hardcoded 0.5h.** Table adjacency is not time adjacency — restarts, cron misses and the 141 rows deleted in session 12 leave id-consecutive rows far apart in time. Now measures real elapsed time and keeps only ~30-min intervals. In practice 0 pairs were skipped, so this was latent, but the guard stays.
+
+**The solar corrector is the headline result.** Solcast over-forecasts systematically and hugely in the winter morning:
+
+| Local hour | actual/Solcast | n |
+|---|---|---|
+| 08:00 | **0.143** | 55 |
+| 09:00 | **0.164** | 76 |
+| 10:00 | 0.215 | 83 |
+| 11:00 | 0.407 | 90 |
+| 12:00 | 0.613 | 88 |
+| 13:00 | 0.736 | 87 |
+| 14:00 | 0.682 | 88 |
+| 15:00 | 0.608 | 88 |
+| 16:00 | 0.437 | 24 |
+
+Solcast is out by ~7× at 8am, ~6× at 9am, converging to ~1.4× at 1pm. Consistent with flat-roof panels and a low winter sun angle. All hours far exceed `MIN_SAMPLES=5`. This also reframes this morning's "solar at 7% of forecast" alarm: at 09:30 in July that is **normal**, not a sensor fault.
+
+Autonomous buckets now populate (~5 kW at 20–50% SoC, tapering to 0.97 kW at 90%) but n=2–5, mostly below `MIN_SAMPLES`, so most buckets still fall back.
+
+**`model_params.json` not committed** — the Pi copy was restored from backup pending review of the numbers above, per the instruction in `todo.md` to check them before committing.
 
 ---
 
