@@ -38,7 +38,9 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 - Set to `20%` → normal floor, self-consumption mode
 - Set to `5%` → deep discharge floor during demand window (peak months only)
 
-**Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode. **Phase 2.5-A data (17 days)** shows: peak ~1.66 kW at 60% SoC, tapering to 0.876 kW at 80% and 0.625 kW at 90%. `_avg_charge_rate_kw()` now uses these model rates (from `agent/model_params.json`) for fill time projections instead of a flat 1.7 kW assumption. **Autonomous mode** (`charge_rate_kw.autonomous`) wired in (Phase 2.5-B) but still falls back to flat 5.0 kW — no autonomous data yet in model_params.json. Will populate once `build_models.py` is run on Pi. Full rate control requires Tesla Fleet API or MPC.
+**Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode. **Rebuilt from 45 days on 2026-07-22**: self_consumption peaks ~1.68 kW at 60% SoC, tapering to 0.96 kW at 80% and 0.71 kW at 90%. Spread is tight (p25 1.35 / median 1.61 / p90 1.89). Autonomous now has data too (~5 kW at 20–50% SoC, 0.97 kW at 90%) but n=2–5, mostly below `MIN_SAMPLES=5`, so most buckets still fall back to the flat 5.0 kW prior — re-run `build_models.py` as autonomous cycles accumulate. `_avg_charge_rate_kw()` reads these from `agent/model_params.json`. Full rate control requires Tesla Fleet API or MPC.
+
+**Open anomaly**: on 2026-07-22 the user observed ~5 kW charging in `self_consumption` and SoC jumping 33%→47% in one 30-min cycle — far above the measured ~1.5 kW. Not explained. An earlier claim that the model had a "long right tail" was **retracted** (the query ignored mid-interval mode changes); the model is accurate for same-mode intervals. See todo.
 
 **Dynamic grid charge target**: `sensor.battery_grid_charge_target`
 - Formula: `clamp(95 − (net_solar_kWh / 13.5 × 100), 5, 95)`
@@ -64,7 +66,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 **Tessie API credentials:**
 - Energy site ID: `2252120180790091`
-- Token: in `config/secrets.yaml`
+- Token: **hardcoded in `config/configuration.yaml`** under `rest_command:` (not in `secrets.yaml`, despite this doc previously claiming so — corrected 2026-07-22). Also a hardcoded HA long-lived token in `agent/energy_agent.py`. Repo is private, so not urgent, but both should move to `secrets.yaml` / `.env`
 - Endpoints: `POST /api/1/energy_sites/{id}/backup` with `{"backup_reserve_percent": N}`
 
 **Solcast credentials:**
@@ -79,8 +81,8 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 `config/` in this repo is **not** read by Home Assistant. The live instance is the
 Docker `homeassistant` container **on the Pi** (`~/homeassistant/config`) — both what
-the agent talks to and what `http://energypi.local:8123` shows. A second, vestigial HA
-container on the Mac Studio is not used.
+the agent talks to and what `http://energypi.local:8123` shows. There is exactly one HA —
+the Mac's second instance was retired 2026-07-22.
 
 ```bash
 ./deploy_ha_config.sh --check    # diff repo vs live — run this before trusting any
@@ -201,13 +203,32 @@ Key agent capabilities added 2026-05-29:
 - **Solar Sponge minimum floor (Rule 14)**: 10am–1pm, SoC < 50% → always charge to 50%, spread table irrelevant.
 - **Price risk asymmetry**: evening prices have fat right tail — Solar Sponge charging is insurance, not arbitrage.
 
-**Layer 3 — Rules** (HA automations, always active): hard constraints that fire deterministically regardless of agent decisions. React in seconds. Cannot be overridden by the agent. Handle safety, demand window, export guard, and edge cases.
+Key agent capabilities added 2026-07-22 (session 17):
+- **Manual override kill-switch**: `input_boolean.agent_manual_override`. While ON the rule layer still computes and logs its verdict (cycles tagged `manual_override` in `decisions.jsonl`, so they can be excluded from divergence analysis) but sends no commands, leaving the user's reserve/mode in place. Auto-expires after 12h (`MANUAL_OVERRIDE_MAX_HOURS`), fails open if HA is unreachable. Suppresses hold verdicts too — a hold would otherwise drive reserve back to 5% and undo the manual setting. **Does not suppress** the Rule 2 demand-window guard or the HA safety automations.
+- **LP optimiser SoC fix**: from its 2026-06-01 wire-in until 2026-07-22 `optimize_battery()` received a hardcoded **50% SoC** every cycle (it read a top-level `soc_pct`; `energy_agent.py` nests it under `state["battery"]`). **All three-way divergence analysis before 2026-07-22 is void.** Fixed; `_require_soc_pct()` now raises rather than defaulting. Phase 4 divergence clock restarted 2026-07-22.
+- **Phase 2.5-B activated**: `build_models.py` ran successfully for the first time (three bugs fixed to get there). Solar corrector live — Solcast over-forecasts by ~7× at 08:00 and ~6× at 09:00 in winter, converging to ~1.4× by 13:00.
+- **118 decision tests + 16 optimizer tests.**
+
+**Layer 3 — Rules** (HA automations, always active): hard constraints that fire deterministically regardless of agent decisions. React in seconds. Cannot be overridden by the agent — including by the manual override. Handle safety, demand window, export guard, and edge cases.
 
 ---
 
-## Current automation status (as of 2026-06-09)
+## Current automation status (verified live 2026-07-22)
 
-**25 automations** in `config/automations.yaml` — **13 active (safety/monitoring), 12 disabled (agent handles)**
+**27 automations** in `config/automations.yaml`, all deployed and loaded — **15 active
+(safety/monitoring), 12 disabled (agent handles)**.
+
+Plus **4 orphaned entities** in state `unavailable` — they exist in HA's entity registry
+but not in any YAML, left over from automations deleted at some point. They cannot fire.
+Clean up via HA UI → Entities if they become confusing:
+`battery_intraday_cheap_window_charge_check`,
+`battery_revert_to_self_consumption_once_emergency_floor_reached`,
+`ev_freeze_powerwall_reserve_while_ev_charging`,
+`ev_restore_powerwall_reserve_when_ev_stops_charging`.
+(HA reports 31 automation entities = 27 real + 4 orphans.)
+
+Counts below were read from the live HA, not from the file. To re-verify:
+`./deploy_ha_config.sh --check` for drift, and query `/api/states` for enabled state.
 
 **Active — safety & monitoring:**
 
@@ -222,10 +243,12 @@ Key agent capabilities added 2026-05-29:
 | `battery_demand_window_critical_warning` | Alert: critical SoC, grid import imminent |
 | `battery_negative_price_charge` | Charge to 100% on negative spot price (Rule 8) |
 | `battery_negative_price_reset` | Reset reserve when price goes positive |
-| `battery_low_soc_emergency_charge` | Charge if critically low + cheap price + price ≤20¢ + **NEEDS RELOAD** (20¢ ceiling + 85% target in peak months added 2026-06-23) |
+| `battery_low_soc_emergency_charge` | Charge if critically low + cheap price + 20¢ ceiling + 85% target in peak months. Written 2026-06-23, **actually deployed 2026-07-22** |
 | `solar_inverter_underperformance_alert` | Alert when inverter under-produces vs Solcast |
 | `ev_plugged_in_notify` | Alert when EV connects with SoC/price snapshot |
-| `sensor_watchdog_morning` | 09:30 daily: checks 8 sensors for unavailable/stale (>2h), sends persistent notification |
+| `sensor_watchdog_morning` | 09:30 daily: checks 8 sensors for unavailable/stale (>2h), sends persistent notification. **Only actually running since 2026-07-22** — written 2026-06-09 but never deployed |
+| `ev_demand_window_guard` | Forces Zappi to Eco+ at 3pm so the EV can't draw during the demand window. Also only live since 2026-07-22 |
+| `restore_virtual_sensors_on_startup` | Re-pushes virtual sensors after HA restart. **Currently broken** — calls a Mac path, and the script is outside the container's `/config` mount. Self-heals via hourly cron; see todo |
 
 **Disabled — agent handles these decisions:**
 
@@ -300,13 +323,13 @@ Key agent capabilities added 2026-05-29:
 | `energy_log.md` | Chronological log of what was built each day and observations |
 | `todo.md` | Personal and product to-do lists |
 | `PRODUCT.md` | Full product design doc — Sol architecture, MPC design, multi-tenant vision |
-| `config/automations.yaml` | The actual HA automations (12 active, 12 disabled) |
-| `config/configuration.yaml` | HA config — sensors, REST commands, template sensors |
+| `config/automations.yaml` | HA automations — **deploy source, not what's running** until `./deploy_ha_config.sh`. 27 defined: 15 active, 12 disabled |
+| `config/configuration.yaml` | HA config — sensors, REST commands, template sensors. Same deploy rule |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
-| `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before June 1 |
-| `agent/test_decision.py` | 109 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before a peak month |
+| `agent/test_decision.py` | 118 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
 | `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. See PRODUCT.md "Optimisation Engine — Depth" |
-| `agent/test_optimizer.py` | 9 unit tests for the LP optimiser — pure, no API calls |
+| `agent/test_optimizer.py` | 16 unit tests for the LP optimiser — pure, no API calls. Includes regression tests pinning the SoC contract (see 2026-07-22) |
 | `agent/.env` | API keys (gitignored — not in repo) |
 | `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
 | `agent/decisions.jsonl` | Structured JSON decision log — full context per cycle, foundation for analyst agent and accuracy tracking |
@@ -316,7 +339,7 @@ Key agent capabilities added 2026-05-29:
 | `agent/data_logger.py` | Closed-loop SQLite logger — one row per cycle in `energy_log.db`. Foundation for self-calibrating models (Phase 2.5-A+). Wired in 2026-06-06. |
 | `agent/energy_log.db` | SQLite DB on Pi only (gitignored). Accumulates state + price forecasts + decisions each cycle. Inspect: `ssh energypi.local "agent/venv/bin/python home-energy-agent/agent/data_logger.py"` |
 | `agent/build_models.py` | Calibration model builder — run on Pi after 2+ weeks of `energy_log.db` data. Builds solar_correction (per-hour Solcast bias ratio) and charge_rate_kw (autonomous rates by SoC bucket) and writes to `model_params.json`. Run: `cd ~/home-energy-agent && agent/venv/bin/python agent/build_models.py` |
-| `agent/model_params.json` | Calibration parameters loaded at agent startup. Contains `solar_correction` (per-hour Solcast ratio), `charge_rate_kw.self_consumption` (17-day data, 179 obs), `charge_rate_kw.autonomous` (empty — needs rebuild after autonomous charging accumulates). |
+| `agent/model_params.json` | Calibration parameters loaded at agent startup. Contains `solar_correction` (per-hour Solcast ratio), `charge_rate_kw.self_consumption` and `.autonomous` (rebuilt 2026-07-22 from 45 days; autonomous buckets n=2-5, mostly below MIN_SAMPLES so still falling back). Rebuild with `build_models.py`. |
 
 ---
 
@@ -349,7 +372,7 @@ Key agent capabilities added 2026-05-29:
 
 **Tesla app backup reserve — set to 5% (2026-06-07).** Previously 80%, which caused the reserve to drift back to 80% whenever Tessie's cloud command didn't fully persist to Powerwall hardware. Now 5% is the firmware fallback — safe. The pre-flight guard and `_guarded_set_reserve()` override upward as needed.
 
-**HA automation YAML vs UI discrepancy**: automations.yaml has no `enabled: false` entries — all 21 battery automations show as enabled in the file. HA UI enable/disable state is stored separately in HA's internal storage. Confirmed via HA UI: `battery_winter_overnight_precharge` and `battery_cloudy_day_topup` are disabled. The other 10 "agent handles" automations need verification in HA UI. Most critical to confirm disabled: `battery_cheap_window_autonomous_charge` (sets reserve=100% when Amber cheap window opens).
+**HA automation YAML vs UI enable state — resolved 2026-07-22.** `automations.yaml` has no `enabled: false` entries; enable/disable lives in HA's internal storage, so the file cannot tell you what's active. Now verified directly against the live `/api/states`: **15 on, 12 off**, matching the tables above. The previously-flagged risk `battery_cheap_window_autonomous_charge` (sets reserve=100% when the Amber cheap window opens) is confirmed **off** — it appears as `automation.battery_switch_to_autonomous_grid_charge_during_cheap_window`. To re-check, query `/api/states` and filter `automation.` rather than reading the YAML.
 
 **LP was blind to SoC — fixed 2026-07-22.** From its 2026-06-01 wire-in until 2026-07-22 the LP received a hardcoded **50% SoC** on every cycle (`optimize_battery()` read a top-level `soc_pct`; `energy_agent.py` passes it nested under `state["battery"]`, so the default fired every time). **All three-way divergence analysis before 2026-07-22 is void** — including the "LP defers to cheapest slot" blocker and session 13's "cause (c)" conclusion. Fixed at the call site; `_require_soc_pct()` now raises instead of defaulting. Phase 4 divergence clock restarted 2026-07-22 — a fresh week of clean data is needed before the LP-to-control question can be reopened.
 

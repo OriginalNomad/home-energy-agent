@@ -6,7 +6,7 @@ Claude-agent system into a self-learning agentic AI optimiser. Read alongside
 
 ---
 
-## What exists today (2026-06-09)
+## What exists today (updated 2026-07-22)
 
 The system is further along than the original design implied. Three Python layers are running
 on the Pi right now, every 30 minutes:
@@ -31,9 +31,30 @@ The prompt is ~65 lines (slimmed from 470 in Phase 6 — all decision arithmetic
 *would* have done, logs to `decisions.jsonl` alongside the deterministic verdict. Not yet
 in the control path. Comparison data accumulates for Phase 5 cutover validation.
 
+> **⚠️ The LP was blind to SoC from 2026-06-01 to 2026-07-22.** `optimize_battery()` read a
+> top-level `soc_pct`, but `energy_agent.py` passes SoC nested under `state["battery"]`, so
+> it silently took a hardcoded **50%** default on every one of ~2000 shadow cycles while real
+> SoC ranged 4–95%. **Every divergence conclusion recorded before 2026-07-22 is void** —
+> including the "LP defers to the cheapest slot" blocker and the "cause (c), trusts the point
+> forecast" reading. Fixed; `_require_soc_pct()` now raises rather than defaulting, with
+> regression tests. **The Phase 4 divergence clock restarted 2026-07-22** — a fresh week of
+> clean three-way data is needed before the control-path question can be reopened.
+>
+> First clean signal: under flat prices the LP defers charging to the last feasible slot with
+> no margin against forecast error. That is the genuine robust-MPC question (the `risk` knob /
+> a conservative solar quantile) and is now measurable for the first time.
+
 ### Layer 0 — HA automations (ALWAYS ACTIVE, safety net)
-~12 Home Assistant automations that fire independently of the agent. Demand window guard,
-export safety net, autonomous revert. These cannot be overridden by any layer above.
+**15 active** Home Assistant automations (of 27 defined; 12 deliberately disabled because the
+agent handles those decisions). Demand window guard, export safety net, autonomous revert.
+These cannot be overridden by any layer above — including by the manual override switch.
+
+> **⚠️ Layer 0 is deployed, not read from this repo.** `config/` is a deploy source; the live
+> HA is the Docker container on the Pi. On 2026-07-22 the live config was found **7 weeks
+> stale**, so several Layer 0 fixes recorded as done had never run — most seriously the
+> `battery_grid_charge_target` 85% peak floor, whose absence left the autonomous-revert
+> automation permanently triggered and made autonomous mode self-cancelling on peak days.
+> Use `./deploy_ha_config.sh --check` before trusting any claim about Layer 0.
 
 ---
 
@@ -44,7 +65,7 @@ the current situation against named rules in priority order — first rule that 
 Rules encode explicit business logic accumulated from observed failure modes: deadline
 maths, Solar Sponge timing, fill-time projections, price threshold comparisons.
 
-- **Strength**: transparent, testable (109 unit tests), never surprises you. Each rule
+- **Strength**: transparent, testable (118 unit tests, plus 16 for the optimiser), never surprises you. Each rule
   has a name (`peak_early_morning_hold`, `wait_for_cheap_go_hard`) that appears in the
   log — you always know exactly why it did what it did.
 - **Weakness**: rules are brittle approximations. The right answer to "should I charge
@@ -495,41 +516,63 @@ the MPC, the models, or a sensor issue.
 
 ## Implementation roadmap
 
-### Phase 2.5-A: data collection (now → 2 weeks)
+*Status as of 2026-07-22. `energy_log.db` holds ~2200 rows over 45 days (from 2026-06-06).*
 
-The data logger is running. Let it accumulate. Nothing to build.
+### ✅ Phase 2.5-A: charge rate model — DONE (2026-06-23, rebuilt 2026-07-22)
 
-**At the 1-week mark:**
-- Build and deploy the **charge rate model** (Model 2)
-- It only needs 1 week of data and is the highest-value fix
-- A simple Python script that queries the DB, computes the lookup table, writes
-  `agent/model_params.json`, and the agent reads it on startup
+`agent/build_models.py` queries the DB and writes `agent/model_params.json`;
+`_avg_charge_rate_kw()` reads it for all fill-time projections.
 
-**At the 2-week mark:**
-- Build the **solar forecast corrector** (Model 1)
-- OLS fit on `observations` where `solcast_this_hour_kwh > 0.2`
-- Verify the fit makes sense before plugging into the agent
+self_consumption from 45 days: ~1.68 kW at 60% SoC, tapering to 0.96 at 80% and 0.71 at 90%.
+Spread is tight (p25 1.35 / median 1.61 / p90 1.89), so the point estimate is fair.
+Autonomous now has data (~5 kW at 20–50%, 0.97 at 90%) but n=2–5 — mostly below
+`MIN_SAMPLES=5`, so those buckets still fall back to the 5.0 kW prior. Re-run as autonomous
+cycles accumulate.
 
-### Phase 2.5-B: nightly retraining (2-4 weeks)
+*Open*: a user-observed ~5 kW self_consumption charge on 2026-07-22 contradicts the measured
+~1.5 kW and is unexplained. An earlier "long right tail" claim was retracted — that query
+ignored mid-interval mode changes.
 
-- Build `agent/train_models.py` — the nightly retraining script
-- Cron it at 2am alongside the agent
-- Models 1 and 2 are retrained; model params committed to git (or stored in DB)
-- Add a "model accuracy" section to the nightly outcome summary that the meta-agent reads
+### ✅ Phase 2.5-B: solar corrector — DONE (activated 2026-07-22)
 
-**At the 4-week mark:**
-- Build the **price forecast corrector** (Model 3) — enough data to fit error distribution
-- This is lower priority; Amber is already fairly accurate short-term
+Per-local-hour Solcast bias correction in `model_params.json["solar_correction"]`, consumed by
+`optimizer._build_solar_series()`. The result is larger than anyone assumed:
 
-### Phase 3: MPC solver
+| Local hour | actual/Solcast | n |
+|---|---|---|
+| 08:00 | **0.143** | 55 |
+| 09:00 | **0.164** | 76 |
+| 12:00 | 0.613 | 88 |
+| 13:00 | 0.736 | 87 |
+| 16:00 | 0.437 | 24 |
 
-- Implement `agent/mpc_solver.py` using `scipy.optimize.linprog`
-- Start with the battery-only problem (no EV) to keep it tractable
-- Hard constraints: demand window, SoC floor
-- Soft constraints: 85% by 2:55pm (high weight), battery wear (low weight)
-- Run MPC in shadow mode first: let Claude agent keep making decisions, log what MPC
-  *would have* decided, compare outcomes over 2 weeks before switching over
-- Once validated, replace the Claude greedy loop with MPC + meta-agent supervision
+Solcast is ~7× optimistic at 8am in winter, converging to ~1.4× by 1pm. **This reframes
+low winter-morning solar as normal rather than a fault** — and raises the open question of
+whether the `solar_unreliable` flag is now mislabelling ordinary mornings, since it gates
+real rule behaviour.
+
+`build_models.py` had never executed before this; three bugs were fixed to get it running
+(an f-string SyntaxError, solar keys shifted 10 hours by SQLite's UTC normalisation of
+offset-aware timestamps, and keys not zero-padded).
+
+**Still to do for this phase**: nightly retraining. `build_models.py` is run by hand; it
+should be cronned (~2am) with a model-accuracy section in the nightly summary.
+
+### ◐ Phase 3: MPC solver — BUILT, IN SHADOW, NOT VALIDATED
+
+`agent/optimizer.py` exists and runs every cycle (scipy HiGHS, ~22h horizon, demand-window
+penalty). It is **not** in the control path.
+
+**Blocked on clean data, not on code.** See the Layer C warning above: the LP ran on a
+hardcoded 50% SoC for its entire shadow life until 2026-07-22, so no accumulated comparison
+is usable. Needs a fresh week from 2026-07-22 before the cutover question is even discussable.
+
+### Phase 4: home load model + EV scheduling
+
+- Add temperature feed (Open-Meteo API or BOM HA integration)
+- Build load model (Model 4) once 4+ weeks of temperature-correlated load data exists
+- Extend MPC to include EV charging as a schedulable load with departure deadline
+- This fully replaces the current Zappi mode logic
 
 ### Phase 4: home load model + EV scheduling
 
