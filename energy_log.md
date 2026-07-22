@@ -1,5 +1,93 @@
 # Energy System Control Log
 
+## 2026-07-22 (session 17d — 5 kW self_consumption anomaly; charge rate model rebuilt from power)
+
+### The anomaly: reserve > SoC now pulls 5 kW in self_consumption
+
+User observed the battery grid-charging at ~5 kW while the agent's narrative described
+a "~1.7 kW self_consumption slow drip". **Three events today**, all identical in shape:
+
+| time | trigger | shape |
+|---|---|---|
+| 09:31–10:23 | agent `set_reserve(85%)` | 0 → 1.67 → 5.0 kW in ~60 s, **sustained 52 min** |
+| 11:30–11:32 | agent `set_reserve(85%)` | same ramp, stopped by manual override |
+| 11:40–11:42 | **user set reserve manually** | same ramp — agent not involved at all |
+
+The 11:40 event is the important one: it reproduces with the agent entirely out of the
+loop, so this is Powerwall behaviour, not ours.
+
+**Confirmed**: the trigger is raising `backup_reserve_percent` above SoC. Energy balance
+closes each time (solar + grid = battery + load), so it is genuine grid import.
+`default_real_mode` stays `self_consumption` throughout — that field is the *configured*
+mode, not what the inverter is doing this second.
+
+**Eliminated** (each tested, not assumed): a mode switch (Tesla API), any HA automation
+(`last_triggered` re-checked after each event — nothing since 00:57), Storm Watch
+(`storm_mode_active: False`), Amber SmartShift (user confirmed deactivated), the
+reserve−SoC gap (**median 1.67 kW in every gap bucket including >40 points**), SoC level,
+and every measurement artefact considered (averaging, truncation, mid-interval cut-off).
+
+**Unexplained**: why 10 days of 30-second data show a median of **1.67 kW** for what
+appears to be the same operation — 07-12→07-21 has 115–317 slow samples/day and 0–9 fast;
+07-22 has 6 slow and 98 fast. A clean date boundary with no configuration change on our
+side. Leading hypothesis is an overnight Powerwall firmware push (site runs `26.18.3`),
+unverifiable — HA exposes no version entity and Tessie reports only the current version.
+**Recorded as a hypothesis, not a finding.** Watch whether it persists tomorrow.
+
+### Retraction (my third and fourth wrong calls today)
+
+I claimed mid-session that `self_consumption` "really is 5 kW" and the model was 3× too
+pessimistic, and proposed rebuilding it upward. **Wrong.** Instantaneous data shows
+`self_consumption` is a very tight 1.67 kW (p10≈p25≈median) at every SoC bucket — the
+original model and the agent's own narrative were right, and the user's reading of the
+commentary was right. Acting on my version would have told the agent charging is 3× faster
+than it is, causing it to start too late and risking the demand charge. Earlier the same
+day I had also wrongly claimed a "long right tail" in the same model.
+
+### Charge rate model rebuilt from instantaneous power
+
+`build_charge_rate_model_from_power()` replaces the SoC-delta method, which measured *SoC
+gained per 30-min cycle* — conflating rate with duration — and gated on
+`sensor.powerwall_backup_reserve`, a Tessie-polled sensor with ~2 min lag (caught logging
+5% while the true value was 80%; this is why `reserve_before` in `decisions.jsonl` misled
+us repeatedly today).
+
+Now reads `sensor.tesla_powerwall_2_battery_power` at ~30 s resolution, excluding samples
+within 3 min of a mode change (that lag is why 5 kW autonomous charging previously appeared
+as `self_consumption` outliers). Stores p10/p25/median/mean/max/n; `kw` is the **median**.
+
+**The material fix is the autonomous taper.** `model_params.json` had n=2–5 for autonomous,
+below `MIN_SAMPLES`, so `_avg_charge_rate_kw()` fell back to a flat **5.0 kW** across the
+whole range. Measured: 5.0 kW to 70%, **2.92 at 80%, 1.84 at 90%** — the agent was
+optimistic precisely where the 2:55pm deadline is decided.
+
+| scenario | before | after |
+|---|---|---|
+| 80→95% autonomous | 5.0 kW / 0.41 h | **2.44 kW / 0.83 h** |
+| 70→85% autonomous | 5.0 kW / 0.41 h | **4.04 kW / 0.50 h** |
+| 45→85% autonomous | 5.0 kW / 1.08 h | **4.59 kW / 1.18 h** |
+
+Every change increases estimated fill time — the deadline-protecting direction.
+
+Merge is deliberately conservative: legacy SoC-delta values are retained for any bucket
+with fewer than 20 power samples, so `self_consumption` 80%/90% keep their old, slower
+0.96/0.71 kW. 118 decision + 16 optimizer tests pass against the new params.
+
+**`self_consumption` deliberately left at 1.67 kW** pending tomorrow's data. One day is not
+enough to bet the demand charge on. If 5 kW persists, fill times drop ~3× and holding for
+cheap windows becomes the correct default — which is what the user's instinct has been
+saying all day.
+
+### Dashboard
+
+`input_boolean.agent_manual_override` existed but was on no dashboard. The Energy Agent
+dashboard is `mode: storage` (UI-managed), so the card must be pasted via the UI rather
+than committed here. Card YAML supplied: the toggle, live SoC/reserve/target/mode/battery
+power/price, and two buttons calling `rest_command.powerwall_set_backup_reserve` at 85%
+and 5%.
+
+---
+
 ## 2026-07-22 (session 17c — TWO HA instances found; live config 7 weeks stale; consolidated)
 
 **Found while deploying the manual-override kill-switch.** There were two Home
