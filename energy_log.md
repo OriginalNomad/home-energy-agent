@@ -47,12 +47,31 @@ present and off, `sensor.grid_export_kw` live, both new automations loaded and o
 `config/automations.yaml` as "the actual running automations", which is what allowed
 this drift to go unnoticed for seven weeks.
 
-**Phase 3 (not done)** — retire the Mac HA container and repoint the Cloudflare tunnel
-(`agent.sol.io` → `192.168.68.70:8123`) at the Pi. Nothing depends on it day-to-day.
+**Phase 3 — done, same session.** Before touching anything, checked what actually pointed
+at the Mac: **nothing did.** cloudflared on the Pi already routed `agent.sol.io` →
+`http://localhost:8123`, i.e. the Pi's own HA — so CONTEXT's "→ `192.168.68.70:8123`"
+was stale and no tunnel change was needed. The agent's `HA_URL` is `localhost:8123` on
+the Pi, and the browser dashboard is `energypi.local:8123`. No cloudflared on the Mac.
+No `influxdb:` in the deployed config.
 
-**Unexplained, carried forward**: `sensor.powerwall_backup_reserve` read 5% at 10:35
-despite the agent setting 85% at 10:30. Second anomaly of the day alongside the 5 kW
-self_consumption charge rate, and not addressed by this deploy.
+Retired with `docker stop homeassistant` + `docker update --restart=no` (reversible via
+`docker start`, but two instances is the bug). Verified after: `agent.sol.io` **200**,
+`energypi.local:8123` **200**, nothing listening on Mac:8123, and all agent sensors
+reading normally (SoC, grid charge target 85, price, Solcast, the override helper).
+
+**One thing I could not explain**: earlier in the session the *Mac* HA logged my two API
+calls (`/api/services/input_boolean/reload`, `/api/states/input_boolean.agent_manual_override`)
+from a Cloudflare source IP, even though both the tunnel and the agent point at the Pi.
+Recorded rather than rationalised. It does not change the conclusion — and an HA instance
+reachable by a route nobody could account for is an argument for retiring it, not against.
+
+**Also surfaced (pre-existing, not fixed)**: `shell_command.push_virtual_sensors` points at
+a Mac path *and* the script sits outside the container's `/config` mount, so
+`restore_virtual_sensors_on_startup` cannot work on the Pi. Self-heals via the hourly
+`demand_window_summary.py --post` cron. Added to todo.
+
+**Resolved**: the reserve=5%-after-setting-85% anomaly was the user manually overriding via
+`rest_command.powerwall_set_backup_reserve` — not a system fault. Dropped from the todo.
 
 ---
 

@@ -4,8 +4,8 @@
 
 ### Immediate
 
-- [ ] **Phase 3 — retire the Mac HA instance** — a second, unused `homeassistant` container still runs on the Mac Studio with a Jun 4 config. Stop it, and repoint the Cloudflare tunnel (`agent.sol.io` → `192.168.68.70:8123`) at the Pi's HA instead. Nothing depends on it day-to-day, but leaving two instances running is how the 7-week config drift went unnoticed.
-- [ ] **Explain reserve=5% after a set to 85%** — at 10:35 on 2026-07-22 `sensor.powerwall_backup_reserve` read 5% though the agent set 85% at 10:30 and the det layer had a charge verdict. Check Tessie persistence vs sensor lag vs an automation clearing it.
+- [x] **Phase 3 — retire the Mac HA instance** — done 2026-07-22. Stopped + `--restart=no`. No tunnel change was needed: cloudflared already pointed at `http://localhost:8123` (the Pi's own HA), so CONTEXT's old "→ 192.168.68.70:8123" was stale. `agent.sol.io` and `energypi.local:8123` both verified 200 after the stop.
+- [ ] **Fix `shell_command.push_virtual_sensors`** — pre-existing, surfaced during consolidation. The command points at a *Mac* path, and the script isn't inside the HA container's mount (`~/homeassistant/config` → `/config`), so `restore_virtual_sensors_on_startup` cannot work on the Pi. Low urgency — `demand_window_summary.py --post` runs hourly via cron and re-pushes the sensors anyway. Fix by either copying the script into `config/` or moving the restore into the Pi's cron.
 - [ ] **Explain ~5 kW self_consumption charging** — user observed ~5 kW at 10:12 and SoC jumped 33%→47% in one cycle, against a model (correctly) measuring ~1.5 kW for same-mode intervals. Re-test the reserve−SoC gap hypothesis with mode consistency enforced (the first attempt used a contaminated sample; see energy_log retraction).
 - [ ] **Check `solar_unreliable` calibration** — the solar corrector shows Solcast runs at 0.14–0.16 of actual at 08:00–09:00 in winter, so "7% of forecast" mornings may be normal rather than faults. If the flag fires on ordinary winter mornings it is mislabelling them, and it gates real rule behaviour.
 

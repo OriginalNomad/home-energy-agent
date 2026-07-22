@@ -94,17 +94,24 @@ sync; `--check` reports zero drift.
 
 ---
 
-## Infrastructure (as of 2026-06-05)
+## Infrastructure (as of 2026-07-22 — consolidated onto the Pi)
 
 | Host | Role |
 |------|------|
-| **Mac Studio** (`192.168.68.70`) | Runs Home Assistant (localhost:8123), development machine |
-| **Raspberry Pi 5** (`energypi.local`, `192.168.0.67`) | Runs energy agent cron, cloudflared tunnel |
+| **Raspberry Pi 5** (`energypi.local`, `192.168.0.67`) | **Runs everything live**: Home Assistant (Docker, `~/homeassistant/config` → `/config`), energy agent cron, cloudflared tunnel |
+| **Mac Studio** (`192.168.68.70`) | Development machine only. **HA container retired 2026-07-22** (stopped, `--restart=no`). InfluxDB container still running but nothing feeds it |
 | **GitHub** (`OriginalNomad/home-energy-agent`) | Single repo, auto-deployed to Pi on each cron run |
 
-**Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `git pull -q` then runs agent. Deploy = `git push` from Mac.
-**Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://192.168.68.70:8123`. Systemd service, connects via Sydney edge.
-**HA external URL**: `https://agent.sol.io`. Trusted proxies configured for Pi subnet + Docker bridge.
+**There is one Home Assistant, and it is on the Pi.** Until 2026-07-22 a second instance
+ran on the Mac with a Jun 4 config; nothing pointed at it, and its existence is how the
+repo's `config/` drifted 7 weeks out of sync unnoticed. Retired with `docker stop` +
+`docker update --restart=no` — reversible via `docker start homeassistant`, but don't:
+two instances is the bug.
+
+**Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `git pull -q` then runs agent. Code deploy = `git push` from Mac.
+**HA config deploy**: `./deploy_ha_config.sh` (see the warning block above) — *not* git.
+**Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://localhost:8123` (the Pi's own HA). Systemd service, Sydney edge. Verified still 200 after the Mac HA was stopped.
+**HA external URL**: `https://agent.sol.io`. Trusted proxies cover localhost + Pi/Mac subnets + Docker bridge.
 
 ## System architecture (as of 2026-06-23)
 
