@@ -39,7 +39,27 @@ If the session was read-only (no changes made), still add a brief log entry if a
 | `energy_rules.md` | Full rule-set and business logic — source of truth for *why* things work the way they do |
 | `energy_log.md` | Chronological log of changes, observations, and decisions |
 | `todo.md` | Outstanding work items |
-| `config/automations.yaml` | The actual running automations |
-| `config/configuration.yaml` | Sensors, REST commands, template sensors |
+| `config/automations.yaml` | HA automations — **source of truth, but only what's deployed is running** (see below) |
+| `config/configuration.yaml` | Sensors, REST commands, template sensors — same deploy rule |
+| `deploy_ha_config.sh` | Deploys `config/` to the live HA on the Pi. `--check` diffs without changing anything |
+
+### HA config is deployed, not read in place
+
+`config/` in this repo is **not** read by Home Assistant. The live instance is the
+Docker `homeassistant` container **on the Pi**, config mounted from
+`~/homeassistant/config` — that is both what the agent talks to (`localhost:8123`)
+and what the dashboard at `http://energypi.local:8123` shows. A second, vestigial
+HA container on the Mac Studio is not used.
+
+Editing `config/` changes nothing until deployed:
+
+```bash
+./deploy_ha_config.sh --check    # diff repo vs live
+./deploy_ha_config.sh            # backup, copy, validate, reload (no restart)
+```
+
+Before trusting any claim about what an automation or template sensor does,
+run `--check`. On 2026-07-22 the live config was found to be 7 weeks behind the
+repo, so several fixes recorded in the log as "deployed" had never run.
 | `ARCHITECTURE.md` | Self-learning system design — 4-layer architecture, implementation roadmap, data logger → calibration models → MPC |
 | `agent/data_logger.py` | Layer 1 closed-loop SQLite logger — foundation for self-calibrating models (not yet wired into energy_agent.py) |

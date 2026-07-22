@@ -75,6 +75,25 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 ---
 
+## ⚠️ HA config is DEPLOYED, not read in place (established 2026-07-22)
+
+`config/` in this repo is **not** read by Home Assistant. The live instance is the
+Docker `homeassistant` container **on the Pi** (`~/homeassistant/config`) — both what
+the agent talks to and what `http://energypi.local:8123` shows. A second, vestigial HA
+container on the Mac Studio is not used.
+
+```bash
+./deploy_ha_config.sh --check    # diff repo vs live — run this before trusting any
+./deploy_ha_config.sh            # backup, validate, reload (no restart)
+```
+
+This was found on 2026-07-22 with live **7 weeks behind** the repo, meaning several
+fixes logged as "deployed" had never run — most seriously the `battery_grid_charge_target`
+85% peak floor, whose absence made autonomous mode self-cancelling on peak days. Now in
+sync; `--check` reports zero drift.
+
+---
+
 ## Infrastructure (as of 2026-06-05)
 
 | Host | Role |

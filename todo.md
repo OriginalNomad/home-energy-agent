@@ -4,6 +4,12 @@
 
 ### Immediate
 
+- [ ] **Phase 3 — retire the Mac HA instance** — a second, unused `homeassistant` container still runs on the Mac Studio with a Jun 4 config. Stop it, and repoint the Cloudflare tunnel (`agent.sol.io` → `192.168.68.70:8123`) at the Pi's HA instead. Nothing depends on it day-to-day, but leaving two instances running is how the 7-week config drift went unnoticed.
+- [ ] **Explain reserve=5% after a set to 85%** — at 10:35 on 2026-07-22 `sensor.powerwall_backup_reserve` read 5% though the agent set 85% at 10:30 and the det layer had a charge verdict. Check Tessie persistence vs sensor lag vs an automation clearing it.
+- [ ] **Explain ~5 kW self_consumption charging** — user observed ~5 kW at 10:12 and SoC jumped 33%→47% in one cycle, against a model (correctly) measuring ~1.5 kW for same-mode intervals. Re-test the reserve−SoC gap hypothesis with mode consistency enforced (the first attempt used a contaminated sample; see energy_log retraction).
+- [ ] **Check `solar_unreliable` calibration** — the solar corrector shows Solcast runs at 0.14–0.16 of actual at 08:00–09:00 in winter, so "7% of forecast" mornings may be normal rather than faults. If the flag fires on ordinary winter mornings it is mislabelling them, and it gates real rule behaviour.
+
+
 - [x] **Run `build_models.py` on Pi** — done 2026-07-22. Required fixing three bugs first (the script had never executed). Solar correction ratios came in at **0.14–0.74**, well below the 0.5–1.5 range anticipated here — Solcast's winter morning over-forecast is far larger than assumed. Re-run periodically to accumulate autonomous samples.
 
 - [x] **Reload HA automations** — `battery_low_soc_emergency_charge` (20¢ ceiling + 85% peak target) and both demand window warning automations (1-min debounce) were updated 2026-06-23. Reloaded 2026-06-24.

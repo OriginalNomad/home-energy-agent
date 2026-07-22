@@ -1,5 +1,88 @@
 # Energy System Control Log
 
+## 2026-07-22 (session 17c — TWO HA instances found; live config 7 weeks stale; consolidated)
+
+**Found while deploying the manual-override kill-switch.** There were two Home
+Assistant instances running, and the repo's `config/` was a copy that neither read.
+
+| | Mac Studio | Raspberry Pi |
+|---|---|---|
+| Config dir | `/Users/simonmonk/homeassistant/config` | `/home/simonmonk/homeassistant/config` |
+| `configuration.yaml` | Jun 4 | Jun 8 |
+| `automations.yaml` | Jun 4, 25 automations | Jun 4, 25 automations |
+
+**The Pi is the live one** — it is what the agent talks to (`HA_URL` defaults to
+`localhost:8123` and the agent runs on the Pi) and what the browser dashboard at
+`http://energypi.local:8123` shows. The Mac container is vestigial, left over from
+starting on the Mac and moving to the Pi for deployment without consolidating.
+(The Cloudflare tunnel still points at the Mac — Phase 3, not yet done.)
+
+**Consequence: fixes recorded as "deployed" had never run.** Live was 7 weeks behind
+the repo (27 automations vs 25; 20 identical, 5 changed, 2 missing).
+
+**The serious one — autonomous mode was unusable on peak days.** `battery_grid_charge_target`
+was missing its 85% peak-month floor (the Jun 5 fix), so it read **16%** against a
+SoC of 66%. `battery_autonomous_revert_target_reached` triggers on
+`tessie_charge >= grid_charge_target` — permanently true — gated only by its
+`mode == autonomous` condition. Any escalation to autonomous would therefore have been
+reverted to self_consumption with reserve dropped to 5% within 30 seconds. On a peak
+day with unreliable solar, autonomous escalation *is* the demand-window protection.
+This is exactly the failure the Jun 5 floor fix was written to prevent; it had simply
+never reached the running system.
+
+Also never deployed: the Jun 23 emergency-charge hardening (20¢ ceiling + 85% peak
+target), the 1-minute demand-window warning debounce, `sensor_watchdog_morning` (the
+watchdog meant to catch stale sensors was itself not running), and `ev_demand_window_guard`.
+
+**Deployed 10:41, before the 15:00 demand window.** Backup to
+`~/homeassistant/config-backups/20260722-1041`, `check_config` clean, then targeted
+reloads (`input_boolean`/`template`/`automation`) — no HA restart, no control gap.
+Verified after: `battery_grid_charge_target` **16 → 85**, `input_boolean.agent_manual_override`
+present and off, `sensor.grid_export_kw` live, both new automations loaded and on.
+`./deploy_ha_config.sh --check` now reports zero drift.
+
+**Phase 2 — `deploy_ha_config.sh` added.** Backs up, copies, validates with
+`check_config`, rolls back automatically on failure, then reloads and verifies.
+`--check` diffs without touching anything. `CLAUDE.md` corrected — it had described
+`config/automations.yaml` as "the actual running automations", which is what allowed
+this drift to go unnoticed for seven weeks.
+
+**Phase 3 (not done)** — retire the Mac HA container and repoint the Cloudflare tunnel
+(`agent.sol.io` → `192.168.68.70:8123`) at the Pi. Nothing depends on it day-to-day.
+
+**Unexplained, carried forward**: `sensor.powerwall_backup_reserve` read 5% at 10:35
+despite the agent setting 85% at 10:30. Second anomaly of the day alongside the 5 kW
+self_consumption charge rate, and not addressed by this deploy.
+
+---
+
+## 2026-07-22 (session 17b — manual override kill-switch)
+
+**Built at the user's request** after they watched the agent grid-charge at ~5 kW at
+10:12 while 7¢ was visible at 13:00, and asked whether anything let them intervene.
+Nothing did — the only `input_boolean` was `ev_schedule_active`.
+
+`input_boolean.agent_manual_override`: while ON the rule layer still computes and logs
+its verdict (shadow/divergence data keeps accumulating, cycles tagged `manual_override`
+in `decisions.jsonl`) but sends no commands, leaving whatever reserve and mode the user
+set in place.
+
+Design decisions:
+- **Rule 2 is never suppressed.** The demand-window reserve guard runs earlier in
+  `run_agent()` and is untouched, as are the HA safety automations. Manual override can
+  cost money; it cannot cause a demand-charge breach.
+- **Auto-expires after 12h** (`MANUAL_OVERRIDE_MAX_HOURS`) so a forgotten toggle can't
+  silently disable the agent for days. Expiry is loud.
+- **Fails open** — if HA is unreachable the agent keeps control rather than going passive
+  on a peak day. A 404 (helper not defined) is treated as off, silently.
+- **Hold verdicts are suppressed too.** A hold otherwise drives reserve back to 5% and
+  would undo the user's manual setting.
+
+9 tests covering off/on/expiry/fail-open, charge and hold suppression, and resumption.
+118 decision + 16 optimizer tests pass.
+
+---
+
 ## 2026-07-22 (session 17 — LP optimiser was blind to SoC for 7 weeks)
 
 **Found via `/morning` three-way analysis.** `optimizer_context.soc_now_pct` was **50.0 on all 196 recent cycles** while real SoC ranged 4–95%. Not a tuning artefact — the LP never saw the battery.
