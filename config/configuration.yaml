@@ -316,6 +316,21 @@ template:
           {% set floor = 85 if (is_peak and now_h < 15) else 5 %}
           {{ [[target, floor] | max, 95] | min }}
 
+      # Energy still needed to reach 100% SoC, in kWh (not kW — this is energy,
+      # sitting next to battery_power which is power). Uses 13.5 kWh usable, the
+      # same USABLE_KWH the agent uses, so the dashboard and the agent can never
+      # disagree about how much is left.
+      - name: "Battery Remaining To Full"
+        unique_id: battery_remaining_to_full_kwh
+        unit_of_measurement: "kWh"
+        state_class: measurement
+        icon: mdi:battery-charging-outline
+        state: >
+          {% set soc = states('sensor.tessie_powerwall_charge') | float(-1) %}
+          {{ (((100 - soc) / 100 * 13.5) | round(2)) if soc >= 0 else none }}
+        availability: >
+          {{ states('sensor.tessie_powerwall_charge') not in ['unavailable', 'unknown'] }}
+
 
 # Tessie Powerwall — polled every 2 minutes
 rest:
