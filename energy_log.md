@@ -27,6 +27,30 @@
 
 **First clean observation**: with real SoC wired in, at 33% SoC / peak month / zero solar / flat 12¢, the LP holds for 4.5h then charges 33%→55% immediately before the demand window — economically indifferent under flat prices, but it takes *zero* margin against forecast error. That is a genuine cause-(c) robustness question (the `risk` knob / conservative solar quantile), and now for the first time it is actually measurable.
 
+**Live confirmation, 10:00 cycle**: `soc=47`, `lp_sees=47.0`. Fix verified in production. First clean divergence immediately followed — det `solar_sponge_floor/charge` vs LP `mpc_hold` with `grid_charge_now_kw=0.0`, i.e. exactly the "defer to the last feasible slot" behaviour predicted above.
+
+---
+
+### Charge rate model is mis-specified — point estimate hides a long right tail
+
+Spotted while sanity-checking the 2:55pm deadline. SoC went **33% → 47% in one 30-min cycle** in `self_consumption` (~3.8 kW net, ~4.6 kW gross) while `model_params.json` predicts ~1.3–1.5 kW at that SoC.
+
+Queried all 2193 `energy_log.db` rows for self_consumption charging intervals with solar < 0.3 kW. Tested three hypotheses for the discrepancy — **all rejected**:
+
+| Covariate | Result |
+|---|---|
+| reserve − SoC gap (≤10 / 10–30 / >30) | mean 1.91 / 2.10 / 1.89 kW — no effect |
+| reserve just raised vs steady | mean 2.27 vs 1.83 kW — weak, nowhere near 3.8 |
+| in cheap window vs not | mean 1.90 vs 2.43 kW — no effect |
+
+The real finding is the **distribution**: median **1.35–1.62 kW**, p90 **~3.8–4.3 kW**, max **~5.1 kW**. The Phase 2.5-A per-SoC-bucket numbers capture roughly the median; they do not describe a tight distribution. Today's rate sits around p90 — high, not anomalous. No available covariate predicts which regime a given cycle lands in.
+
+**Why it matters**: `_avg_charge_rate_kw()` feeds every fill-time projection and therefore every deadline-escalation decision (Rules 13, 16, 24, 25, 26). Using a median-ish point estimate systematically *over*-predicts fill time, so the agent escalates to autonomous earlier and more often than physics requires. Erring conservative is the right direction for demand-charge protection, but it costs money — autonomous is ~5 kW grid import, and some of those escalations are unnecessary.
+
+**Consequence for today's 2:55pm deadline**: not at risk. At the observed rate 47%→85% is ~1.4h, hitting target around 11:30am. The "marginal" call in this morning's brief was an artefact of trusting the point estimate — the model, not the battery, was the pessimist.
+
+**Not yet actioned.** Feeds the existing "Update charge rate model" todo. Options: store per-bucket percentiles rather than a mean, and pick the quantile by decision context (conservative p10–p25 for deadline safety, median for cost projections). Worth doing as part of the `build_models.py` run rather than separately.
+
 ---
 
 ## 2026-06-27 (session 16b — remote access, overseas)

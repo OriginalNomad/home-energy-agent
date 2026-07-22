@@ -32,7 +32,9 @@
 - [ ] **Tune historical price model** — `CHEAP_BAND_ALPHA`, `MAX_INSURANCE_FLOOR`, `PRICE_HISTORY_DAYS`. Set on May flat-price data; winter has larger swings. Review after 4 weeks of July data.
 - [ ] **Tune `α` / `MIN_DAILY_SWING`** in `_hours_to_cheap_end` — same issue, set on May data.
 - [ ] **Amber price forecast accuracy + risk premium** — needs ~4 weeks of JSONL data to compute signed forecast error per time-of-day bucket. 75th-percentile evening error → empirical spread threshold, replacing gut-feel 5¢. Due ~July.
-- [ ] **Update charge rate model** — `model_params.json` has no autonomous mode data (17 days, no fast-charge cycles). Rebuild when autonomous charging accumulates (check `battery_mode='autonomous'` rows in `energy_log.db`).
+- [ ] **Update charge rate model** — two separate problems, both to be handled in the `build_models.py` run:
+  1. `model_params.json` has no autonomous data (built from 17 days with no fast-charge cycles). Autonomous cycles have since accumulated (17 in the last 200) so the bucket should now populate.
+  2. **The self_consumption model is mis-specified** (found 2026-07-22). Per-SoC point estimates of 1.3–1.7 kW describe roughly the *median*; the actual distribution is median 1.35–1.62 kW, **p90 ~3.8–4.3 kW, max ~5.1 kW**. Reserve−SoC gap, reserve-raise transient and cheap-window state were all tested against 2193 DB rows and explain none of the variance. Because `_avg_charge_rate_kw()` drives every fill-time projection, a median point estimate systematically over-predicts fill time and escalates to autonomous earlier than physics requires — safe for demand charges, but it costs money. Suggested fix: store per-bucket **percentiles** and select the quantile by decision context (conservative p10–p25 for deadline safety, median for cost projections).
 
 ### Infrastructure
 
