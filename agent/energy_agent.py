@@ -132,6 +132,7 @@ ENTITIES = {
     "solar_power":          "sensor.solar_power_w",                    # W — Powerwall gateway, real-time (no cloud lag)
     "solar_remaining":      "sensor.solcast_pv_forecast_forecast_remaining_today",  # kWh
     "solcast_today":        "sensor.solcast_pv_forecast_forecast_today",  # kWh + detailedHourly attr
+    "solcast_tomorrow":     "sensor.solcast_pv_forecast_forecast_tomorrow",  # kWh + detailedHourly attr
     "solar_forecast_today":  "sensor.solcast_pv_forecast_forecast_today",
     "solcast_power_now":     "sensor.solcast_pv_forecast_power_now",    # W — Solcast's instantaneous estimate (÷1000 for kW)
     "solcast_this_hour":     "sensor.solcast_pv_forecast_forecast_this_hour",  # Wh — expected for current hour (÷1000 for kWh)
@@ -1954,23 +1955,37 @@ def push_corrected_solar_forecast() -> "float | None":   # quoted: Mac dev pytho
         now      = datetime.now(SYDNEY_TZ)
         hour_now = now.replace(minute=0, second=0, microsecond=0)
 
-        raw = corrected = 0.0
-        applied = 0
-        for slot in hourly:
-            try:
-                start = datetime.fromisoformat(slot["period_start"])
-                pv    = float(slot["pv_estimate"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if start < hour_now:
-                continue
-            raw += pv
-            entry = corr_map.get(start.strftime("%H"))
-            if entry and entry.get("n", 0) >= min_n:
-                corrected += pv * float(entry["ratio"])
-                applied   += 1
-            else:
-                corrected += pv                      # no data for this hour — don't guess
+        def _apply(slots, since=None):
+            """Sum (raw, corrected) kWh over slots, optionally from `since` onward."""
+            raw = corrected = 0.0
+            applied = 0
+            for slot in slots or []:
+                try:
+                    start = datetime.fromisoformat(slot["period_start"])
+                    pv    = float(slot["pv_estimate"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if since is not None and start < since:
+                    continue
+                raw += pv
+                entry = corr_map.get(start.strftime("%H"))
+                if entry and entry.get("n", 0) >= min_n:
+                    corrected += pv * float(entry["ratio"])
+                    applied   += 1
+                else:
+                    corrected += pv              # no data for this hour — don't guess
+            return raw, corrected, applied
+
+        raw, corrected, applied = _apply(hourly, since=hour_now)
+        today_raw, today_corr, _ = _apply(hourly)
+
+        # Tomorrow matters most on this card: it drives the "overnight top-up
+        # likely needed" call, and raw Solcast runs ~2x optimistic here in winter.
+        try:
+            tmr_hourly = ha_attrs(ENTITIES["solcast_tomorrow"]).get("detailedHourly") or []
+        except Exception:
+            tmr_hourly = []
+        tmr_raw, tmr_corr, _ = _apply(tmr_hourly)
 
         ratio = round(corrected / raw, 3) if raw > 0 else None
         ha_set_state(
@@ -1984,6 +1999,10 @@ def push_corrected_solar_forecast() -> "float | None":   # quoted: Mac dev pytho
                 "solcast_raw_kwh": round(raw, 2),
                 "effective_ratio": ratio,
                 "hours_corrected": applied,
+                "today_total_kwh": round(today_corr, 2),
+                "today_total_raw_kwh": round(today_raw, 2),
+                "tomorrow_kwh": round(tmr_corr, 2) if tmr_hourly else None,
+                "tomorrow_raw_kwh": round(tmr_raw, 2) if tmr_hourly else None,
                 "model_built_at": (_model_params or {}).get("built_at"),
             },
         )
