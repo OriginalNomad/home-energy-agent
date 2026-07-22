@@ -1923,7 +1923,7 @@ Zappi mode except Case 6 above. Never cite FIT when explaining a standard Eco/Fa
 # Agent loop
 # ---------------------------------------------------------------------------
 
-def push_corrected_solar_forecast() -> float | None:
+def push_corrected_solar_forecast() -> "float | None":   # quoted: Mac dev python is 3.9 (PEP 604 needs 3.10)
     """Push `sensor.solar_forecast_corrected` — Solcast, corrected for site bias.
 
     Solcast systematically over-forecasts this flat-roof site in winter, and the
