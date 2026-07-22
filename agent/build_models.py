@@ -28,6 +28,11 @@ USABLE_KWH   = 13.5
 MAX_RATE_CAP = 8.0   # kW — filter sensor glitches
 MAX_JUMP_PCT = 20.0  # % SoC per 30 min — filter sensor jumps
 
+# Power-based charge rate model (preferred — see build_charge_rate_model_from_power)
+POWER_DAYS        = 10    # HA recorder keeps ~10 days of 30 s battery_power
+POWER_MIN_SAMPLES = 20    # emit a bucket only with real support behind it
+MODE_SETTLE_S     = 180   # ignore samples within 3 min of a mode change (poll lag)
+
 
 def build_solar_correction(conn: sqlite3.Connection) -> dict:
     """Per-hour-of-day ratio: actual_kw / solcast_power_now_kw.
@@ -80,6 +85,128 @@ def build_solar_correction(conn: sqlite3.Connection) -> dict:
             "n":           n,
         }
 
+    return result
+
+
+def build_charge_rate_model_from_power(days: int = POWER_DAYS,
+                                       min_samples: int = POWER_MIN_SAMPLES) -> dict:
+    """Measure *instantaneous* grid charge rate (kW) by SoC decile × mode.
+
+    Reads `sensor.tesla_powerwall_2_battery_power` from HA's recorder at its
+    native ~30 s resolution, rather than differencing SoC across 30-minute agent
+    cycles.
+
+    Why this replaces the SoC-delta method (2026-07-22): that method measured
+    *SoC gained per cycle*, which conflates the charge rate with how long
+    charging actually ran, and it gated on `sensor.powerwall_backup_reserve` —
+    a Tessie-polled sensor with ~2 minutes of lag (observed logging 5% while the
+    true value was 80%). Instantaneous power has neither problem, and gives
+    hundreds of samples per bucket instead of tens.
+
+    Filters:
+      - battery_power < -0.3 kW          → charging
+      - site_power    >= 0.5 kW          → grid-sourced (not solar self-charge)
+      - >= MODE_SETTLE_S since the last mode change → the mode sensor is derived
+        from a 2-minute Tessie poll, so samples straight after a transition can
+        carry the wrong mode label. This is what made ~5 kW autonomous charging
+        show up as "self_consumption" outliers in earlier analyses.
+
+    Stores percentiles as well as the mean. `kw` is the **median**, which is
+    robust to the transition contamination above and to one-off regime changes;
+    `p10`/`p25` are there so deadline-critical projections can choose a
+    conservative quantile (being optimistic near the 2:55pm deadline risks a
+    demand charge; being pessimistic costs cents).
+    """
+    try:
+        import energy_agent as ea  # HA creds + URL, already configured on the Pi
+    except Exception as exc:
+        print(f"  Could not import energy_agent for HA access ({exc}) — "
+              f"skipping power-based model.")
+        return {}
+
+    import bisect
+    import requests
+    from datetime import timedelta
+
+    tz  = ea.SYDNEY_TZ
+    now = datetime.now(tz)
+    ents = {
+        "batt": "sensor.tesla_powerwall_2_battery_power",
+        "grid": "sensor.tesla_powerwall_2_site_power",
+        "soc":  "sensor.tessie_powerwall_charge",
+        "mode": "sensor.powerwall_mode",
+    }
+    series: dict[str, list] = {k: [] for k in ents}
+    for d in range(days, 0, -1):
+        start = (now - timedelta(days=d)).isoformat()
+        end   = (now - timedelta(days=d - 1)).isoformat()
+        for key, ent in ents.items():
+            try:
+                r = requests.get(f"{ea.HA_URL}/api/history/period/{start}",
+                                 headers=ea.HA_HEADERS,
+                                 params={"filter_entity_id": ent, "end_time": end},
+                                 timeout=90).json()
+            except Exception:
+                continue
+            for x in (r[0] if r else []):
+                if x["state"] in ("unknown", "unavailable"):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(x["last_changed"]).astimezone(tz)
+                except (TypeError, ValueError):
+                    continue
+                series[key].append((ts, x["state"]))
+    for key in series:
+        series[key].sort(key=lambda p: p[0])
+
+    if not series["batt"]:
+        print("  No battery_power history returned — is the recorder keeping it?")
+        return {}
+
+    index = {k: [p[0] for p in v] for k, v in series.items()}
+
+    def at(key, t):
+        i = bisect.bisect_right(index[key], t) - 1
+        return series[key][i][1] if i >= 0 else None
+
+    def mode_settled(t) -> bool:
+        i = bisect.bisect_right(index["mode"], t) - 1
+        if i < 0:
+            return False
+        return (t - series["mode"][i][0]).total_seconds() >= MODE_SETTLE_S
+
+    buckets: dict[tuple, list[float]] = defaultdict(list)
+    for ts, raw in series["batt"]:
+        try:
+            batt = float(raw)
+            grid = float(at("grid", ts) or 0.0)
+            soc  = float(at("soc", ts) or -1.0)
+        except (TypeError, ValueError):
+            continue
+        mode = at("mode", ts)
+        if batt > -0.3 or grid < 0.5 or soc < 0 or mode is None:
+            continue
+        if not mode_settled(ts):
+            continue
+        buckets[(mode, int(soc // 10) * 10)].append(-batt)
+
+    result: dict[str, dict] = {}
+    for (mode, bucket), rates in sorted(buckets.items()):
+        if len(rates) < min_samples:
+            continue
+        rates.sort()
+        n = len(rates)
+        q = lambda f: round(rates[min(int(n * f), n - 1)], 3)
+        result.setdefault(mode, {})[str(bucket)] = {
+            "kw":     q(0.50),          # median — what _avg_charge_rate_kw() reads
+            "p10":    q(0.10),
+            "p25":    q(0.25),
+            "median": q(0.50),
+            "mean":   round(sum(rates) / n, 3),
+            "max":    round(rates[-1], 3),
+            "n":      n,
+            "source": f"power_{days}d",
+        }
     return result
 
 
@@ -198,18 +325,38 @@ def main() -> None:
               f"±{v['uncertainty']:.3f}  n={v['n']}{flag}")
 
     # ── Charge rate model ─────────────────────────────────────────────
-    print("\nCharge rate model (kW by SoC bucket × mode):")
-    rates = build_charge_rate_model(conn)
+    # Legacy SoC-delta model first, so it can back-fill any bucket the
+    # power-based model has too little data for.
+    legacy = build_charge_rate_model(conn)
+
+    print(f"\nCharge rate — instantaneous power, last {POWER_DAYS} days:")
+    power = build_charge_rate_model_from_power()
+
+    rates: dict[str, dict] = {}
+    for mode in ("self_consumption", "autonomous"):
+        merged = dict(legacy.get(mode, {}))
+        for bucket, v in (power.get(mode) or {}).items():
+            merged[bucket] = v                      # power data wins where it exists
+        if merged:
+            rates[mode] = merged
+
+    if not power:
+        print("  (no power data — falling back to the legacy SoC-delta model)")
     for mode in ("self_consumption", "autonomous"):
         buckets = rates.get(mode, {})
         if not buckets:
             print(f"  {mode}: no data")
             continue
         for bucket, v in sorted(buckets.items(), key=lambda x: int(x[0])):
-            flag = ""  if v["n"] >= MIN_SAMPLES else "  ← low-n, will use fallback"
-            print(f"  {mode}  SoC={int(bucket):3d}%  mean={v['kw']:.2f}  "
-                  f"p25={v['p25']:.2f}  median={v['median']:.2f}  p90={v['p90']:.2f} kW"
-                  f"  n={v['n']}{flag}")
+            src = v.get("source", "soc_delta_legacy")
+            if src.startswith("power"):
+                print(f"  {mode}  SoC={int(bucket):3d}%  median={v['kw']:.2f}  "
+                      f"p10={v['p10']:.2f}  p25={v['p25']:.2f}  max={v['max']:.2f} kW"
+                      f"  n={v['n']:<5} [{src}]")
+            else:
+                flag = "" if v["n"] >= MIN_SAMPLES else "  ← low-n, agent will use fallback"
+                print(f"  {mode}  SoC={int(bucket):3d}%  kw={v['kw']:.2f} kW"
+                      f"  n={v['n']:<5} [{src}]{flag}")
 
     conn.close()
 
