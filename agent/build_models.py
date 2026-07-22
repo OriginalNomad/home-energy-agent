@@ -59,7 +59,12 @@ def build_solar_correction(conn: sqlite3.Connection) -> dict:
         n    = len(ratios)
         mean = sum(ratios) / n
         var  = sum((r - mean) ** 2 for r in ratios) / max(n - 1, 1)
-        result[str(hour)] = {
+        # Key MUST be zero-padded: optimizer._build_solar_series() looks up
+        # `key[11:13]` of a normalised "YYYY-MM-DD HH:MM" timestamp, i.e. "09".
+        # Writing str(9) -> "9" makes hours 00-09 silently miss the lookup and
+        # fall back to raw Solcast — exactly the winter morning hours where the
+        # bias is largest. (Bug found 2026-07-22, before this script ever ran.)
+        result[f"{hour:02d}"] = {
             "ratio":       round(mean, 4),
             "uncertainty": round(math.sqrt(var), 4),
             "n":           n,
@@ -80,7 +85,9 @@ def build_charge_rate_model(conn: sqlite3.Connection) -> dict:
         SELECT
             (CAST(a.battery_soc_pct / 10 AS INT) * 10)   AS soc_bucket,
             a.battery_mode                                 AS mode,
-            (b.battery_soc_pct - a.battery_soc_pct)       AS delta_pct
+            (b.battery_soc_pct - a.battery_soc_pct)       AS delta_pct,
+            a.ts                                           AS ts_a,
+            b.ts                                           AS ts_b
         FROM observations a
         JOIN observations b ON b.id = a.id + 1
         WHERE b.battery_soc_pct > a.battery_soc_pct
@@ -90,22 +97,57 @@ def build_charge_rate_model(conn: sqlite3.Connection) -> dict:
     """, (MAX_JUMP_PCT,)).fetchall()
 
     by_mode_bucket: dict[tuple, list[float]] = defaultdict(list)
-    for bucket, mode, delta_pct in rows:
-        rate_kw = delta_pct / 100.0 * USABLE_KWH / 0.5   # kWh per 30 min → kW
+    skipped_gap = 0
+    for bucket, mode, delta_pct, ts_a, ts_b in rows:
+        # `b.id = a.id + 1` is adjacency in the table, NOT adjacency in time.
+        # Agent restarts, cron misses and the 141 orphaned rows deleted in
+        # session 12 all leave id-consecutive rows hours or days apart. Dividing
+        # those by a hardcoded 0.5h yields garbage rates, so measure the real
+        # elapsed time and keep only genuine ~30-min intervals.
+        try:
+            dt_h = (datetime.fromisoformat(ts_b)
+                    - datetime.fromisoformat(ts_a)).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            skipped_gap += 1
+            continue
+        if not (0.4 < dt_h < 0.6):
+            skipped_gap += 1
+            continue
+        rate_kw = delta_pct / 100.0 * USABLE_KWH / dt_h
         if 0 < rate_kw < MAX_RATE_CAP:
             by_mode_bucket[(mode, int(bucket))].append(rate_kw)
+
+    if skipped_gap:
+        print(f"  (skipped {skipped_gap} id-adjacent pairs that were not "
+              f"~30 min apart)")
 
     result: dict[str, dict] = {"self_consumption": {}, "autonomous": {}}
     for (mode, bucket), rates in sorted(by_mode_bucket.items()):
         if mode in result:
-            n  = len(rates)
-            kw = sum(rates) / n
-            result[mode][str(bucket)] = {"kw": round(kw, 3), "n": n}
+            rates.sort()
+            n = len(rates)
+
+            def _q(frac: float) -> float:
+                return rates[min(int(n * frac), n - 1)]
+
+            # "kw" stays the mean so existing readers (energy_agent's
+            # _avg_charge_rate_kw, optimizer's _model_avg_rate_kw) are
+            # unaffected. Percentiles are added alongside because the observed
+            # distribution is wide — median ~1.4 kW vs p90 ~4 kW in
+            # self_consumption — so a single point estimate is misleading for
+            # deadline projections. Nothing reads these yet; see todo.md.
+            result[mode][str(bucket)] = {
+                "kw":     round(sum(rates) / n, 3),
+                "p25":    round(_q(0.25), 3),
+                "median": round(_q(0.50), 3),
+                "p90":    round(_q(0.90), 3),
+                "n":      n,
+            }
 
     return result
 
 
-def _obs_range(conn: sqlite3.Connection) -> tuple[int, str, str]:
+def _obs_range(conn: sqlite3.Connection) -> tuple[int, int, str, str]:
     row = conn.execute(
         "SELECT COUNT(*), MIN(ts), MAX(ts) FROM observations"
     ).fetchone()
@@ -153,7 +195,9 @@ def main() -> None:
             continue
         for bucket, v in sorted(buckets.items(), key=lambda x: int(x[0])):
             flag = ""  if v["n"] >= MIN_SAMPLES else "  ← low-n, will use fallback"
-            print(f"  {mode}  SoC={int(bucket):3d}%  {v['kw']:.3f} kW  n={v['n']}{flag}")
+            print(f"  {mode}  SoC={int(bucket):3d}%  mean={v['kw']:.2f}  "
+                  f"p25={v['p25']:.2f}  median={v['median']:.2f}  p90={v['p90']:.2f} kW"
+                  f"  n={v['n']}{flag}")
 
     conn.close()
 
@@ -174,10 +218,11 @@ def main() -> None:
     with PARAMS_PATH.open("w") as f:
         json.dump(params, f, indent=2)
 
+    today = datetime.now().strftime("%Y-%m-%d")
     print(f"\nWritten → {PARAMS_PATH}")
     print("Next steps:")
     print("  git add agent/model_params.json")
-    print(f"  git commit -m 'model_params: rebuild {datetime.now().strftime(\"%Y-%m-%d\")}'")
+    print(f"  git commit -m 'model_params: rebuild {today}'")
     print("  git push")
 
 
