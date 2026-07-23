@@ -231,6 +231,19 @@ Key agent capabilities added 2026-07-23 (session 18):
   row per entity while live states carry same-day `last_changed`, and `recorder:` excludes only 5
   Polestar sensors. Unexplained; tracked in `todo.md`. The agent's own per-cycle logging is the
   interim audit trail, but only the HA logbook can supply `context_user_id` (i.e. *who* wrote it).
+- **Rule 29 — control layer now reasons from bias-corrected solar** (`USE_CORRECTED_SOLAR`,
+  kill-switch). `_corrected_solar_breakdown()` extracted from the dashboard push so the control
+  path and the card share one code path. Falls back to raw (never zero) if Solcast
+  `detailedHourly` is unavailable. **157 decision tests** (was 147).
+  **Scope, honestly**: replaying all 21 cycles of 2026-07-23 raw-vs-corrected changed which rule
+  fired in 18 and the *action* in none — the overnight holds were price-driven. This does not fix
+  the drain-to-17% problem it was proposed for; it makes `kwh_needed_85` honest for the days where
+  solar genuinely decides the outcome.
+- **Overnight survival floor is contradictory across layers (OPEN)**: the rule layer holds while
+  `projected_soc_at_sponge > 5%`, while `battery_low_soc_emergency_charge` triggers at **SoC < 20%**.
+  On 2026-07-23 the automation fired at 08:00 and the 08:30 HOLD immediately cleared reserve back
+  to 5% — the layers fighting. This, not the solar forecast, is what drove the 17% trough. Needs a
+  decision on the intended floor; see `todo.md`.
 - **5 kW `self_consumption` regime confirmed as persistent** (07-22 and 07-23, median 5.00 kW,
   92%/96% of samples >3 kW, vs 1.67 kW and 0–4% on 07-13→07-21). Below 70% SoC `self_consumption`
   and `autonomous` are now indistinguishable. `model_params.json` still reports 1.67 kW because
