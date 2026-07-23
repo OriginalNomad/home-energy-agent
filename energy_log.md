@@ -93,6 +93,62 @@ explicitly rather than piped, per the 2026-07-22 lesson.
 user's reset this morning, except `max_insurance_floor_pct` (seeded 70, not the live 0).
 The bands are deliberately generous and catch only pathological values.
 
+### `battery_charge_price_threshold_c` deleted — it never did anything
+
+Traced with `git log -S`: the helper was added in **13297f8 (Session 4, 2026-05-31), the same
+commit that introduced `HISTORICAL_PRICE_MODEL`**. It was plumbed into `ENTITIES` and
+`state["settings"]` and then never read by anything — no rule, no automation, no optimiser,
+and `energy_rules.md` never even mentioned it. Rule 15's rolling p25/p75 already answers "is
+this price cheap?" *and self-calibrates*, so a fixed cent threshold was redundant on arrival
+and would have gone stale exactly as `CONTEXT.md`'s "6¢" did.
+
+Its one visible effect was appearing in the LLM's state block, so narratives asserted a
+threshold was being respected that nothing enforced ("…hit the battery charge threshold of
+10.0¢").
+
+The user reached this conclusion unprompted — "if its only purpose is job 1, is it needed at
+all; the agent should be able to work that out" — which is precisely what Rule 15 does.
+
+**Generalisable test for whether a control deserves to exist:**
+- a **fact about the market** ("is 12¢ cheap?") → the agent should *derive* it; any fixed
+  number encodes a snapshot of conditions and rots.
+- a **preference or risk appetite** ("how full do I want the car?", "how much insurance do I
+  want?") → genuinely the user's, cannot be derived, deserves a control.
+
+By that test the insurance floor stays (and the user has now set it to **30%**, in band, so it
+is a genuine console reading with zero violations for the first time). The two EV *price*
+sliders are market facts by the same test — noted, not changed, since they work and the EV
+case has a real preference component.
+
+### Incident: I deployed the config deletion before pushing the code — one cycle lost
+
+**Sequence:** removed the helper from `configuration.yaml` and deployed at 14:58; pushed the
+matching code change after 15:00. For one cycle HA no longer had the entity while the agent
+still asked for it.
+
+**Effect:** `ha_state()` raises on a 404 rather than returning None, so `get_current_state()`
+threw and the **15:00 cycle produced no state and no verdict** — `soc`, `price_c`,
+`computed_verdict` all `None`, `actions` empty. On a peak day, at the exact moment the demand
+window opened.
+
+**Why it cost nothing:** the layered design held. `battery_pre_demand_window_reset` (Layer 0)
+had already fired at 14:55 and set reserve to 5%, and the Rule 2 pre-flight guard runs before
+`get_current_state()`. Verified live at 15:05 — SoC 100%, reserve 5%, self_consumption,
+battery discharging 0.34 kW, grid **−0.028 kW (exporting, not importing)**. The failure hit the
+reasoning layer; the safety layer beneath it was untouched. That is exactly what the three-layer
+architecture is for, demonstrated involuntarily.
+
+**Two fixes, both now in:**
+1. `_validated_setting()` catches the read failure — a helper deleted from config (or not yet
+   created) is the "unreadable" case it already handled, and must never take down a cycle.
+2. `deploy_ha_config.sh` never reloaded `input_number`/`input_text`, so the first deploy removed
+   the YAML but left the live entity answering with a stale value; a manual `input_number/reload`
+   was needed. Both domains added to the reload list.
+
+**Ordering rule for next time: push code that tolerates the change *first*, let the Pi pull,
+then deploy the config.** Code is forward-compatible with an entity that still exists; config
+is not backward-compatible with code that still references it.
+
 ### Slider drift — investigated, not yet diagnosed
 
 User reports the EV/battery threshold `input_number` helpers are repeatedly found higher than
