@@ -93,6 +93,136 @@ explicitly rather than piped, per the 2026-07-22 lesson.
 user's reset this morning, except `max_insurance_floor_pct` (seeded 70, not the live 0).
 The bands are deliberately generous and catch only pathological values.
 
+### Rule 29 — corrected solar wired into the control path (`USE_CORRECTED_SOLAR`)
+
+`compute_decision_context()` now reasons from the bias-corrected Solcast figure instead of raw.
+`_corrected_solar_breakdown()` was extracted from `push_corrected_solar_forecast()` so the
+control path and the dashboard card share one code path, cached per cycle. Falls back to **raw,
+never zero**, if Solcast's `detailedHourly` is unavailable — zero would be the dangerous choice,
+making the agent grid-charge hard on any cycle where an attribute happened to be missing.
+Kill-switch `USE_CORRECTED_SOLAR = False`. Logs `solar_remaining_raw/corrected/used` per cycle.
+
+**Scope, honestly**: this was proposed as the fix for the overnight drain to 17%, and the replay
+disproved that (see the retraction under Morning brief observations). It changes which rule fires
+on 18 of 21 cycles and the *action* on none. What it buys is a rule layer whose `kwh_needed_85`
+and `net_expected_solar` are honest, which will matter on days where solar genuinely decides the
+outcome. Verified live on the Pi: 7.75 kWh raw → 5.15 corrected, ratio 0.664.
+
+### "No hardcoded targets" — SETTINGS_SPEC rebuilt at the user's direction
+
+The user's instruction: *"I'd prefer not to hardcode targets anywhere other than use what is set
+and displayed in the console."* This landed hours after I had shipped Rule 28 with an `intended`
+value per helper — itself exactly the antipattern.
+
+The sweep proved the point better than the argument did:
+- `energy_rules.md` gave **the same helper two different "defaults" in one document** (5¢ at one
+  line, 6¢ at another).
+- Both docs described **`ev_eco_gap_c`**, which no longer exists. (Later corrected: it *was* real
+  — the retired Mac HA's `core.restore_state` has it at 1.0 on 2026-06-02 — so a stale doc, not
+  a fabricated entity. My "never existed" claim was overstated.)
+- The `todo.md` item "Verify HA slider values" *was itself* four hardcoded values, three wrong
+  against the live console. Deleted rather than corrected.
+
+`SETTINGS_SPEC` now holds `(alias, lo, hi)` — **bands only**. A band is an engineering limit
+("outside this the rule stops meaning what it should"); validation is impossible without one.
+A target is a preference and lives in HA. Substitution order for an out-of-band value:
+1. the last **genuinely observed** in-band value HA reported (`settings_used` in decisions.jsonl);
+2. the bad value clamped to the nearest band edge;
+3. omit the key, so the caller's own `.get(key, default)` applies — correct for a *genuinely
+   absent* value, which was never the bug.
+
+EV helpers fall back to the conservative extreme (0) when nothing can be established, so losing
+sight of a setting sends the car solar-only rather than starting a grid charge.
+
+### Two bugs in my own work, both caught by verifying against the Pi rather than by tests
+
+1. **last-known-good never fired.** I wired the history lookup to `get_recent_decisions(20)`,
+   which returns a *formatted string* for the prompt, not records. `_last_known_good()` iterated
+   its characters, hit `AttributeError` on each, and returned `None` every time — so every
+   out-of-band value silently fell through to the clamp. The unit tests passed because they
+   inject history directly. Fixed to `get_recent_records(20)`; regression test pins the string case.
+2. **last-known-good laundered its own substitutions.** `settings_used` logs the value *used*,
+   which may itself be a substitute — so the fallback read its own earlier output back as
+   evidence. Concretely: a hardcoded 70 written by the 12:00 cycle (from the build that still had
+   `intended`) was picked up an hour after the hardcoding was removed and **reported to the user
+   as though HA had supplied it**. `_last_known_good()` now skips any record carrying a violation
+   for that key.
+
+Both are the same lesson as 2026-07-22's: when a quick check contradicts tested code, verify
+against the live system — the tests were passing throughout.
+
+### The EV stayed on Fast at 11¢ — Amber publishes **5-minute** prices
+
+User asked why the 12:00 cycle left the Zappi on Fast when the threshold is 10¢ and the dashboard
+showed 11¢. The record shows the agent sampled **9.0¢** at 12:00:05; `9 ≤ 10` → `ev_ultra_cheap`
+→ Fast. Correct given the input.
+
+Root cause: `sensor.1a_wigram_road_glebe_general_price` carries **`duration: 5`** — it is a
+5-minute settlement price, and the agent samples one per 30-minute cycle and treats it as the
+price for the whole interval. It crossed the 10¢ threshold six times in twenty minutes:
+
+```
+11:40:14 → 7¢    11:45:14 → 7¢     11:56:16 → 9¢
+11:41:14 → 11¢   11:46:14 → 10¢    12:00:17 → 11¢
+```
+
+**Every threshold comparison in the system is being made on what is effectively a sampled
+coin-flip** — both EV thresholds, the spread, and `forward_min_c`. Also explains why the
+dashboard and the agent can disagree about "the price" at any instant: same class of problem as
+the sliders. Logged HIGH in `todo.md` with three options; not fixed today because choosing
+between them is a design decision. Recommendation: use the current 30-minute forecast slot, which
+the agent already fetches.
+
+### Rule 15 scope: the insurance floor is dormant eight months a year
+
+While helping the user relabel the control, found the historical price model is gated on
+`not is_peak`. So `battery_max_insurance_floor_pct` does nothing in Nov–Mar or Jun–Aug — active
+only **Apr, May, Sep, Oct**. Verified live (July → gate False).
+
+Correct by design: in peak months Rule 13 drives the battery to 85% by 2:55pm regardless of
+price, a far higher floor than any insurance value, so it could never bind. Rule 15's heading
+already said "(non-peak)" and a bullet listed "or peak month" — my claim that it was undocumented
+was wrong — but the practical consequence was easy to miss, so it is now stated plainly along
+with the two properties the name hides (it is a *maximum* scaled by price position, not a fixed
+buffer; and it can only raise the target, never discharge).
+
+Consequence for the user: the 30% they set today has no effect until April.
+
+### `binary_sensor.peak_month` — new template sensor for dashboard visibility
+
+Lets cards show/hide on demand-charge months without embedding the EA116 month list in a
+`mode: storage` dashboard, where it could not be version-controlled and would drift silently.
+Carries `peak_months`, `off_peak_months` and a `yes_no` attribute (entities-card rows render a
+binary_sensor as On/Off, which reads oddly for a month).
+
+**Deliberately not referenced from `battery_grid_charge_target`**, which carries the 85% peak
+floor and must not depend on another template entity resolving first — that floor's absence made
+autonomous mode self-cancelling on peak days (2026-07-22). Self-contained is worth one duplicate.
+
+The price of that duplication is a test: `test_peak_months_agree_across_agent_and_ha_config()`
+parses `configuration.yaml` and asserts all three copies of the month list match
+`energy_agent.PEAK_MONTHS`. **Verified it fails on deliberate divergence** (dropping December)
+with a readable diff, so it is not a test that proves nothing.
+
+### The test for whether a control deserves to exist — stated, then corrected by the user
+
+First version: "market fact → derive; preference → control". The user rejected it for the EV
+price sliders: *"I might want to charge fast for a particular day because I need the EV tomorrow
+and that value might be 20¢ and that's a conscious decision."* They were right, and the corrected
+test is **whether the control encodes information the agent cannot obtain**:
+
+- **Instrumental, fully-known objective** → derive. Battery grid-charging has no intrinsic value;
+  the agent already knows the objective completely.
+- **Exogenous value the agent has no access to** → keep the control. The EV has to be *driven*.
+  No amount of percentile modelling produces "I need the car tomorrow".
+
+**The failure modes settle it.** A stale market-fact threshold becomes **wrong** and misleads
+*silently*. A stale willingness-to-pay threshold becomes **non-binding but stays true** — and
+non-firing is self-evident, because the car isn't charged. Third factor: situational controls are
+*meant* to be touched, so staleness only threatens set-and-forget ones.
+
+Outcome: all five EV sliders keep, unchanged. Only the dead battery threshold was deleted.
+
 ### `battery_charge_price_threshold_c` deleted — it never did anything
 
 Traced with `git log -S`: the helper was added in **13297f8 (Session 4, 2026-05-31), the same

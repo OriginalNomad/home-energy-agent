@@ -214,19 +214,52 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **118 decision tests + 16 optimizer tests.**
 
 Key agent capabilities added 2026-07-23 (session 18):
-- **Rule 28 — control inputs are range-checked (`SETTINGS_SPEC`)**: the 8 `input_number` helpers
-  are read every cycle by `compute_decision_context()` and were previously trusted with no
-  validation and no audit trail. Each now declares an intended value + sane band; in-band values
-  pass through untouched, out-of-band values are substituted **for that cycle only** and raise a
-  persistent notification. Nothing is written back to HA (validate-and-warn, not self-heal).
-  `settings_used` + `settings_violations` are logged per cycle to `decisions.jsonl` — an audit
-  trail that does not depend on HA's recorder. **147 decision tests** (was 118).
-- **Two live faults this exposed**: `battery_max_insurance_floor_pct` was **0**, silently
-  disabling Rule 15's insurance floor (now substituted to 70 — the floor is live again); and
-  `ev_min_soc_pct` had drifted to **80**, firing `ev_case3_below_minimum` at 60% EV SoC and
-  putting the Zappi on Fast on a peak morning with the house battery at 30% and falling.
-  Both slipped through because `x or default` and `dict.get(k, default)` mean "if absent",
-  not "if wrong".
+- **Rule 28 — control inputs are range-checked (`SETTINGS_SPEC`)**: the **7** `input_number`
+  helpers are read every cycle by `compute_decision_context()` and were previously trusted with
+  no validation and no audit trail. **No target values live in code or docs** — the HA console is
+  the single source of truth; `SETTINGS_SPEC` declares only `(alias, lo, hi)` bands, which are
+  engineering limits rather than preferences. In-band values pass through untouched. Out-of-band
+  values are substituted **for that cycle only**, preferring (1) the last *genuinely observed*
+  in-band value HA reported, (2) a clamp to the nearest band edge, (3) omitting the key so the
+  caller's own `.get(key, default)` applies. Nothing is ever written back to HA (validate-and-warn,
+  not self-heal), so the agent structurally cannot move a slider. `settings_used` +
+  `settings_violations` logged per cycle to `decisions.jsonl` — an audit trail independent of HA's
+  recorder.
+- **Two live faults this exposed**: `battery_max_insurance_floor_pct` read **0**, silently
+  disabling Rule 15's insurance floor; and `ev_min_soc_pct` had drifted to **80**, firing
+  `ev_case3_below_minimum` at 60% EV SoC and putting the Zappi on Fast on a peak morning with the
+  house battery at 30% and falling. Both slipped through because `x or default` and
+  `dict.get(k, default)` mean "if absent", not "if wrong".
+- **Neither non-EV helper was on any dashboard** (verified against all five `lovelace*` files in
+  the Pi's `.storage`). So the insurance floor's 0 was never chosen — with no `initial:`, an
+  untouched `input_number` defaults to its `min`. **Rule 15's floor had been inert since the
+  helper was created (2026-05-31).** Both now carded; user has set the floor to **30%**, in band,
+  giving zero violations.
+- **`battery_charge_price_threshold_c` deleted** — added in the *same commit* as
+  `HISTORICAL_PRICE_MODEL` (13297f8) and never wired to anything; `energy_rules.md` never
+  mentioned it. Rule 15's rolling p25/p75 already answers "is this cheap?" *and self-calibrates*.
+  Its only effect was appearing in the LLM's state block, so narratives claimed a threshold was
+  being respected that nothing enforced.
+- **Test for whether a control deserves to exist** (stated, then corrected by the user): does it
+  encode information the agent *cannot obtain*? Battery grid-charging is instrumental with a
+  fully-known objective → derive it. The EV has exogenous value (it must be driven) → "I need the
+  car tomorrow, so I'll pay 20¢" is a legitimate control. Failure modes differ: a stale
+  market-fact threshold becomes **wrong** and misleads silently; a stale willingness-to-pay
+  threshold becomes **non-binding but stays true**, and non-firing is self-evident.
+- **`binary_sensor.peak_month`** — new template sensor so dashboards can show/hide cards on
+  demand-charge months without embedding the EA116 month list in a `mode: storage` dashboard.
+  Carries `peak_months`/`off_peak_months`/`yes_no` attributes. Deliberately *not* referenced from
+  `battery_grid_charge_target` (which must not depend on another template entity resolving first);
+  `test_peak_months_agree_across_agent_and_ha_config()` asserts all three copies of the month list
+  match `PEAK_MONTHS`, and was verified to fail on deliberate divergence.
+- **Rule 15's insurance floor is dormant 8 months a year** — gated on `not is_peak`, so active
+  only Apr/May/Sep/Oct. Correct by design (Rule 13's 85%-by-2:55pm is a far higher floor in peak
+  months), but it means a value set today does nothing until April.
+- **Amber publishes 5-minute prices, and the agent treats one sample as the half-hour price**
+  (`duration: 5` on the price sensor). It crossed the 10¢ EV threshold six times in twenty minutes
+  on 2026-07-23; the 12:00 cycle sampled 9¢ while the dashboard showed 11¢. **Every threshold
+  comparison in the system is made on effectively a sampled coin-flip.** HIGH in `todo.md`; the
+  likely fix is the 30-min forecast slot the agent already fetches.
 - **HA recorder is not capturing the `input_number` helpers** — a 6-day history query returns one
   row per entity while live states carry same-day `last_changed`, and `recorder:` excludes only 5
   Polestar sensors. Unexplained; tracked in `todo.md`. The agent's own per-cycle logging is the
@@ -234,7 +267,7 @@ Key agent capabilities added 2026-07-23 (session 18):
 - **Rule 29 — control layer now reasons from bias-corrected solar** (`USE_CORRECTED_SOLAR`,
   kill-switch). `_corrected_solar_breakdown()` extracted from the dashboard push so the control
   path and the card share one code path. Falls back to raw (never zero) if Solcast
-  `detailedHourly` is unavailable. **157 decision tests** (was 147).
+  `detailedHourly` is unavailable. **183 decision tests + 16 optimizer tests** at session close (was 118).
   **Scope, honestly**: replaying all 21 cycles of 2026-07-23 raw-vs-corrected changed which rule
   fired in 18 and the *action* in none — the overnight holds were price-driven. This does not fix
   the drain-to-17% problem it was proposed for; it makes `kwh_needed_85` honest for the days where
@@ -368,7 +401,7 @@ Counts below were read from the live HA, not from the file. To re-verify:
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors. Same deploy rule |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before a peak month |
-| `agent/test_decision.py` | 118 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/test_decision.py` | 183 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
 | `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. See PRODUCT.md "Optimisation Engine — Depth" |
 | `agent/test_optimizer.py` | 16 unit tests for the LP optimiser — pure, no API calls. Includes regression tests pinning the SoC contract (see 2026-07-22) |
 | `agent/.env` | API keys (gitignored — not in repo) |
@@ -423,6 +456,30 @@ Counts below were read from the live HA, not from the file. To re-verify:
 **Historical price model** — first live run was 2026-05-31. Watch `cost_target_method: historical` in JSONL. p25/p75 will shift as June peak-month prices accumulate. May need to tune `CHEAP_BAND_ALPHA` and `MIN_DAILY_SWING`.
 
 **On rainy/cloudy peak days**: Solar won't cover the deficit. Agent must escalate to autonomous during the cheap window (10am–2pm). At 1.7kW self_consumption rate there may not be enough time — autonomous (5kW) is needed. Watch Rule 16 (`nonpeak_solar_unreliable_autonomous`) firing correctly.
+
+**Open from 2026-07-23 (session 18) — watch these first:**
+
+- **Slider drift — is it still happening?** The user reported EV helpers repeatedly found higher
+  than left (e.g. `ev_min_soc_pct` at 80 vs 30 set). Nothing in the repo writes them, and the
+  agent structurally cannot (validate-and-warn never writes back). **`settings_used` is now logged
+  every cycle**, so drift is pinned to a 30-min window automatically — check it each morning.
+  First 2½ hours of data showed all six EV values rock stable. The reported incidents were
+  overnight/early morning, so **tomorrow morning is the real test.**
+- **HA's recorder is not capturing the `input_number` helpers.** Unexplained. This matters because
+  only the logbook's `context_user_id` can say *who* wrote a value — the agent's own log can say
+  what and when, but never who. Highest-value remaining item on the drift question.
+- **The 5-minute price problem (HIGH).** Amber's price sensor carries `duration: 5`; the agent
+  samples one 5-min price per 30-min cycle and treats it as the interval price. Every threshold
+  comparison is effectively a coin-flip. Not fixed — needs a design decision (`todo.md`).
+- **Survival floor contradiction.** Rule layer holds to a 5% projected floor;
+  `battery_low_soc_emergency_charge` fires at 20%. On 2026-07-23 they actively fought. Needs a
+  decision on the intended floor.
+- **`self_consumption` charge rate should flip to ~5 kW around 2026-07-27** if the new regime
+  holds — `POWER_DAYS=10` rolling median needs 6 of 10 days. Until then the agent plans against
+  1.67 kW, i.e. 3× pessimistic (safe direction, but it charges earlier and dearer than needed).
+  Re-run `build_models.py` and check.
+- **Rule 15's insurance floor does nothing until April** (gated `not is_peak`). The 30% set on
+  2026-07-23 is parked, not active.
 
 **Monitoring questions:**
 - Does overnight_hold (Rule 20) prevent high-price overnight charging each night?

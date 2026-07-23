@@ -38,10 +38,10 @@
      read the logbook `context_user_id` — that names the writer directly, which the agent's own
      log cannot do.
   3. Each morning, record the readings before resetting anything (see table below).
-  3. Pin the exact entity next time: `ev_min_charge_price_c` has **max 60**, so a reading of 70¢
+  4. Pin the exact entity next time: `ev_min_charge_price_c` has **max 60**, so a reading of 70¢
      cannot be that helper — it is a different entity or a misread. `ev_min_soc_pct` has **max 80**,
      and 80 was exactly the reported value, so "pinned to max" is a live hypothesis.
-  4. Check HA → Settings → Automations & Scenes for **UI-created** automations/scripts (the YAML
+  5. Check HA → Settings → Automations & Scenes for **UI-created** automations/scripts (the YAML
      file cannot show these), and any myenergi/Zappi or Polestar integration that writes helpers.
 
   **Morning readings log** (append one row per morning; note "as found", before resetting):
@@ -51,48 +51,17 @@
   | 2026-07-23 | `ev_min_soc_pct` | 80 | 30 | at entity max |
   | 2026-07-23 | (reported "min price") | 70¢ | 40¢ | exceeds `ev_min_charge_price_c` max of 60 — entity unconfirmed |
 
-- [ ] **Confirm the `SETTINGS_SPEC` intended values and bands** (Rule 28, added 2026-07-23).
-  The spec now lives in `agent/energy_agent.py` and is version-controlled, so drift is a diff.
-  `intended` was **seeded, not chosen** — from the live helpers after the 2026-07-23 reset, except
-  `max_insurance_floor_pct` (live 0, seeded 70 = `DEFAULT_MAX_INSURANCE_FLOOR`). Please confirm:
-
-  | setting | UI label | intended | band | status |
-  |---|---|---:|---|---|
-  | `ev_ultra_cheap_c` | "Fast charge if price ≤" | 10 | 0–12 | ✅ confirmed by user screenshot 2026-07-23 (CONTEXT's "6" is stale) |
-  | `ev_standard_price_c` | "Slow charge if price ≤" | 15 | 0–25 | ✅ confirmed |
-  | `ev_min_charge_price_c` | "Price to reach minimum" | 40 | 5–45 | ✅ confirmed |
-  | `ev_min_soc_pct` | "Minimum charge target" | 30 | 0–50 | ✅ confirmed |
-  | `ev_charge_target_pct` | "Goal (Max)" | 80 | 50–100 | ✅ confirmed |
-  | `battery_charge_threshold_c` | — | 10 | 5–30 | ⬜ still unconfirmed (CONTEXT says 12 — see card discrepancy below) |
-  | `max_insurance_floor_pct` | — | 70 | 20–95 | ⬜ still unconfirmed — **live 0 is out of band → 70 substituted** |
-  | `ev_departure_target_pct` | (Scheduled Charge) | 95 | 50–100 | ⬜ still unconfirmed |
-
-  **Card/helper discrepancy spotted in the same screenshot**: the Grid Price Forecast chart is
-  annotated **"Charge threshold (12¢)"** while `input_number.battery_charge_price_threshold_c` is
-  live at **10¢**. The card appears to hardcode 12 rather than read the helper — so the dashboard
-  is displaying a threshold the agent is not using. Exactly the class of "UI is not an accurate
-  representation of the values" problem this work is about. Fix the card to read the helper (or
-  confirm 12 is intended and set the helper), then decide which value is right.
-
-  **The two unconfirmed non-EV helpers are not on any dashboard** (verified 2026-07-23 against
-  all five `lovelace*` files in the Pi's `.storage` — zero occurrences of either entity). So they
-  cannot be set or seen in the console at all, despite `energy_rules.md` describing them as
-  "user-settable sliders".
-
-  - `battery_max_insurance_floor_pct`: no `initial:` in `configuration.yaml`, never exposed, so it
-    has sat at **0 — HA's default-to-`min` for an untouched `input_number`**, not a choice anyone
-    made. **Rule 15's insurance floor has therefore been inert since the helper was introduced
-    (2026-05-31)**, not merely recently.
-  - `battery_charge_price_threshold_c`: reads **10**, and its `min` is 5, so 10 is a real restored
-    value set at some point — but there is now no UI to see or change it.
-
-  **This is the actual fix**: put both on the Energy Agent dashboard so the console genuinely is
-  the source of truth, then set them deliberately. Card YAML supplied in the 2026-07-23 session
-  (dashboards are `mode: storage`, so it must be pasted via the UI). Until then the agent's band
-  substitution is *masking* a control with no interface — which is the opposite of the intent.
-
-  Note the five EV helpers **are** on a dashboard and were confirmed from the user's screenshot;
-  only these two are orphaned.
+- [x] **Confirm the `SETTINGS_SPEC` values and bands** — resolved 2026-07-23.
+  The spec no longer holds *any* target values: it is `(alias, lo, hi)` bands only, because the HA
+  console is the single source of truth and a duplicated target goes stale (that is how CONTEXT's
+  "6¢" survived while the console said 10). All five EV helpers confirmed from the user's
+  dashboard screenshot. `battery_charge_price_threshold_c` deleted (never wired to anything).
+  `battery_max_insurance_floor_pct` and the deleted threshold were found to be on **no dashboard
+  at all** — the floor's 0 was HA's default-to-`min` for an untouched helper, not a choice, so
+  Rule 15's floor had been inert since 2026-05-31. Now carded and set to **30%**; live validation
+  reports **zero violations**.
+  Remaining thread, low priority: the Grid Price Forecast card annotates *"Charge threshold (12¢)"*
+  — a hardcoded label for a helper that no longer exists. Remove or repoint it.
 
 - [ ] **Reconcile the overnight survival floor — the rule layer and Layer 0 disagree by 15 points**
   (found 2026-07-23 by replay; this is the *real* cause of the drain to 17%, not the solar
@@ -131,7 +100,7 @@
   **The agent was correct given what it sampled**; the input is the problem, not the logic.
 
   Affects every threshold in the system, not just EV: `ev_ultra_cheap_c`, `ev_standard_price_c`,
-  `battery_charge_threshold_c`, the spread calculation, and `forward_min_c`.
+  `ev_min_charge_price_c`, the spread calculation, and `forward_min_c`.
 
   **Options** (needs a decision):
   1. Use the current **30-minute forecast slot** instead of the live 5-min sensor — the agent
