@@ -43,6 +43,56 @@ fall fast (slower charging is the safe direction), rise only on sustained eviden
 asymmetric (~$30 vs cents), so the model should be too. A low quantile does not substitute:
 new-regime p25 is 4.96–4.99, so quantiles hedge within-regime variance, not regime change.
 
+### Rule 28 — control inputs are now range-checked (validate-and-warn)
+
+Built after establishing that the drifted helpers **had already changed control
+behaviour**, not just the UI. `compute_decision_context()` reads them at
+`energy_agent.py:1414` and `:1502`, and it has been authoritative since Phase 5.
+
+Evidence the drift was live, from today's `decisions.jsonl` — same EV SoC, same price,
+different rule:
+
+| time | ev_soc | price | rule fired | Zappi |
+|---|---|---|---|---|
+| 09:00 | 60 | 11.0¢ | `ev_standard_price` | Eco |
+| **09:30** | 60 | 11.0¢ | **`ev_case3_below_minimum`** | **Fast** |
+| 10:00 | 63 | 11.0¢ | `ev_case3_below_minimum` | Fast |
+
+`ev_case3_below_minimum` is `ev_soc < ev_min and price < min_charge_price_c`, so `ev_min`
+crossed above 60 between those cycles — the drifted 80 the user found. At the intended 30
+it would have fallen through to Eco. **The EV was grid-charging on Fast on a peak morning
+while the house battery sat at 30% and falling toward the 2:55pm deadline.** Caveat: the
+09:00→09:30 flip could have been the user adjusting the slider, and `ev_min` is inferred
+rather than read — nothing logged it. That gap is exactly what the new logging closes.
+
+**Both existing fallback idioms were inert**, which is why this went unnoticed:
+
+```python
+ev.get("min_soc_pct") or 20                    # 80 is truthy → never fired
+settings.get("max_insurance_floor_pct", 70)    # key exists as 0.0 → 0.0 won
+```
+
+`x or default` and `dict.get(k, default)` express "if absent", not "if wrong". A control
+layer needs the second.
+
+**Implemented**: `SETTINGS_SPEC` (intended + sane band for all 8 helpers),
+`_validated_setting()` / `_read_validated_settings()`, a persistent-notification warning,
+and per-cycle `settings_used` + `settings_violations` in `decisions.jsonl`. In-band values
+pass through untouched so legitimate tuning is never overridden; out-of-band values are
+substituted for that cycle only and nothing is written back to HA. Full semantics in
+`energy_rules.md` Rule 28.
+
+**Verified against live HA on the Pi** (read-only dry run, before the cron picked it up):
+7 of 8 helpers in band and used as-is; `max_insurance_floor_pct` correctly flagged
+(found 0.0 → used 70.0, out_of_band). **Rule 15's insurance floor is live again.**
+
+147 decision tests (was 118) + 16 optimizer tests, exit 0 both — exit codes captured
+explicitly rather than piped, per the 2026-07-22 lesson.
+
+**Intended values need confirming.** They were seeded from the live helpers after the
+user's reset this morning, except `max_insurance_floor_pct` (seeded 70, not the live 0).
+The bands are deliberately generous and catch only pathological values.
+
 ### Slider drift — investigated, not yet diagnosed
 
 User reports the EV/battery threshold `input_number` helpers are repeatedly found higher than

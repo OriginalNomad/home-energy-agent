@@ -213,6 +213,30 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capabilities added 2026-07-23 (session 18):
+- **Rule 28 — control inputs are range-checked (`SETTINGS_SPEC`)**: the 8 `input_number` helpers
+  are read every cycle by `compute_decision_context()` and were previously trusted with no
+  validation and no audit trail. Each now declares an intended value + sane band; in-band values
+  pass through untouched, out-of-band values are substituted **for that cycle only** and raise a
+  persistent notification. Nothing is written back to HA (validate-and-warn, not self-heal).
+  `settings_used` + `settings_violations` are logged per cycle to `decisions.jsonl` — an audit
+  trail that does not depend on HA's recorder. **147 decision tests** (was 118).
+- **Two live faults this exposed**: `battery_max_insurance_floor_pct` was **0**, silently
+  disabling Rule 15's insurance floor (now substituted to 70 — the floor is live again); and
+  `ev_min_soc_pct` had drifted to **80**, firing `ev_case3_below_minimum` at 60% EV SoC and
+  putting the Zappi on Fast on a peak morning with the house battery at 30% and falling.
+  Both slipped through because `x or default` and `dict.get(k, default)` mean "if absent",
+  not "if wrong".
+- **HA recorder is not capturing the `input_number` helpers** — a 6-day history query returns one
+  row per entity while live states carry same-day `last_changed`, and `recorder:` excludes only 5
+  Polestar sensors. Unexplained; tracked in `todo.md`. The agent's own per-cycle logging is the
+  interim audit trail, but only the HA logbook can supply `context_user_id` (i.e. *who* wrote it).
+- **5 kW `self_consumption` regime confirmed as persistent** (07-22 and 07-23, median 5.00 kW,
+  92%/96% of samples >3 kW, vs 1.67 kW and 0–4% on 07-13→07-21). Below 70% SoC `self_consumption`
+  and `autonomous` are now indistinguishable. `model_params.json` still reports 1.67 kW because
+  `POWER_DAYS=10` and `kw` is the median — it cannot flip until ~2026-07-27. The agent is
+  therefore planning against a 3× pessimistic rate; error is in the safe-but-costly direction.
+
 **Layer 3 — Rules** (HA automations, always active): hard constraints that fire deterministically regardless of agent decisions. React in seconds. Cannot be overridden by the agent — including by the manual override. Handle safety, demand window, export guard, and edge cases.
 
 ---

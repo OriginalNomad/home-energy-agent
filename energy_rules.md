@@ -668,6 +668,53 @@ So the override can cost money; it cannot cause a demand-charge breach. That asy
 is deliberate — the whole point of Layer 0 is that no reasoning layer above it, human or
 machine, can switch it off.
 
+---
+
+### Rule 28 — Control Inputs Are Range-Checked, Not Trusted
+
+**Control:** `SETTINGS_SPEC` in `agent/energy_agent.py`.
+
+The eight `input_number` helpers on the HA dashboard are not preferences the agent
+consults politely — they are **control inputs**, read every cycle by
+`compute_decision_context()`, which has been authoritative since Phase 5. A wrong value
+is therefore a control fault, not a cosmetic UI issue.
+
+Each helper declares an *intended* value and a *sane band*:
+
+```
+value inside [lo, hi]  → used as-is, even if it differs from `intended`
+value outside [lo, hi] → `intended` substituted FOR THIS CYCLE ONLY + notification
+unreadable/unavailable → `intended` substituted, no violation (transport failure)
+```
+
+**In-band tuning is never overridden.** The bands catch values that break control logic,
+not values that merely differ from a default. If a value genuinely is wanted, widen the
+band — e.g. set `max_insurance_floor_pct`'s `lo` to 0 to allow disabling Rule 15.
+
+**Validate and warn, not self-heal.** Nothing is written back to HA. The substitution
+protects the *current cycle's decision*; the helper keeps its bad value and the user is
+notified so the UI and the agent are reconciled deliberately. Writing back would fight
+legitimate adjustments and hide the drift being diagnosed.
+
+**Audit trail:** every cycle logs `settings_used` and `settings_violations` to
+`decisions.jsonl`. This deliberately does not depend on HA's recorder, which on
+2026-07-23 was found not to be capturing these helpers at all — six days of history
+returned one row per entity while the live states carried same-day `last_changed`.
+
+**Why it exists:** 2026-07-23. Two failures, both invisible:
+
+1. `battery_max_insurance_floor_pct` sat at **0**, silently disabling Rule 15's insurance
+   floor. The code reads `settings.get("max_insurance_floor_pct", 70)` — but the key
+   *existed* with value `0.0`, so the 70 default never fired.
+2. `ev_min_soc_pct` drifted to **80** (intended 30), making `ev_soc(60) < ev_min` true.
+   `ev_case3_below_minimum` fired and put the Zappi on **Fast** at 09:30 on a peak
+   morning while the house battery was at 30% and falling toward the 2:55pm deadline —
+   the EV competing with the battery for the cheap window. The guard here was
+   `ev.get("min_soc_pct") or 20`, which only catches falsy values; 80 is truthy.
+
+The lesson generalises: `x or default` and `dict.get(k, default)` express "if absent",
+not "if wrong". A control layer needs the second, and only an explicit band gives it.
+
 **Auto-expiry:** 12 hours (`MANUAL_OVERRIDE_MAX_HOURS`), after which the agent resumes
 control and says so loudly. A forgotten toggle must not silently disable the agent for
 days — the failure mode is arriving at a peak-month demand window with a flat battery.

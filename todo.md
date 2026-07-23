@@ -22,18 +22,22 @@
   - So the writer is outside the repo: a UI-managed (storage-mode) script/automation, an
     integration, HA Assist/voice, a dashboard slider being nudged, or a phone-app mis-tap.
 
-  **Blocker — there is currently no audit trail.** A 6-day history query returned exactly one
-  row per entity (all timestamped Fri 17), and the values in it disagree with the live states,
-  which carry `last_changed` from today. The logbook is similarly near-empty. The `recorder:`
-  block excludes only 5 Polestar sensors, so these *should* be recorded and are not.
-  **Fix this first — without history, every further theory is unfalsifiable.**
+  **Audit trail — PARTLY SOLVED 2026-07-23 (Rule 28).** The agent now logs `settings_used` and
+  `settings_violations` to `decisions.jsonl` every cycle, so drift is pinned to a 30-minute
+  window without depending on HA's recorder. **From the next cycle on, the data to diagnose this
+  collects itself** — check `settings_used` across cycles to see exactly when a value moves.
+  Still unexplained: HA's recorder is *not* capturing these helpers (a 6-day history query
+  returned one row per entity while live states carried same-day `last_changed`), and the
+  `recorder:` block excludes only 5 Polestar sensors. Worth fixing separately — the logbook's
+  `context_user_id` is what names the writer, and the agent's log cannot supply that.
 
   **Next steps, in order:**
-  1. Add an explicit `recorder:` include (or debug why these entities aren't recorded) so slider
-     changes are captured, then wait for one recurrence and read the logbook `context_user_id` /
-     `context_id` — that names the writer directly.
-  2. Each morning, record the actual readings before resetting anything (see table below) — the
-     *pattern* (which entities, what values, what time) is the diagnosis.
+  1. **Each morning, read `settings_used` in `decisions.jsonl`** for the overnight cycles — that
+     now shows which helper moved and in which 30-minute window, automatically.
+  2. Debug why HA's recorder isn't capturing these entities, then wait for one recurrence and
+     read the logbook `context_user_id` — that names the writer directly, which the agent's own
+     log cannot do.
+  3. Each morning, record the readings before resetting anything (see table below).
   3. Pin the exact entity next time: `ev_min_charge_price_c` has **max 60**, so a reading of 70¢
      cannot be that helper — it is a different entity or a misread. `ev_min_soc_pct` has **max 80**,
      and 80 was exactly the reported value, so "pinned to max" is a live hypothesis.
@@ -47,15 +51,26 @@
   | 2026-07-23 | `ev_min_soc_pct` | 80 | 30 | at entity max |
   | 2026-07-23 | (reported "min price") | 70¢ | 40¢ | exceeds `ev_min_charge_price_c` max of 60 — entity unconfirmed |
 
-- [ ] **`battery_max_insurance_floor_pct` is live at 0 — Rule 15's insurance floor is inert**
-  (found 2026-07-23 while investigating the item above; read from live HA, not from a doc.)
-  Live values vs what `CONTEXT.md` and the "Verify HA slider values" item below expect:
-  `battery_max_insurance_floor_pct` **0** (expected 70) · `battery_charge_price_threshold_c` **10**
-  (expected 12) · `ev_ultra_cheap_threshold_c` **10** (expected 6) · `ev_standard_price_c` **15**.
-  The first one is not cosmetic: at 0 the Rule 15 insurance floor never binds, so the agent has
-  been running without the guard against a cheap window closing early. Decide the intended values,
-  set them, and record them somewhere version-controlled so drift is detectable — then supersede
-  the stale "Verify HA slider values" item below.
+- [ ] **Confirm the `SETTINGS_SPEC` intended values and bands** (Rule 28, added 2026-07-23).
+  The spec now lives in `agent/energy_agent.py` and is version-controlled, so drift is a diff.
+  `intended` was **seeded, not chosen** — from the live helpers after the 2026-07-23 reset, except
+  `max_insurance_floor_pct` (live 0, seeded 70 = `DEFAULT_MAX_INSURANCE_FLOOR`). Please confirm:
+
+  | setting | intended | band | note |
+  |---|---:|---|---|
+  | `ev_ultra_cheap_c` | 10 | 0–12 | CONTEXT once said 6 |
+  | `ev_standard_price_c` | 15 | 0–25 | |
+  | `ev_min_charge_price_c` | 40 | 5–45 | user-confirmed 40 |
+  | `battery_charge_threshold_c` | 10 | 5–30 | CONTEXT once said 12 |
+  | `max_insurance_floor_pct` | 70 | 20–95 | **live value 0 is out of band → 70 substituted** |
+  | `ev_min_soc_pct` | 30 | 0–50 | user-confirmed 30 |
+  | `ev_charge_target_pct` | 80 | 50–100 | |
+  | `ev_departure_target_pct` | 95 | 50–100 | |
+
+  **Rule 15's insurance floor is live again** as of this change (was inert at 0 for an unknown
+  period). If you genuinely want it disabled, set the band's `lo` to 0 rather than reverting the
+  validation. Supersedes the stale "Verify HA slider values" item below — delete that once these
+  are confirmed.
 
 - [ ] **Paste the two dashboard cards** — both HA dashboards are `mode: storage` (UI-managed), so card YAML cannot be committed. Supplied in the 2026-07-22 session: the Manual Agent Override card (override toggle, remaining-to-full, corrected solar, reserve buttons) and the rewritten Solar Forecast card (corrected today/tomorrow, recalibrated <5/5–7/≥7 kWh bands, live inverter-vs-Solcast accuracy line).
 - [x] **Re-run `build_models.py`** — done 2026-07-23 10:39 (`built_at: 2026-07-23`, `obs_days: 46`).
