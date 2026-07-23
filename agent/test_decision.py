@@ -513,7 +513,7 @@ def mk_ev_state(ev_soc, ev_min, ev_target, batt_soc, reserve, price, forward_pri
                "min_soc_pct": ev_min, "charge_target_pct": ev_target, "schedule": None},
         "settings": {"ev_ultra_cheap_c": ultra_cheap_c, "ev_standard_price_c": standard_price_c,
                      "ev_min_charge_price_c": min_charge_price_c,
-                     "battery_charge_threshold_c": 12, "max_insurance_floor_pct": 70},
+                     "max_insurance_floor_pct": 70},
     }
     return state, forecast
 
@@ -1038,6 +1038,32 @@ def test_settings_drifted_ev_min_soc_no_longer_forces_fast():
           not (60 < values["ev_min_soc_pct"]), f"ev_min={values.get('ev_min_soc_pct')}")
 
 
+def test_missing_entity_does_not_crash_the_cycle():
+    """ha_state() raises on a 404. A helper deleted from configuration.yaml must
+    degrade to the 'unreadable' path, not take down get_current_state().
+
+    Found 2026-07-23 the hard way: deleting battery_charge_price_threshold_c from
+    the config while the agent still referenced it made every read raise.
+    """
+    real = ea.ha_state
+
+    def _raises(entity_id):
+        raise RuntimeError("404 Client Error: Not Found")
+
+    try:
+        ea.ha_state = _raises
+        value, violation = ea._validated_setting(
+            "ev_min_soc_pct", _hist("ev_min_soc_pct", 30.0))
+        check("missing entity uses last known good", value == 30.0, f"got {value}")
+        check("missing entity is not a violation when history covers it",
+              violation is None, f"got {violation}")
+        values, _ = ea._read_validated_settings([])
+        check("missing entity with no history omits the key",
+              "ev_min_soc_pct" not in values, f"got {values}")
+    finally:
+        ea.ha_state = real
+
+
 def test_last_known_good_ignores_its_own_substitutions():
     """A substituted value must never be laundered into a 'known good' one.
 
@@ -1146,6 +1172,7 @@ if __name__ == "__main__":
                test_settings_unparseable_flags,
                test_settings_zero_insurance_floor_is_a_violation,
                test_settings_drifted_ev_min_soc_no_longer_forces_fast,
+               test_missing_entity_does_not_crash_the_cycle,
                test_last_known_good_ignores_its_own_substitutions,
                test_last_known_good_rejects_a_string_history,
                test_settings_spec_holds_no_target_values]:

@@ -19,7 +19,10 @@
 # browser dashboard at http://energypi.local:8123 shows. A second, vestigial HA
 # container on the Mac Studio is NOT used — see energy_log 2026-07-22.
 #
-# Config is applied with targeted reloads (automation/template/input_boolean),
+# Config is applied with targeted reloads (automation/template/input_*),
+# NB: input_number/input_text were added to the reload list on 2026-07-23 — without
+# them, adding or deleting a helper deployed the YAML but left the live entity
+# untouched, so a deleted helper kept answering with a stale value.
 # so there is no HA restart and no gap in battery control. If `check_config`
 # rejects the new files they are rolled back automatically before any reload.
 
@@ -65,7 +68,7 @@ fi
 echo "→ reloading (no restart)"
 ssh "$PI" "cd \$HOME/home-energy-agent/agent && ../agent/venv/bin/python -c \"
 import energy_agent as ea
-for dom in ['input_boolean','template','automation']:
+for dom in ['input_boolean','input_number','input_text','template','automation']:
     ea.ha_service(dom,'reload',{}); print('   reloaded', dom)
 \""
 

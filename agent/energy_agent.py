@@ -165,7 +165,6 @@ SETTINGS_SPEC = {
     "ev_ultra_cheap_c":           ("ev_ultra_cheap_c",             0.0,   12.0),
     "ev_standard_price_c":        ("ev_standard_price_c",          0.0,   25.0),
     "ev_min_charge_price_c":      ("ev_min_charge_price_c",        5.0,   45.0),
-    "battery_charge_threshold_c": ("battery_charge_threshold_c",   5.0,   30.0),
     "max_insurance_floor_pct":    ("battery_max_insurance_floor", 20.0,   95.0),
     # EV helpers — these live under state["ev"], not state["settings"], but are
     # validated by the same machinery because they are read by the same layer.
@@ -227,7 +226,6 @@ ENTITIES = {
     "ev_ultra_cheap_c":     "input_number.ev_ultra_cheap_threshold_c",
     "ev_standard_price_c":  "input_number.ev_standard_price_c",
     "ev_min_charge_price_c":"input_number.ev_min_charge_price_c",
-    "battery_charge_threshold_c": "input_number.battery_charge_price_threshold_c",
     "battery_max_insurance_floor": "input_number.battery_max_insurance_floor_pct",
     "fit_price":              "sensor.1a_wigram_road_glebe_feed_in_price",
     "fit_forecast":           "sensor.1a_wigram_road_glebe_feed_in_forecast",
@@ -445,7 +443,7 @@ def get_current_state() -> dict:
         "settings": {
             k: _validated[k] for k in (
                 "ev_ultra_cheap_c", "ev_standard_price_c", "ev_min_charge_price_c",
-                "battery_charge_threshold_c", "max_insurance_floor_pct",
+                "max_insurance_floor_pct",
             ) if k in _validated
             # price_stats injected by run_agent() after get_current_state() returns
         },
@@ -2689,7 +2687,14 @@ def _validated_setting(key: str, history=None):
     """
     _alias, lo, hi = SETTINGS_SPEC[key]
     entity = ENTITIES[_alias]
-    raw = ha_state(entity)
+    # ha_state() raises on a 404 rather than returning None, so a helper that has
+    # been deleted from configuration.yaml (or not yet created) would otherwise
+    # take down the whole cycle from inside get_current_state(). A missing entity
+    # is the "unreadable" case this function already handles.
+    try:
+        raw = ha_state(entity)
+    except Exception:
+        raw = None
 
     def _substitute(found, reason):
         lkg = _last_known_good(key, history)

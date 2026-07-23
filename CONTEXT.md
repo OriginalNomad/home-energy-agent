@@ -190,7 +190,7 @@ Key agent capabilities added 2026-05-31:
 - **FIT price read**: `sensor.1a_wigram_road_glebe_feed_in_price` now in state + JSONL.
 - **Solar zero threshold raised 8am → 9am**: flat-roof panels don't produce before ~9am; zero output at 8am is expected, not a forecast failure.
 - **`battery_autonomous_revert_target_reached` automation fixed**: changed from Tessie OR gateway to Tessie only — gateway floors at reserve level, causing premature revert when reserve=100%.
-- **New HA sliders**: `ev_ultra_cheap_threshold_c`, `battery_charge_price_threshold_c`, `battery_max_insurance_floor_pct`. (`ev_eco_gap_c` was listed here but never existed — removed 2026-07-23.)
+- **New HA sliders**: `ev_ultra_cheap_threshold_c`, `battery_max_insurance_floor_pct`. (`ev_eco_gap_c` was listed here but never existed; `battery_charge_price_threshold_c` was never wired to anything and was deleted — both 2026-07-23.)
 - **60 unit tests** in `agent/test_decision.py`.
 
 Key agent capabilities added 2026-05-29:
