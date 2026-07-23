@@ -362,8 +362,11 @@ def get_current_state() -> dict:
     # 2026-07-23 not to be capturing these helpers at all).
     # History lets a bad value fall back to the last value the console itself
     # held, rather than to a target hardcoded in this file.
+    # NB: get_recent_records() (list of dicts), NOT get_recent_decisions()
+    # (a formatted string for the prompt). Passing the string here silently
+    # iterated characters and made last-known-good never fire.
     try:
-        _settings_history = get_recent_decisions(20)
+        _settings_history = get_recent_records(20)
     except Exception:
         _settings_history = []
     _validated, _setting_violations = _read_validated_settings(_settings_history)

@@ -1038,6 +1038,16 @@ def test_settings_drifted_ev_min_soc_no_longer_forces_fast():
           not (60 < values["ev_min_soc_pct"]), f"ev_min={values.get('ev_min_soc_pct')}")
 
 
+def test_last_known_good_rejects_a_string_history():
+    """Regression: get_recent_decisions() returns a *string*, get_recent_records()
+    a list of dicts. Passing the string silently iterated characters and made
+    last-known-good never fire, so every bad value fell through to the clamp."""
+    check("a string history yields no last-known-good",
+          ea._last_known_good("ev_min_soc_pct", "some formatted block") is None)
+    check("a list of dicts does yield one",
+          ea._last_known_good("ev_min_soc_pct", _hist("ev_min_soc_pct", 30.0)) == 30.0)
+
+
 def test_settings_spec_holds_no_target_values():
     """The spec must declare bands only — never a target.
 
@@ -1109,6 +1119,7 @@ if __name__ == "__main__":
                test_settings_unparseable_flags,
                test_settings_zero_insurance_floor_is_a_violation,
                test_settings_drifted_ev_min_soc_no_longer_forces_fast,
+               test_last_known_good_rejects_a_string_history,
                test_settings_spec_holds_no_target_values]:
         print(f"\n{fn.__name__}")
         fn()
