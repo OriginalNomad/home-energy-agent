@@ -109,16 +109,34 @@ threshold was being respected that nothing enforced ("…hit the battery charge 
 The user reached this conclusion unprompted — "if its only purpose is job 1, is it needed at
 all; the agent should be able to work that out" — which is precisely what Rule 15 does.
 
-**Generalisable test for whether a control deserves to exist:**
-- a **fact about the market** ("is 12¢ cheap?") → the agent should *derive* it; any fixed
-  number encodes a snapshot of conditions and rots.
-- a **preference or risk appetite** ("how full do I want the car?", "how much insurance do I
-  want?") → genuinely the user's, cannot be derived, deserves a control.
+**Generalisable test for whether a control deserves to exist** — first stated as "market fact
+vs preference", then **corrected by the user the same session**, because that version wrongly
+caught the EV price sliders. The accurate test is *whether the control encodes information the
+agent cannot obtain*:
 
-By that test the insurance floor stays (and the user has now set it to **30%**, in band, so it
-is a genuine console reading with zero violations for the first time). The two EV *price*
-sliders are market facts by the same test — noted, not changed, since they work and the EV
-case has a real preference component.
+- **Instrumental, fully-known objective** → derive it. Battery grid-charging has no intrinsic
+  value; it is a cost-arbitrage device whose objective (minimise cost, with demand-charge
+  protection handled separately and price-insensitively) the agent already knows completely.
+  Any fixed cent threshold is a stale approximation of something Rule 15 computes better.
+- **Exogenous value the agent has no access to** → keep the control. The EV has to be driven.
+  "I need the car tomorrow, so I'll pay up to 20¢ today" exists nowhere in the price data,
+  solar forecast or battery state. Willingness-to-pay is the user's only channel for it.
+
+**The failure modes differ, which is what settles it.** A stale market-fact threshold becomes
+**wrong** — "12¢ is cheap" is simply false once the market moves, and it misleads *silently*.
+A stale willingness-to-pay threshold becomes **non-binding but stays true** — "I won't pay
+above 10¢ to fast-charge" is still an accurate preference in a month where 10¢ never occurs;
+it just doesn't fire, and the user notices because the car isn't charged. Silent wrongness vs
+visible non-firing; only the first is a defect.
+
+Third factor: these EV sliders are **meant to be touched**. Staleness only threatens
+set-and-forget controls; adjusting a situational control *is* the intended interaction.
+
+By the corrected test: `battery_charge_price_threshold_c` deleted; the insurance floor stays
+(risk appetite — user has now set it to **30%**, in band, giving zero violations for the first
+time); all five EV sliders stay, `ev_min_charge_price_c` at 40¢ being the clearest case of the
+category — nearly 3× median price, intelligible only as a statement about the cost of being
+stranded.
 
 ### Incident: I deployed the config deletion before pushing the code — one cycle lost
 
