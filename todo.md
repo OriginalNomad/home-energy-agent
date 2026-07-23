@@ -74,10 +74,25 @@
   representation of the values" problem this work is about. Fix the card to read the helper (or
   confirm 12 is intended and set the helper), then decide which value is right.
 
-  **Rule 15's insurance floor is live again** as of this change (was inert at 0 for an unknown
-  period). If you genuinely want it disabled, set the band's `lo` to 0 rather than reverting the
-  validation. Supersedes the stale "Verify HA slider values" item below — delete that once these
-  are confirmed.
+  **The two unconfirmed non-EV helpers are not on any dashboard** (verified 2026-07-23 against
+  all five `lovelace*` files in the Pi's `.storage` — zero occurrences of either entity). So they
+  cannot be set or seen in the console at all, despite `energy_rules.md` describing them as
+  "user-settable sliders".
+
+  - `battery_max_insurance_floor_pct`: no `initial:` in `configuration.yaml`, never exposed, so it
+    has sat at **0 — HA's default-to-`min` for an untouched `input_number`**, not a choice anyone
+    made. **Rule 15's insurance floor has therefore been inert since the helper was introduced
+    (2026-05-31)**, not merely recently.
+  - `battery_charge_price_threshold_c`: reads **10**, and its `min` is 5, so 10 is a real restored
+    value set at some point — but there is now no UI to see or change it.
+
+  **This is the actual fix**: put both on the Energy Agent dashboard so the console genuinely is
+  the source of truth, then set them deliberately. Card YAML supplied in the 2026-07-23 session
+  (dashboards are `mode: storage`, so it must be pasted via the UI). Until then the agent's band
+  substitution is *masking* a control with no interface — which is the opposite of the intent.
+
+  Note the five EV helpers **are** on a dashboard and were confirmed from the user's screenshot;
+  only these two are orphaned.
 
 - [ ] **Reconcile the overnight survival floor — the rule layer and Layer 0 disagree by 15 points**
   (found 2026-07-23 by replay; this is the *real* cause of the drain to 17%, not the solar
