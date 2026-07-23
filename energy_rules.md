@@ -461,6 +461,30 @@ Replaces fixed thresholds with a self-calibrating model based on rolling 7-day p
 
 **Why**: a cheap-window that closes 1.5h early (as observed 2026-05-31) causes under-charging when relying on solar forecast alone. The insurance floor ensures a meaningful minimum SoC is locked in while prices are cheap, independent of the solar forecast.
 
+**Scope, stated plainly (added 2026-07-23).** "non-peak" in the heading has a consequence
+worth spelling out: this rule — and therefore the whole `battery_max_insurance_floor_pct`
+control — is **dormant for eight months of the year**. Active only **Apr, May, Sep, Oct**;
+inactive Nov–Mar and Jun–Aug.
+
+That is correct, not an oversight. In peak months Rule 13's deadline logic drives the battery
+to 85% by 2:55pm regardless of price — a far higher floor than any insurance value would set,
+so the floor could never bind. The demand deadline subsumes it.
+
+Two further properties the control's name does not convey:
+- **It is a *maximum*, not a fixed buffer.** The floor actually applied is
+  `value × (1 − price_position)` — full strength at or below the 7-day p25, sliding linearly
+  to zero at p75. At a setting of 30 with p25=14¢/p75=18¢: 30% at ≤14¢, 22.5% at 15¢, 0% at ≥18¢.
+- **It can only raise the target, never discharge** — the result is clamped to `max(soc, …)`.
+
+The question it answers exists *only* when there is no demand charge: "power is cheap now — do
+I top up, or trust the solar forecast to cover the day?" Given Solcast over-forecasts this site
+by ~2× in winter (Rule 29), the case for carrying some insurance is stronger here than the raw
+forecast would suggest.
+
+Suggested HA label, since "Max insurance floor" conveys none of the above:
+**"Cheap-price insurance (Apr/May/Sep/Oct)"** — description: *"Minimum battery % to lock in
+while power is cheap, instead of trusting the solar forecast. Scales down as price rises."*
+
 
 ### Rule 16 — Solar-Unreliable Autonomous Escalation (non-peak)
 
