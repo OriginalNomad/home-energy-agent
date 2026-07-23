@@ -169,6 +169,32 @@ sensor:
       minutes: 30
 
 template:
+  # Is the current month a demand-charge (peak) month? Ausgrid EA116 applies the
+  # 3–9pm demand charge in Nov, Dec, Jan, Feb, Mar, Jun, Jul, Aug.
+  #
+  # Exists so dashboards can show/hide cards without embedding the month list in
+  # a storage-mode dashboard, where it could not be version-controlled and would
+  # drift silently. Display/visibility use only.
+  #
+  # NB: the month list is deliberately duplicated in `battery_grid_charge_target`
+  # below rather than referenced from here. That sensor carries the 85% peak floor
+  # protecting the demand window, and must not depend on another template entity
+  # resolving first — on 2026-07-22 the absence of that floor was found to make
+  # autonomous mode self-cancelling on peak days. Self-contained is worth one
+  # duplicate. `agent/test_decision.py` asserts this list, the one below, and
+  # `energy_agent.PEAK_MONTHS` all agree, so divergence fails a test rather than
+  # going unnoticed.
+  - binary_sensor:
+      - name: "Peak Month"
+        unique_id: peak_month_demand_charge
+        icon: >
+          {{ 'mdi:calendar-alert' if now().month in [1, 2, 3, 6, 7, 8, 11, 12] else 'mdi:calendar-check' }}
+        state: >
+          {{ now().month in [1, 2, 3, 6, 7, 8, 11, 12] }}
+        attributes:
+          peak_months: "Nov, Dec, Jan, Feb, Mar, Jun, Jul, Aug"
+          off_peak_months: "Apr, May, Sep, Oct"
+
   - sensor:
       - name: "Solar Power W"
         unit_of_measurement: "W"

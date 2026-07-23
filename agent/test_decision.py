@@ -1038,6 +1038,37 @@ def test_settings_drifted_ev_min_soc_no_longer_forces_fast():
           not (60 < values["ev_min_soc_pct"]), f"ev_min={values.get('ev_min_soc_pct')}")
 
 
+def test_peak_months_agree_across_agent_and_ha_config():
+    """The EA116 peak-month list exists in three places. They must not diverge.
+
+    - energy_agent.PEAK_MONTHS          (the control path)
+    - binary_sensor.peak_month          (dashboard visibility)
+    - battery_grid_charge_target        (the 85% peak floor — deliberately
+                                         self-contained, see the comment there)
+
+    Duplication is accepted for the safety-critical sensor, which must not depend
+    on another template entity resolving first. This test is the price of that:
+    divergence fails here instead of going unnoticed, which is how the missing
+    85% floor went undetected for seven weeks (2026-07-22).
+    """
+    import re
+    from pathlib import Path
+    cfg = Path(__file__).resolve().parent.parent / "config" / "configuration.yaml"
+    if not cfg.exists():
+        check("configuration.yaml reachable from tests", False, str(cfg))
+        return
+    text = cfg.read_text()
+    found = re.findall(r"now\(\)\.month in \[([0-9,\s]+)\]", text)
+    check("peak-month list appears in configuration.yaml", len(found) >= 1, f"{len(found)}")
+    # battery_grid_charge_target uses a `peak_months` variable rather than an inline list
+    found += re.findall(r"set peak_months\s*=\s*\[([0-9,\s]+)\]", text)
+    check("both HA copies found", len(found) >= 2, f"found {len(found)}: {found}")
+    for i, raw in enumerate(found):
+        months = {int(x) for x in raw.replace(" ", "").split(",") if x}
+        check(f"HA peak-month list #{i+1} matches agent PEAK_MONTHS",
+              months == set(ea.PEAK_MONTHS), f"{sorted(months)} vs {sorted(ea.PEAK_MONTHS)}")
+
+
 def test_missing_entity_does_not_crash_the_cycle():
     """ha_state() raises on a 404. A helper deleted from configuration.yaml must
     degrade to the 'unreadable' path, not take down get_current_state().
@@ -1172,6 +1203,7 @@ if __name__ == "__main__":
                test_settings_unparseable_flags,
                test_settings_zero_insurance_floor_is_a_violation,
                test_settings_drifted_ev_min_soc_no_longer_forces_fast,
+               test_peak_months_agree_across_agent_and_ha_config,
                test_missing_entity_does_not_crash_the_cycle,
                test_last_known_good_ignores_its_own_substitutions,
                test_last_known_good_rejects_a_string_history,
