@@ -1,5 +1,107 @@
 # Energy System Control Log
 
+## 2026-07-23 (session 18 — 5 kW regime confirmed; slider drift investigation)
+
+### `build_models.py` re-run — the 5 kW regime persisted
+
+User ran the rebuild from the terminal (`built_at: 2026-07-23`, `obs_days: 46`, 10:39).
+`self_consumption` still reported **1.67 kW**, which taken at face value says the 5 kW day was a
+one-off. That reading is wrong, and the aggregate cannot show why.
+
+Split the same filtered power samples per day (mirroring
+`build_charge_rate_model_from_power()`'s filters exactly — `batt < -0.3`, `grid >= 0.5`,
+`MODE_SETTLE_S` respected):
+
+| dates | mode | n/day | median | samples >3 kW |
+|---|---|---|---|---|
+| 07-13 → 07-21 | self_consumption | 114–311 | 1.66–1.67 | 0–7 (0–4%) |
+| **07-22** | self_consumption | 111 | **5.00** | **102 (92%)** |
+| **07-23** | self_consumption | 69 | **5.00** | **66 (96%)** |
+
+By SoC bucket the new regime is 4.99–5.01 kW across 10–60%, p25 within 0.04 of the median — a
+clean step change, not outlier contamination. **Below 70% SoC `self_consumption` and `autonomous`
+are now indistinguishable.** Two consecutive days; "anomaly" should be read as "regime change".
+
+**Why the model didn't move, and won't until ~07-27**: `POWER_DAYS = 10` and `kw` is the *median*,
+so 9 old-regime days outvote 2 new ones. A rolling median is robust to outliers but by
+construction slow to a genuine step change — the model's own design guarantees four more days of
+telling the agent that charging is 3× slower than it is.
+
+**The error is in the cheap direction**, which is the only good news: over-estimating fill time
+makes the agent start early, arriving ahead of the deadline but buying at whatever the price is
+then rather than at the cheapest slot. Safe for the demand charge, wasteful on cost.
+
+**It also retroactively explains the 2026-07-22 LP divergences.** The rule layer charged 47%→80%
+between 10:00 and 12:30 at 12–13¢ while the LP held with projected cost going negative. The LP was
+right, and we can now name the reason the rule layer was wrong: it was budgeting 3× the charging
+time it actually needed. Logged as a divergence *cause* we had not previously identified — not
+(a) a metric mis-firing, (b) LLM caution, or (c) the LP trusting a point forecast, but a stale
+calibration model feeding the rule layer.
+
+**Recommended, not yet implemented**: make the window asymmetric rather than merely shorter —
+fall fast (slower charging is the safe direction), rise only on sustained evidence. The risk is
+asymmetric (~$30 vs cents), so the model should be too. A low quantile does not substitute:
+new-regime p25 is 4.96–4.99, so quantiles hedge within-regime variance, not regime change.
+
+### Slider drift — investigated, not yet diagnosed
+
+User reports the EV/battery threshold `input_number` helpers are repeatedly found higher than
+left, needing manual reset most mornings (this morning: "minimum charge target" 80% vs 30 set,
+"minimum price" 70¢ vs 40 set).
+
+**Ruled out — nothing in this repo writes them.** `energy_agent.py` only *reads* these entities
+(lines 147–153); its only `input_number` writes are the `battery_decision_*` dashboard helpers
+(875–892). No `input_number` writes in `automations.yaml`, none in any other `agent/*.py`. No
+`initial:` on any of the helpers, so an HA restart restores the last value rather than resetting
+to a default — **restart is not the mechanism**. The writer is therefore outside the repo.
+
+**Real blocker: there is no audit trail.** A 6-day history query returned exactly one row per
+entity (all timestamped Fri 17) and those values disagree with the live states, which carry
+`last_changed` from today. The logbook is near-empty for them. The `recorder:` block excludes only
+5 Polestar sensors, so these should be recorded and are not — that discrepancy needs explaining
+before any theory is falsifiable. Recorded in `todo.md` as a daily-review item with a readings
+table, since the pattern across mornings is the diagnosis.
+
+One usable constraint: `ev_min_charge_price_c` has **max 60**, so a reading of 70¢ cannot be that
+helper — different entity or misread, worth pinning next occurrence. `ev_min_soc_pct` has **max
+80** and 80 was exactly the reported value, so "pinned to max" is a live hypothesis.
+
+### Found while investigating — Rule 15's insurance floor is inert
+
+Read from live HA, not from a doc: `battery_max_insurance_floor_pct` is **0** (CONTEXT and the
+"Verify HA slider values" item both expect 70). At 0 the Rule 15 insurance floor never binds, so
+the agent has been running without its guard against a cheap window closing early. Also drifted:
+`battery_charge_price_threshold_c` **10** (expected 12), `ev_ultra_cheap_threshold_c` **10**
+(expected 6). Not changed yet — the intended values are the user's call.
+
+### Operational hazard flagged
+
+The Pi's agent cron is `git pull -q && … && python3 agent/energy_agent.py`. `build_models.py`
+writes `model_params.json` into the working tree, so the Pi always carries a locally-modified
+tracked file. The moment a commit touching that file is pushed from the Mac, the Pi's pull fails,
+the `&&` chain short-circuits, and **the agent silently stops running**. Currently armed (the Pi
+has an uncommitted `model_params.json`). Options in `todo.md`.
+
+### Morning brief observations (2026-07-23)
+
+- Overnight the rule layer fired `peak_solar_will_cover` for 17 consecutive cycles while SoC
+  drained 49% → 17%. `battery_charge_when_critically_low_price_cheap` fired at 08:00 (confirmed
+  via `last_triggered`), the 08:30 HOLD cleared reserve back to 5%, and SoC drifted to 26% before
+  the 10:00 `peak_deadline_autonomous` escalation. Recovered — 40% and charging at 4.98 kW by
+  10:30, comfortably ahead of the 14:55 deadline — but the safety net was load-bearing.
+- **Probable root cause, unfixed**: `compute_decision_context()` still reads *raw* Solcast
+  (`energy_agent.py:133 → :311 → :711`). `solar_correction` is applied only in `optimizer.py`
+  (shadow) and the dashboard sensor push (`:1952`). Overnight the rule layer reasoned against
+  ~16.6 kWh when the calibrated expectation was 7.55 kWh — a 2.2× optimistic forecast held for 17
+  cycles. Layer 2's output does not reach the layer in control.
+- Three-way clean window starts **2026-07-22T10:00**, not 00:00: `optimizer_context.
+  soc_trajectory_pct[0]` reads the hardcoded 50% through the 09:30 cycle and tracks real SoC from
+  10:00. 49 clean cycles so far — LP↔det 84%, LLM↔det 100% (tautological post-Phase-5).
+- Verified clean: `deploy_ha_config.sh --check` zero drift; 31 automation entities = 15 on / 12
+  off / 4 orphans, matching CONTEXT; `energy_log.db` 2242 obs rows, 1 undecided.
+
+---
+
 ## 2026-07-22 (session 17e — dashboard sensors: remaining-to-full, bias-corrected solar)
 
 ### `sensor.battery_remaining_to_full`

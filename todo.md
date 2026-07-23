@@ -4,14 +4,106 @@
 
 ### Immediate
 
+- [ ] 🔁 **REVIEW EACH MORNING UNTIL RESOLVED — HA threshold sliders drifting overnight**
+  *(added 2026-07-23. `/morning` should check this every day and log the readings below until
+  the cause is found. Delete this item once two clean weeks pass or the cause is fixed.)*
+
+  **Symptom (user-reported, 2026-07-23):** the EV/battery threshold `input_number` sliders are
+  repeatedly found at higher values than they were left at, and have to be reset by hand most
+  mornings. Reported this morning: "minimum charge target" at **80%** (set to 30) and a
+  "minimum price" at **70¢** (set to 40).
+
+  **Established so far (2026-07-23) — nothing in this repo writes them:**
+  - `energy_agent.py` only *reads* these entities (`ENTITIES` map, lines 147–153). Its sole
+    `input_number` writes are the `battery_decision_*` dashboard helpers (lines 875–892).
+  - No `input_number` writes in `config/automations.yaml`, and none in any other `agent/*.py`.
+  - No `initial:` on any of these helpers in `configuration.yaml`, so an HA restart *restores*
+    the last value rather than resetting to a default. **A restart is not the mechanism.**
+  - So the writer is outside the repo: a UI-managed (storage-mode) script/automation, an
+    integration, HA Assist/voice, a dashboard slider being nudged, or a phone-app mis-tap.
+
+  **Blocker — there is currently no audit trail.** A 6-day history query returned exactly one
+  row per entity (all timestamped Fri 17), and the values in it disagree with the live states,
+  which carry `last_changed` from today. The logbook is similarly near-empty. The `recorder:`
+  block excludes only 5 Polestar sensors, so these *should* be recorded and are not.
+  **Fix this first — without history, every further theory is unfalsifiable.**
+
+  **Next steps, in order:**
+  1. Add an explicit `recorder:` include (or debug why these entities aren't recorded) so slider
+     changes are captured, then wait for one recurrence and read the logbook `context_user_id` /
+     `context_id` — that names the writer directly.
+  2. Each morning, record the actual readings before resetting anything (see table below) — the
+     *pattern* (which entities, what values, what time) is the diagnosis.
+  3. Pin the exact entity next time: `ev_min_charge_price_c` has **max 60**, so a reading of 70¢
+     cannot be that helper — it is a different entity or a misread. `ev_min_soc_pct` has **max 80**,
+     and 80 was exactly the reported value, so "pinned to max" is a live hypothesis.
+  4. Check HA → Settings → Automations & Scenes for **UI-created** automations/scripts (the YAML
+     file cannot show these), and any myenergi/Zappi or Polestar integration that writes helpers.
+
+  **Morning readings log** (append one row per morning; note "as found", before resetting):
+
+  | date | entity | as found | expected | notes |
+  |------|--------|---------:|---------:|-------|
+  | 2026-07-23 | `ev_min_soc_pct` | 80 | 30 | at entity max |
+  | 2026-07-23 | (reported "min price") | 70¢ | 40¢ | exceeds `ev_min_charge_price_c` max of 60 — entity unconfirmed |
+
+- [ ] **`battery_max_insurance_floor_pct` is live at 0 — Rule 15's insurance floor is inert**
+  (found 2026-07-23 while investigating the item above; read from live HA, not from a doc.)
+  Live values vs what `CONTEXT.md` and the "Verify HA slider values" item below expect:
+  `battery_max_insurance_floor_pct` **0** (expected 70) · `battery_charge_price_threshold_c` **10**
+  (expected 12) · `ev_ultra_cheap_threshold_c` **10** (expected 6) · `ev_standard_price_c` **15**.
+  The first one is not cosmetic: at 0 the Rule 15 insurance floor never binds, so the agent has
+  been running without the guard against a cheap window closing early. Decide the intended values,
+  set them, and record them somewhere version-controlled so drift is detectable — then supersede
+  the stale "Verify HA slider values" item below.
+
 - [ ] **Paste the two dashboard cards** — both HA dashboards are `mode: storage` (UI-managed), so card YAML cannot be committed. Supplied in the 2026-07-22 session: the Manual Agent Override card (override toggle, remaining-to-full, corrected solar, reserve buttons) and the rewritten Solar Forecast card (corrected today/tomorrow, recalibrated <5/5–7/≥7 kWh bands, live inverter-vs-Solcast accuracy line).
-- [ ] **Re-run `build_models.py` tomorrow morning** — decides whether the 5 kW regime was a one-day event or the new normal, and therefore whether `self_consumption` moves off 1.67 kW. Also refreshes the solar corrector.
+- [x] **Re-run `build_models.py`** — done 2026-07-23 10:39 (`built_at: 2026-07-23`, `obs_days: 46`).
+  **Answer: the 5 kW regime persisted — it is not a one-day event.** Per-day split of the same
+  filtered power samples: 07-13→07-21 `self_consumption` median **1.66–1.67** kW with 0–4% of
+  samples above 3 kW; **07-22 median 5.00 (92% fast), 07-23 median 5.00 (96% fast)**. By SoC
+  bucket the new regime is 4.99–5.01 kW across 10–60% with p25 within 0.04 of the median — a
+  clean step change, not outlier contamination. Below 70% SoC `self_consumption` and
+  `autonomous` are now **indistinguishable**.
+  **But `model_params.json` still reports 1.67 kW**, because `POWER_DAYS = 10` and `kw` is the
+  *median*: 9 old-regime days outvote 2 new ones. It cannot flip until ~**2026-07-27**.
+  See the new asymmetric-window item below.
 - [ ] **Cron `build_models.py` nightly (~2am)** — Phase 2.5-B isn't finished until retraining is automatic; it is still run by hand. `ARCHITECTURE.md` calls for a model-accuracy section in the nightly summary too.
+  ⚠️ **When cronning this, fix the pull hazard at the same time.** The Pi's agent cron is
+  `git pull -q && … && python3 agent/energy_agent.py` — an `&&` chain. `build_models.py` writes
+  `agent/model_params.json` *in the working tree*, so the Pi always has a locally-modified tracked
+  file. The moment a commit touching `model_params.json` is pushed from the Mac, the Pi's
+  `git pull` fails, the chain short-circuits, and **the agent silently stops running entirely**.
+  Either commit+push `model_params.json` from the Pi (it has working SSH remote access), or
+  gitignore it and treat it as machine-local state, or decouple the pull from the run so a failed
+  pull can't stop the agent. As of 2026-07-23 the Pi has an uncommitted `model_params.json`, so
+  this trap is currently armed.
 
 - [x] **Phase 3 — retire the Mac HA instance** — done 2026-07-22. Stopped + `--restart=no`. No tunnel change was needed: cloudflared already pointed at `http://localhost:8123` (the Pi's own HA), so CONTEXT's old "→ 192.168.68.70:8123" was stale. `agent.sol.io` and `energypi.local:8123` both verified 200 after the stop.
 - [ ] **Fix `shell_command.push_virtual_sensors`** — pre-existing, surfaced during consolidation. The command points at a *Mac* path, and the script isn't inside the HA container's mount (`~/homeassistant/config` → `/config`), so `restore_virtual_sensors_on_startup` cannot work on the Pi. Low urgency — `demand_window_summary.py --post` runs hourly via cron and re-pushes the sensors anyway. Fix by either copying the script into `config/` or moving the restore into the Pi's cron.
 - [ ] **Explain 5 kW `self_consumption` charging (HIGH — decides the charge rate model)** — raising `backup_reserve_percent` above SoC pulled a sustained 5 kW three times on 2026-07-22, once triggered manually with the agent uninvolved, while `default_real_mode` stayed `self_consumption`. Ten days of 30-second data give a median of 1.67 kW for the same operation — a clean date boundary at 07-22. **Eliminated**: mode switch, HA automations, Storm Watch, Amber SmartShift, reserve−SoC gap (median 1.67 kW in every coarse bucket), SoC level, measurement artefacts. Leading hypothesis: overnight Powerwall firmware push (`26.18.3`), unverifiable — no version entity in HA.
-  **Next steps**: (a) re-run `build_models.py` tomorrow and compare — if 5 kW persists, `self_consumption` fill times drop ~3× and holding for cheap windows becomes the correct default; (b) test the *approach-taper* hypothesis with fine-grained (2-point) reserve−SoC gap buckets — the 12:00 cycle pulled only 0.5 kW at a 6-point gap vs 3.7–5.0 kW at 11–48 points, and the earlier analysis bucketed 1–20 together and averaged that away; (c) poll the Tesla API every ~10 s through a ramp to confirm the mode field genuinely never moves.
+  **UPDATE 2026-07-23 — (a) is answered: the 5 kW regime persisted a second day** (07-22 92% of
+  samples >3 kW, 07-23 96%, median 5.00 both days, vs 0–4% on 07-13→07-21). Treat "anomaly" as
+  "regime change" from here. The firmware-push hypothesis is stronger but still unverifiable.
+  Consequence now live: the agent is planning against 1.67 kW while reality is 5.0 kW, a 3× error
+  that makes it start charging far earlier than needed. Error is in the *cheap* direction (early
+  arrival, wrong price) rather than the dangerous one, which is why this is not an emergency.
+  This also retroactively explains the 2026-07-22 LP-vs-deterministic divergences: the LP held and
+  its projected cost went negative while the rule layer charged 47%→80% at 12–13¢ — **the LP was
+  right, and the rule layer was wrong because it was budgeting 3× the charging time it needed.**
+
+- [ ] **Make the charge-rate window asymmetric (blocks acting on the 5 kW regime change)** —
+  `build_charge_rate_model_from_power()` uses a symmetric 10-day rolling *median*, which is robust
+  to outliers but by construction slow to a genuine step change. The risk is not symmetric though:
+  believing 5 kW when it is really 1.67 means starting late and risking a ~$30 demand charge;
+  believing 1.67 when it is really 5 costs cents. So the model should be allowed to fall
+  **quickly** (slower charging = safe direction, react in ~1 day) and rise only on **sustained**
+  evidence (keep roughly the current inertia). Note a low quantile does *not* substitute for this:
+  new-regime p25 is 4.96–4.99, so quantiles hedge within-regime variance, not a regime change.
+  Under such a scheme today's data still would not flip `self_consumption` to 5.0 — which is the
+  correct outcome. Decide: implement this, or simply let the median flip naturally ~2026-07-27.
+
+  **Remaining next steps**: (b) test the *approach-taper* hypothesis with fine-grained (2-point) reserve−SoC gap buckets — the 12:00 cycle pulled only 0.5 kW at a 6-point gap vs 3.7–5.0 kW at 11–48 points, and the earlier analysis bucketed 1–20 together and averaged that away; (c) poll the Tesla API every ~10 s through a ramp to confirm the mode field genuinely never moves.
 - [ ] **Check `solar_unreliable` calibration** — the solar corrector shows Solcast runs at 0.14–0.16 of actual at 08:00–09:00 in winter, so "7% of forecast" mornings may be normal rather than faults. If the flag fires on ordinary winter mornings it is mislabelling them, and it gates real rule behaviour.
 
 

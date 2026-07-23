@@ -833,6 +833,110 @@ def test_manual_override():
         ea._cycle_context = real_ctx
 
 
+# ---------------------------------------------------------------------------
+# SETTINGS_SPEC validation (added 2026-07-23)
+#
+# These helpers are control inputs read by compute_decision_context(). Before
+# validation existed, `battery_max_insurance_floor_pct` sat at 0 (silently
+# disabling Rule 15's insurance floor) and `ev_min_soc_pct` drifted to 80,
+# firing ev_case3_below_minimum at 60% EV SoC and putting the Zappi on Fast on
+# a peak morning. Both slipped through because the fallback idioms in use
+# (`or 20`, `settings.get(k, DEFAULT)`) only catch falsy or missing values.
+# ---------------------------------------------------------------------------
+
+class _StubHA:
+    """Swap ea.ha_state for a dict lookup, restoring it on exit."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def __enter__(self):
+        self._real = ea.ha_state
+        ea.ha_state = lambda entity_id: self.mapping.get(entity_id)
+        return self
+
+    def __exit__(self, *exc):
+        ea.ha_state = self._real
+        return False
+
+
+def _entity(key):
+    """Resolve a SETTINGS_SPEC key to the HA entity id it reads."""
+    return ea.ENTITIES[ea.SETTINGS_SPEC[key][0]]
+
+
+def test_settings_in_band_used_as_is():
+    """A value inside the band is used even when it differs from `intended`."""
+    with _StubHA({_entity("ev_min_soc_pct"): "45"}):
+        value, violation = ea._validated_setting("ev_min_soc_pct")
+    check("in-band value used as-is", value == 45.0, f"got {value}")
+    check("in-band produces no violation", violation is None, f"got {violation}")
+
+
+def test_settings_out_of_band_falls_back_and_flags():
+    """The real 2026-07-23 failure: ev_min_soc_pct drifted to 80 (band 0–50)."""
+    with _StubHA({_entity("ev_min_soc_pct"): "80"}):
+        value, violation = ea._validated_setting("ev_min_soc_pct")
+    intended = ea.SETTINGS_SPEC["ev_min_soc_pct"][1]
+    check("out-of-band falls back to intended", value == intended, f"got {value}")
+    check("out-of-band is flagged", violation is not None)
+    check("violation records what was found", violation and violation["found"] == 80.0)
+    check("violation records what was used", violation and violation["used"] == intended)
+    check("violation reason is out_of_band",
+          violation and violation["reason"] == "out_of_band")
+
+
+def test_settings_unavailable_falls_back_silently():
+    """An unreadable entity is a transport failure, not a bad value."""
+    for raw in (None, "", "unknown", "unavailable"):
+        with _StubHA({_entity("ev_min_soc_pct"): raw}):
+            value, violation = ea._validated_setting("ev_min_soc_pct")
+        check(f"unavailable ({raw!r}) falls back",
+              value == ea.SETTINGS_SPEC["ev_min_soc_pct"][1], f"got {value}")
+        check(f"unavailable ({raw!r}) is not a violation", violation is None)
+
+
+def test_settings_unparseable_flags():
+    with _StubHA({_entity("ev_min_soc_pct"): "not-a-number"}):
+        value, violation = ea._validated_setting("ev_min_soc_pct")
+    check("unparseable falls back",
+          value == ea.SETTINGS_SPEC["ev_min_soc_pct"][1], f"got {value}")
+    check("unparseable is flagged with reason",
+          violation and violation["reason"] == "unparseable", f"got {violation}")
+
+
+def test_settings_zero_insurance_floor_is_a_violation():
+    """0 disables Rule 15 entirely — must not be accepted silently."""
+    with _StubHA({_entity("max_insurance_floor_pct"): "0"}):
+        value, violation = ea._validated_setting("max_insurance_floor_pct")
+    check("insurance floor 0 is rejected", violation is not None)
+    check("insurance floor 0 falls back to DEFAULT_MAX_INSURANCE_FLOOR",
+          value == float(ea.DEFAULT_MAX_INSURANCE_FLOOR), f"got {value}")
+
+
+def test_settings_drifted_ev_min_soc_is_a_violation():
+    """End-to-end: the drifted helper no longer reaches the EV decision.
+
+    With ev_min_soc_pct at 80, `ev_soc(60) < ev_min` was true and the layer
+    chose Fast. After validation the substituted 30 makes it false, so the
+    cycle falls through to the price-based rules instead.
+    """
+    with _StubHA({_entity("ev_min_soc_pct"): "80"}):
+        values, violations = ea._read_validated_settings()
+    check("drifted ev_min_soc is reported",
+          any(v["setting"] == "ev_min_soc_pct" for v in violations))
+    ev_min = values["ev_min_soc_pct"]
+    check("EV at 60% is no longer 'below minimum'", not (60 < ev_min),
+          f"ev_min={ev_min}")
+
+
+def test_settings_spec_intended_values_are_all_in_band():
+    """Guards against a typo making a fallback value itself out of band."""
+    for key, (_alias, intended, lo, hi) in ea.SETTINGS_SPEC.items():
+        check(f"{key} intended within its own band", lo <= intended <= hi,
+              f"intended={intended} band={lo}-{hi}")
+
+
 if __name__ == "__main__":
     for fn in [test_manual_override,
                test_ev_case6_negative_fit_solar_dump,
@@ -878,7 +982,14 @@ if __name__ == "__main__":
                test_peak_early_morning_hold_not_fired_when_cheap,
                test_peak_early_morning_hold_fires_at_low_soc,
                test_peak_sponge_go_hard, test_peak_sponge_selfcons_then_escalates,
-               test_peak_sponge_solar_improves_to_hold]:
+               test_peak_sponge_solar_improves_to_hold,
+               test_settings_in_band_used_as_is,
+               test_settings_out_of_band_falls_back_and_flags,
+               test_settings_unavailable_falls_back_silently,
+               test_settings_unparseable_flags,
+               test_settings_zero_insurance_floor_is_a_violation,
+               test_settings_drifted_ev_min_soc_is_a_violation,
+               test_settings_spec_intended_values_are_all_in_band]:
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'='*50}\n{_passed} passed, {_failed} failed")

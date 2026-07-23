@@ -96,6 +96,53 @@ DETERMINISTIC_AUTHORITATIVE = True
 # Insurance floor ceiling — maximum floor percentage when price is at the
 # cheapest historical level. User can override via HA slider (below).
 DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
+
+# ---------------------------------------------------------------------------
+# SETTINGS_SPEC — declared sane bands for the HA `input_number` tunables.
+#
+# Why this exists (2026-07-23): these helpers are *control inputs*, read every
+# cycle by compute_decision_context(), which has been authoritative since
+# Phase 5. They were being trusted with no validation and no audit trail, and
+# both of the fallback idioms in use gave only the illusion of a default:
+#
+#     ev.get("min_soc_pct") or 20        # 80 is truthy → fallback never fires
+#     settings.get("max_insurance_floor_pct", 70)   # key exists as 0.0 → 0.0 wins
+#
+# Observed consequences: `battery_max_insurance_floor_pct` sat at 0, silently
+# disabling Rule 15's insurance floor; and `ev_min_soc_pct` drifted to 80,
+# which made `ev_case3_below_minimum` fire at 60% EV SoC and put the Zappi on
+# Fast on a peak morning while the house battery was at 30% and falling.
+#
+# Semantics — deliberately conservative:
+#   * value inside [lo, hi]  → used as-is, even if it differs from `intended`.
+#     In-band tuning is the user's business and is never overridden.
+#   * value outside [lo, hi] → `intended` is substituted **for this cycle only**
+#     and a violation is recorded + notified. Nothing is written back to HA;
+#     the helper keeps whatever the UI says (validate-and-warn, not self-heal).
+#   * unreadable/unavailable → `intended` is substituted, no violation (that is
+#     a transport failure, not a bad value).
+#
+# The bands are meant to catch *pathological* values that break control logic,
+# not to enforce a preference. Widen a band if a value is genuinely wanted —
+# e.g. set max_insurance_floor_pct's lo to 0 to allow disabling Rule 15.
+#
+# `intended` values were seeded 2026-07-23 from the live helpers after the user
+# reset them, except max_insurance_floor_pct (0 live, but 0 disables Rule 15 —
+# seeded from DEFAULT_MAX_INSURANCE_FLOOR instead). CONFIRM THESE.
+SETTINGS_SPEC = {
+    # settings key                 entity alias                  intended  lo    hi
+    "ev_ultra_cheap_c":           ("ev_ultra_cheap_c",           10.0,     0.0,  12.0),
+    "ev_standard_price_c":        ("ev_standard_price_c",        15.0,     0.0,  25.0),
+    "ev_min_charge_price_c":      ("ev_min_charge_price_c",      40.0,     5.0,  45.0),
+    "battery_charge_threshold_c": ("battery_charge_threshold_c", 10.0,     5.0,  30.0),
+    "max_insurance_floor_pct":    ("battery_max_insurance_floor",
+                                   float(DEFAULT_MAX_INSURANCE_FLOOR),     20.0, 95.0),
+    # EV helpers — these live under state["ev"], not state["settings"], but are
+    # validated by the same machinery because they are read by the same layer.
+    "ev_min_soc_pct":             ("ev_min_soc",                 30.0,     0.0,  50.0),
+    "ev_charge_target_pct":       ("ev_charge_target",           80.0,     50.0, 100.0),
+    "ev_departure_target_pct":    ("ev_departure_target",        95.0,     50.0, 100.0),
+}
 PRICE_HISTORY_DAYS          = 7    # days of JSONL price history to use
 MIN_HISTORY_RECORDS         = 48   # minimum records before model activates (~1 day)
 
@@ -278,6 +325,16 @@ def get_current_state() -> dict:
         print("WARNING: sensor.solaredge_current_power is unavailable in HA — "
               "solar reading will be 0; zero-solar cycle NOT counted.", file=sys.stderr)
 
+    # Control inputs are range-checked before anything reads them — these drive
+    # compute_decision_context(), so a drifted helper is a control fault. The
+    # values and any violations are logged per cycle to decisions.jsonl, giving
+    # an audit trail that does not depend on HA's recorder (which was found on
+    # 2026-07-23 not to be capturing these helpers at all).
+    _validated, _setting_violations = _read_validated_settings()
+    _cycle_context["settings_validated"]  = _validated
+    _cycle_context["settings_violations"] = _setting_violations
+    _notify_setting_violations(_setting_violations)
+
     state = {
         "timestamp":       now.strftime("%Y-%m-%d %H:%M %Z"),
         "month":           now.strftime("%B"),
@@ -322,16 +379,19 @@ def get_current_state() -> dict:
             "charging":    ev_plug_state == "Charging",
             "zappi_mode":  ha_state(ENTITIES["ev_zappi_mode"]) if ev_plugged else "n/a",
             "ev_soc_pct":  _safe_int(ENTITIES["ev_soc"]),
-            "min_soc_pct": int(float(ha_state(ENTITIES["ev_min_soc"]) or 20)),
-            "charge_target_pct": int(float(ha_state(ENTITIES["ev_charge_target"]) or 80)),
+            # Validated via SETTINGS_SPEC — the old `or 20` / `or 80` idioms only
+            # caught falsy values, so a drifted-but-truthy 80 sailed through and
+            # changed control behaviour (see SETTINGS_SPEC comment).
+            "min_soc_pct":       int(_validated["ev_min_soc_pct"]),
+            "charge_target_pct": int(_validated["ev_charge_target_pct"]),
             "schedule":    _ev_schedule(now),
         },
         "settings": {
-            "ev_ultra_cheap_c":           _safe_float(ENTITIES["ev_ultra_cheap_c"], 5),
-            "ev_standard_price_c":        _safe_float(ENTITIES["ev_standard_price_c"], 10),
-            "ev_min_charge_price_c":      _safe_float(ENTITIES["ev_min_charge_price_c"], 20),
-            "battery_charge_threshold_c": _safe_float(ENTITIES["battery_charge_threshold_c"], 12),
-            "max_insurance_floor_pct":    _safe_float(ENTITIES["battery_max_insurance_floor"], DEFAULT_MAX_INSURANCE_FLOOR),
+            "ev_ultra_cheap_c":           _validated["ev_ultra_cheap_c"],
+            "ev_standard_price_c":        _validated["ev_standard_price_c"],
+            "ev_min_charge_price_c":      _validated["ev_min_charge_price_c"],
+            "battery_charge_threshold_c": _validated["battery_charge_threshold_c"],
+            "max_insurance_floor_pct":    _validated["max_insurance_floor_pct"],
             # price_stats injected by run_agent() after get_current_state() returns
         },
     }
@@ -739,6 +799,12 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         # excluded from divergence/accuracy analysis — the rule layer's verdict
         # was computed but never acted on.
         "manual_override":           bool(_cycle_context.get("manual_override", False)),
+        # Control inputs actually used this cycle, plus anything that failed its
+        # range check. HA's recorder was found not to be capturing these helpers
+        # (2026-07-23), so this is the audit trail for slider drift — it pins any
+        # change to a 30-minute cycle without depending on HA history.
+        "settings_used":             _cycle_context.get("settings_validated", {}),
+        "settings_violations":       _cycle_context.get("settings_violations", []),
     }
 
     goal_3pm, proj_3pm = _compute_projected_3pm(now)
@@ -2466,6 +2532,72 @@ def _safe_float(entity_id: str, default: float = 0.0) -> float:
         return float(ha_state(entity_id) or default)
     except Exception:
         return default
+
+
+def _validated_setting(key: str):
+    """Read one SETTINGS_SPEC helper from HA and range-check it.
+
+    Returns (value, violation_or_None). See SETTINGS_SPEC for the semantics —
+    in-band values are used as-is, out-of-band values fall back to `intended`
+    for this cycle and produce a violation record. An unreadable entity is a
+    transport failure, not a bad value, so it falls back silently.
+    """
+    alias, intended, lo, hi = SETTINGS_SPEC[key]
+    entity = ENTITIES[alias]
+    raw = ha_state(entity)
+    if raw in (None, "", "unknown", "unavailable"):
+        return intended, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return intended, {"setting": key, "entity": entity, "found": raw,
+                          "used": intended, "band": [lo, hi], "reason": "unparseable"}
+    if lo <= value <= hi:
+        return value, None
+    return intended, {"setting": key, "entity": entity, "found": value,
+                      "used": intended, "band": [lo, hi], "reason": "out_of_band"}
+
+
+def _read_validated_settings() -> tuple[dict, list]:
+    """Read every SETTINGS_SPEC helper, returning (values, violations)."""
+    values, violations = {}, []
+    for key in SETTINGS_SPEC:
+        value, violation = _validated_setting(key)
+        values[key] = value
+        if violation:
+            violations.append(violation)
+    return values, violations
+
+
+def _notify_setting_violations(violations: list) -> None:
+    """Log and push an HA notification when a control input is out of band.
+
+    Deliberately loud: these values drive compute_decision_context(), so a bad
+    one is a control fault, not a cosmetic UI issue. Never raises — a failed
+    notification must not take the agent down.
+    """
+    if not violations:
+        return
+    lines = [
+        f"- {v['setting']}: found {v['found']}, using {v['used']} "
+        f"(sane band {v['band'][0]}–{v['band'][1]}, {v['reason']})"
+        for v in violations
+    ]
+    body = "\n".join(lines)
+    print(f"[settings] {len(violations)} control input(s) out of band:\n{body}")
+    try:
+        ha_service("persistent_notification", "create", {
+            "title": f"⚠️ Agent: {len(violations)} control input(s) out of band",
+            "message": (
+                "These HA helpers drive the agent's decisions. The agent has "
+                "substituted its intended value **for this cycle only** — the "
+                "helper still holds the bad value, so please fix it in the UI.\n\n"
+                + body
+            ),
+            "notification_id": "agent_settings_out_of_band",
+        })
+    except Exception as exc:
+        print(f"[settings] could not push notification: {exc}")
 
 def _args_summary(args: dict) -> str:
     if not args:
