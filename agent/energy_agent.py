@@ -2649,16 +2649,26 @@ def _safe_float(entity_id: str, default: float = 0.0) -> float:
 
 
 def _last_known_good(key: str, history: list):
-    """Most recent in-band value HA itself reported for `key`, or None.
+    """Most recent value HA itself genuinely reported in-band for `key`, or None.
 
-    Reads `settings_used` from past decisions.jsonl records — so the substitute
-    for a bad value is still a value the console actually held, never a target
+    Reads `settings_used` from past decisions.jsonl records, so the substitute
+    for a bad value is a value the console actually held — never a target
     hardcoded here. Returns None when there is no usable history (e.g. before
     this logging existed, or after a long outage).
+
+    **Records where this key was itself substituted are skipped.** `settings_used`
+    logs the value *used*, which may be a substitute; without this check the
+    fallback would read its own earlier output back as evidence and launder a
+    substitute into a permanent "known good" value. Observed 2026-07-23: a
+    hardcoded 70 written by an earlier build was picked up from the log an hour
+    after the hardcoding was removed, and reported as though it came from HA.
     """
     _alias, lo, hi = SETTINGS_SPEC[key]
     for rec in reversed(history or []):
         try:
+            if any(v.get("setting") == key
+                   for v in (rec.get("settings_violations") or [])):
+                continue          # this cycle's value was substituted, not observed
             value = (rec.get("settings_used") or {}).get(key)
             if value is not None and lo <= float(value) <= hi:
                 return float(value)

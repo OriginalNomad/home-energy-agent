@@ -1038,6 +1038,33 @@ def test_settings_drifted_ev_min_soc_no_longer_forces_fast():
           not (60 < values["ev_min_soc_pct"]), f"ev_min={values.get('ev_min_soc_pct')}")
 
 
+def test_last_known_good_ignores_its_own_substitutions():
+    """A substituted value must never be laundered into a 'known good' one.
+
+    `settings_used` logs the value *used*, which may itself be a substitute. On
+    2026-07-23 a hardcoded 70 written by an earlier build was read back from the
+    log an hour after the hardcoding was removed, and reported as though HA had
+    supplied it. Records carrying a violation for the key must be skipped.
+    """
+    laundered = [{
+        "settings_used": {"max_insurance_floor_pct": 70.0},
+        "settings_violations": [{"setting": "max_insurance_floor_pct",
+                                 "found": 0.0, "used": 70.0}],
+    }]
+    check("substituted history is not treated as known-good",
+          ea._last_known_good("max_insurance_floor_pct", laundered) is None)
+
+    genuine = [{"settings_used": {"max_insurance_floor_pct": 65.0},
+                "settings_violations": []}]
+    check("a clean observation is still used",
+          ea._last_known_good("max_insurance_floor_pct", genuine) == 65.0)
+
+    # A clean record must win even when a later cycle substituted.
+    mixed = genuine + laundered
+    check("clean observation preferred over later substitution",
+          ea._last_known_good("max_insurance_floor_pct", mixed) == 65.0)
+
+
 def test_last_known_good_rejects_a_string_history():
     """Regression: get_recent_decisions() returns a *string*, get_recent_records()
     a list of dicts. Passing the string silently iterated characters and made
@@ -1119,6 +1146,7 @@ if __name__ == "__main__":
                test_settings_unparseable_flags,
                test_settings_zero_insurance_floor_is_a_violation,
                test_settings_drifted_ev_min_soc_no_longer_forces_fast,
+               test_last_known_good_ignores_its_own_substitutions,
                test_last_known_good_rejects_a_string_history,
                test_settings_spec_holds_no_target_values]:
         print(f"\n{fn.__name__}")
