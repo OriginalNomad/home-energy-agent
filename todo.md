@@ -56,21 +56,47 @@
   `intended` was **seeded, not chosen** — from the live helpers after the 2026-07-23 reset, except
   `max_insurance_floor_pct` (live 0, seeded 70 = `DEFAULT_MAX_INSURANCE_FLOOR`). Please confirm:
 
-  | setting | intended | band | note |
-  |---|---:|---|---|
-  | `ev_ultra_cheap_c` | 10 | 0–12 | CONTEXT once said 6 |
-  | `ev_standard_price_c` | 15 | 0–25 | |
-  | `ev_min_charge_price_c` | 40 | 5–45 | user-confirmed 40 |
-  | `battery_charge_threshold_c` | 10 | 5–30 | CONTEXT once said 12 |
-  | `max_insurance_floor_pct` | 70 | 20–95 | **live value 0 is out of band → 70 substituted** |
-  | `ev_min_soc_pct` | 30 | 0–50 | user-confirmed 30 |
-  | `ev_charge_target_pct` | 80 | 50–100 | |
-  | `ev_departure_target_pct` | 95 | 50–100 | |
+  | setting | UI label | intended | band | status |
+  |---|---|---:|---|---|
+  | `ev_ultra_cheap_c` | "Fast charge if price ≤" | 10 | 0–12 | ✅ confirmed by user screenshot 2026-07-23 (CONTEXT's "6" is stale) |
+  | `ev_standard_price_c` | "Slow charge if price ≤" | 15 | 0–25 | ✅ confirmed |
+  | `ev_min_charge_price_c` | "Price to reach minimum" | 40 | 5–45 | ✅ confirmed |
+  | `ev_min_soc_pct` | "Minimum charge target" | 30 | 0–50 | ✅ confirmed |
+  | `ev_charge_target_pct` | "Goal (Max)" | 80 | 50–100 | ✅ confirmed |
+  | `battery_charge_threshold_c` | — | 10 | 5–30 | ⬜ still unconfirmed (CONTEXT says 12 — see card discrepancy below) |
+  | `max_insurance_floor_pct` | — | 70 | 20–95 | ⬜ still unconfirmed — **live 0 is out of band → 70 substituted** |
+  | `ev_departure_target_pct` | (Scheduled Charge) | 95 | 50–100 | ⬜ still unconfirmed |
+
+  **Card/helper discrepancy spotted in the same screenshot**: the Grid Price Forecast chart is
+  annotated **"Charge threshold (12¢)"** while `input_number.battery_charge_price_threshold_c` is
+  live at **10¢**. The card appears to hardcode 12 rather than read the helper — so the dashboard
+  is displaying a threshold the agent is not using. Exactly the class of "UI is not an accurate
+  representation of the values" problem this work is about. Fix the card to read the helper (or
+  confirm 12 is intended and set the helper), then decide which value is right.
 
   **Rule 15's insurance floor is live again** as of this change (was inert at 0 for an unknown
   period). If you genuinely want it disabled, set the band's `lo` to 0 rather than reverting the
   validation. Supersedes the stale "Verify HA slider values" item below — delete that once these
   are confirmed.
+
+- [ ] **Reconcile the overnight survival floor — the rule layer and Layer 0 disagree by 15 points**
+  (found 2026-07-23 by replay; this is the *real* cause of the drain to 17%, not the solar
+  forecast — see energy_log for the retraction.)
+  - `compute_decision_context()` holds while `projected_soc_at_sponge > 5%`. At 00:00 on
+    2026-07-23 it projected 12% and held; the projection was accurate.
+  - `battery_low_soc_emergency_charge` (HA automation) triggers at **SoC < 20%**.
+  - So the rule layer deliberately steers toward a trough that the safety automation treats as
+    an emergency. Both are behaving as written. Last night the automation fired at 08:00, the
+    08:30 HOLD immediately cleared reserve back to 5%, and SoC drifted down again — the two
+    layers actively fighting.
+
+  **Decide the intended overnight floor and make both layers use it.** This is a judgement call
+  about how much demand-charge risk to carry overnight, so it needs your input rather than a
+  default. Options: raise the rule layer's survival floor to ~20% to match Layer 0; lower the
+  automation's trigger to match the 5% floor; or set an explicit intermediate floor (say 15%)
+  and update both. Note the 5% floor was chosen deliberately in session 10 (the "5% survival
+  floor replaces 20% threshold" change) — so raising it back is a reversal that should be
+  reasoned about, not just applied.
 
 - [ ] **Paste the two dashboard cards** — both HA dashboards are `mode: storage` (UI-managed), so card YAML cannot be committed. Supplied in the 2026-07-22 session: the Manual Agent Override card (override toggle, remaining-to-full, corrected solar, reserve buttons) and the rewritten Solar Forecast card (corrected today/tomorrow, recalibrated <5/5–7/≥7 kWh bands, live inverter-vs-Solcast accuracy line).
 - [x] **Re-run `build_models.py`** — done 2026-07-23 10:39 (`built_at: 2026-07-23`, `obs_days: 46`).

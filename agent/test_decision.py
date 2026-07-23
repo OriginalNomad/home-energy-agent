@@ -33,7 +33,8 @@ def now_at(hour, minute=0):
 
 
 def mk_state(soc, hour, accuracy="good", solar_kw=3.0, remaining=8.0,
-             is_peak=True, grid_target=30, price=16.0, gateway=None):
+             is_peak=True, grid_target=30, price=16.0, gateway=None,
+             remaining_corrected=None):
     acc_map = {
         "good":       f"good — actual {solar_kw}kW vs forecast (94% of forecast)",
         "poor":       f"poor — actual {solar_kw}kW vs forecast (50% of forecast)",
@@ -51,6 +52,7 @@ def mk_state(soc, hour, accuracy="good", solar_kw=3.0, remaining=8.0,
         },
         "grid": {"price_cents_kwh": price, "in_cheap_window": True},
         "solar": {"current_kw": solar_kw, "forecast_remaining_kwh": remaining,
+                  "forecast_remaining_corrected_kwh": remaining_corrected,
                   "forecast_accuracy": acc_map[accuracy]},
         "home_load_kw": 0.5,
     }
@@ -834,6 +836,72 @@ def test_manual_override():
 
 
 # ---------------------------------------------------------------------------
+# Rule 29 — bias-corrected solar in the control path (added 2026-07-23)
+#
+# Raw Solcast runs ~2x optimistic at this flat-roof site in winter. Until now the
+# correction reached only the dashboard and the shadow LP, while the authoritative
+# rule layer read raw. On 2026-07-23 that held `peak_solar_will_cover` for 17
+# consecutive overnight cycles against ~16.6 kWh of forecast when the calibrated
+# expectation was 7.55 kWh, and the battery drained to 17%.
+# ---------------------------------------------------------------------------
+
+def test_corrected_solar_is_preferred_when_present():
+    """The verdict must reason from the corrected figure, not the raw one."""
+    st = mk_state(50, 9, remaining=16.6, remaining_corrected=7.5)
+    ctx = ea.compute_decision_context(st, flat(14), [], now=now_at(9))
+    check("used figure is the corrected one", ctx["solar_remaining_used_kwh"] == 7.5,
+          ctx.get("solar_remaining_used_kwh"))
+    check("raw is still reported for comparison", ctx["solar_remaining_raw_kwh"] == 16.6)
+    check("corrected is reported", ctx["solar_remaining_corrected_kwh"] == 7.5)
+
+
+def test_corrected_solar_falls_back_to_raw_when_unavailable():
+    """A Solcast attribute outage must degrade to old behaviour, not to zero solar.
+
+    Zero would be the dangerous failure: it would make the agent charge hard from
+    grid on every cycle where the Solcast attributes happened to be missing.
+    """
+    st = mk_state(50, 9, remaining=16.6, remaining_corrected=None)
+    ctx = ea.compute_decision_context(st, flat(14), [], now=now_at(9))
+    check("falls back to raw", ctx["solar_remaining_used_kwh"] == 16.6,
+          ctx.get("solar_remaining_used_kwh"))
+    check("corrected reported as None", ctx["solar_remaining_corrected_kwh"] is None)
+
+
+def test_use_corrected_solar_killswitch_reverts_to_raw():
+    st = mk_state(50, 9, remaining=16.6, remaining_corrected=7.5)
+    original = ea.USE_CORRECTED_SOLAR
+    try:
+        ea.USE_CORRECTED_SOLAR = False
+        ctx = ea.compute_decision_context(st, flat(14), [], now=now_at(9))
+        check("kill-switch reverts to raw", ctx["solar_remaining_used_kwh"] == 16.6,
+              ctx.get("solar_remaining_used_kwh"))
+    finally:
+        ea.USE_CORRECTED_SOLAR = original
+    check("kill-switch restored", ea.USE_CORRECTED_SOLAR is original)
+
+
+def test_corrected_solar_changes_the_verdict_when_it_matters():
+    """The behavioural case this was built for.
+
+    Same battery, same prices, same hour — only the solar figure differs. With raw
+    Solcast the gap to 85% looks covered and the layer holds; with the calibrated
+    figure it does not, and the layer must stop holding for solar that won't come.
+    """
+    optimistic = mk_state(35, 9, remaining=16.6, remaining_corrected=None)
+    calibrated = mk_state(35, 9, remaining=16.6, remaining_corrected=2.0)
+    ctx_opt = ea.compute_decision_context(optimistic, flat(14), [], now=now_at(9))
+    ctx_cal = ea.compute_decision_context(calibrated, flat(14), [], now=now_at(9))
+    check("optimistic raw forecast covers the gap",
+          ctx_opt["kwh_needed_85"] == 0.0, ctx_opt.get("kwh_needed_85"))
+    check("calibrated forecast does NOT cover the gap",
+          ctx_cal["kwh_needed_85"] > 0.0, ctx_cal.get("kwh_needed_85"))
+    check("calibrated verdict stops holding for absent solar",
+          ctx_cal["recommended"]["rule_fired"] != "peak_solar_will_cover",
+          ctx_cal["recommended"]["rule_fired"])
+
+
+# ---------------------------------------------------------------------------
 # SETTINGS_SPEC validation (added 2026-07-23)
 #
 # These helpers are control inputs read by compute_decision_context(). Before
@@ -983,6 +1051,10 @@ if __name__ == "__main__":
                test_peak_early_morning_hold_fires_at_low_soc,
                test_peak_sponge_go_hard, test_peak_sponge_selfcons_then_escalates,
                test_peak_sponge_solar_improves_to_hold,
+               test_corrected_solar_is_preferred_when_present,
+               test_corrected_solar_falls_back_to_raw_when_unavailable,
+               test_use_corrected_solar_killswitch_reverts_to_raw,
+               test_corrected_solar_changes_the_verdict_when_it_matters,
                test_settings_in_band_used_as_is,
                test_settings_out_of_band_falls_back_and_flags,
                test_settings_unavailable_falls_back_silently,

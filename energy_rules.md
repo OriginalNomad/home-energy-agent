@@ -715,6 +715,49 @@ returned one row per entity while the live states carried same-day `last_changed
 The lesson generalises: `x or default` and `dict.get(k, default)` express "if absent",
 not "if wrong". A control layer needs the second, and only an explicit band gives it.
 
+---
+
+### Rule 29 — The Control Layer Reasons From Calibrated Solar, Not Raw Solcast
+
+**Control:** `USE_CORRECTED_SOLAR` in `agent/energy_agent.py` (kill-switch, default True).
+
+Solcast systematically over-forecasts this flat-roof site in winter, and the error is
+strongly hour-dependent — measured actual/forecast ≈ **0.14 at 08:00**, **0.16 at 09:00**,
+rising to **0.74 by 13:00** (`model_params.json["solar_correction"]`, from
+`build_models.py`). Whole-day ratios run **0.26–0.53, median 0.42**.
+
+From Phase 2.5-B's activation (2026-07-22) until 2026-07-23 the correction reached only
+the **dashboard sensor** and the **shadow LP**. `compute_decision_context()` — the
+authoritative layer since Phase 5 — still read raw Solcast. Layer 2's calibration was
+not reaching the layer in control.
+
+```
+remaining = corrected  when USE_CORRECTED_SOLAR and corrected is not None
+          = raw        otherwise
+```
+
+**Falls back to raw, never to zero.** If Solcast's `detailedHourly` attribute is missing,
+the layer uses the raw figure and behaves as it did before. Falling back to *zero* would
+be the dangerous choice — it would make the agent grid-charge hard on any cycle where a
+Solcast attribute happened to be unavailable.
+
+**Direction of risk:** the corrected figure is lower, so `kwh_needed_85` is larger and the
+agent charges more and earlier. That costs money and protects the demand charge — the safe
+direction to err.
+
+**Honest scope — what this does and does not fix.** Replaying all 21 cycles of 2026-07-23
+with raw vs corrected solar changed **which rule fired in 18 of them, and the action in
+none**. The overnight holds were driven by *price* (13–16¢ overnight vs an 11¢ Solar Sponge
+reachable before the deadline), not by the solar forecast, so this change would **not** have
+prevented that night's drain to 17%. It was originally proposed as the fix for exactly that,
+and the replay disproved it.
+
+What it does buy is a rule layer whose `kwh_needed_85` and `net_expected_solar` are honest.
+It will matter on the days when solar genuinely decides the outcome — a marginal peak day
+where raw Solcast says the gap is covered and the calibrated figure says it isn't. Both
+figures are logged per cycle (`solar_remaining_raw_kwh`, `solar_remaining_corrected_kwh`,
+`solar_remaining_used_kwh`) so the effect can be measured rather than assumed.
+
 **Auto-expiry:** 12 hours (`MANUAL_OVERRIDE_MAX_HOURS`), after which the agent resumes
 control and says so loudly. A forgotten toggle must not silently disable the agent for
 days — the failure mode is arriving at a peak-month demand window with a flat battery.

@@ -139,11 +139,25 @@ has an uncommitted `model_params.json`). Options in `todo.md`.
   via `last_triggered`), the 08:30 HOLD cleared reserve back to 5%, and SoC drifted to 26% before
   the 10:00 `peak_deadline_autonomous` escalation. Recovered — 40% and charging at 4.98 kW by
   10:30, comfortably ahead of the 14:55 deadline — but the safety net was load-bearing.
-- **Probable root cause, unfixed**: `compute_decision_context()` still reads *raw* Solcast
-  (`energy_agent.py:133 → :311 → :711`). `solar_correction` is applied only in `optimizer.py`
-  (shadow) and the dashboard sensor push (`:1952`). Overnight the rule layer reasoned against
-  ~16.6 kWh when the calibrated expectation was 7.55 kWh — a 2.2× optimistic forecast held for 17
-  cycles. Layer 2's output does not reach the layer in control.
+- **My "probable root cause" this morning was WRONG — retracted.** I claimed the overnight drain
+  was caused by `compute_decision_context()` reading raw Solcast instead of the corrected figure.
+  Replaying all 21 of today's cycles through the rule layer with raw vs corrected solar shows
+  **18 of 21 change which rule fires, but 0 change the action** — every cycle still holds,
+  just via `peak_early_morning_hold` / `wait_for_cheap_go_hard` instead of
+  `peak_solar_will_cover`. Those rules hold on *price* grounds (overnight 13–16¢ vs an 11¢
+  Solar Sponge reachable in time), and that reasoning was sound. The corrected forecast would
+  not have prevented the drain.
+- **The actual cause is a threshold mismatch between two layers.** The `peak_solar_will_cover`
+  branch runs a survival projection: `projected_soc_at_sponge = soc − home_load × hours_to_sponge
+  / 13.5 × 100`. At 00:00 that gave `49 − (0.5 × 10 / 13.5 × 100) = 12%`, above the layer's **5%**
+  survival floor, so it held — and the projection was accurate, the battery tracked to ~17% by
+  08:00 and would have reached ~12% at 10:00 without intervention. Meanwhile
+  `battery_low_soc_emergency_charge` (Layer 0) triggers at **SoC < 20%**. So the rule layer was
+  deliberately steering to a trough the safety automation is configured to treat as an emergency.
+  Both behaved exactly as written; they simply disagree by 15 points. **That disagreement, not
+  the solar forecast, is what to fix** — decide the intended floor and make both layers use it.
+  Logged as a todo; not changed today, because picking the number is a judgement call about how
+  much demand-charge risk to carry overnight.
 - Three-way clean window starts **2026-07-22T10:00**, not 00:00: `optimizer_context.
   soc_trajectory_pct[0]` reads the hardcoded 50% through the 09:30 cycle and tracks real SoC from
   10:00. 49 clean cycles so far — LP↔det 84%, LLM↔det 100% (tautological post-Phase-5).

@@ -93,6 +93,20 @@ HISTORICAL_PRICE_MODEL = True
 # Flip to False to revert to LLM-authoritative instantly. Phase 5 — see ARCHITECTURE.md.
 DETERMINISTIC_AUTHORITATIVE = True
 
+# USE_CORRECTED_SOLAR: when True, compute_decision_context() reasons about the
+# *bias-corrected* Solcast remaining-today figure rather than the raw one.
+# Solcast over-forecasts this flat-roof site badly in winter (~0.14 of actual at
+# 08:00, ~0.74 by 13:00), so raw values made the rule layer over-optimistic about
+# solar covering the day — on 2026-07-23 it held `peak_solar_will_cover` for 17
+# consecutive overnight cycles against ~16.6 kWh forecast when the calibrated
+# expectation was 7.55 kWh, and the battery drained to 17% before the emergency
+# automation caught it.
+#
+# Direction of risk: the corrected figure is *lower*, so the agent charges more
+# and earlier. That costs money and protects the demand charge — the safe
+# direction to err. Flip to False to revert to raw Solcast instantly.
+USE_CORRECTED_SOLAR = True
+
 # Insurance floor ceiling — maximum floor percentage when price is at the
 # cheapest historical level. User can override via HA slider (below).
 DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
@@ -335,6 +349,10 @@ def get_current_state() -> dict:
     _cycle_context["settings_violations"] = _setting_violations
     _notify_setting_violations(_setting_violations)
 
+    # Bias-corrected solar, computed once per cycle and cached. Feeds both the
+    # dashboard sensor and (when USE_CORRECTED_SOLAR) the decision layer.
+    _solar_bd = _corrected_solar_breakdown()
+
     state = {
         "timestamp":       now.strftime("%Y-%m-%d %H:%M %Z"),
         "month":           now.strftime("%B"),
@@ -366,6 +384,12 @@ def get_current_state() -> dict:
             "forecast_this_hour_kwh":   round(_float(ha_state(ENTITIES["solcast_this_hour"])) / 1000, 2),
             "forecast_next_hour_kwh":   round(_float(ha_state(ENTITIES["solcast_next_hour"])) / 1000, 2),
             "forecast_remaining_kwh":   round(_float(ha_state(ENTITIES["solar_remaining"])), 1),
+            # Bias-corrected remaining-today (Solcast hourly × measured site ratio).
+            # compute_decision_context() prefers this over the raw figure when
+            # USE_CORRECTED_SOLAR is on; None means Solcast detailedHourly was
+            # unavailable, in which case the decision layer falls back to raw.
+            "forecast_remaining_corrected_kwh": (_solar_bd or {}).get("remaining_corrected_kwh"),
+            "correction_ratio":                 (_solar_bd or {}).get("effective_ratio"),
             # Accuracy: compare actual kW vs forecast_this_hour (Wh→kWh ≈ avg kW for the hour)
             "forecast_accuracy":        _solar_accuracy(
                                             round(_float(_solar_raw) / 1000, 2),
@@ -769,6 +793,8 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "solar_current_kw":     solar.get("current_kw"),
         "solar_sensor_unavail": solar.get("sensor_unavailable", False),
         "solar_remaining_kwh":  solar.get("forecast_remaining_kwh"),
+        "solar_remaining_corrected_kwh": solar.get("forecast_remaining_corrected_kwh"),
+        "solar_correction_ratio":        solar.get("correction_ratio"),
         "solar_this_hour_kwh":  solar.get("forecast_this_hour_kwh"),
         "solar_next_hour_kwh":  solar.get("forecast_next_hour_kwh"),
         "home_load_kw":         state.get("home_load_kw"),
@@ -1450,7 +1476,14 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     in_sponge    = state.get("in_solar_sponge", False)
     solar_now          = solar.get("current_kw", 0.0) or 0.0
     solar_unavailable  = solar.get("sensor_unavailable", False)
-    remaining          = solar.get("forecast_remaining_kwh", 0.0) or 0.0
+    remaining_raw      = solar.get("forecast_remaining_kwh", 0.0) or 0.0
+    # Prefer the bias-corrected forecast (Rule 29). Raw Solcast runs ~2x optimistic
+    # at this site in winter, which made the rule layer hold for solar that never
+    # arrived. Falls back to raw when the correction is unavailable, so a Solcast
+    # attribute outage degrades to previous behaviour rather than to zero solar.
+    _remaining_corr    = solar.get("forecast_remaining_corrected_kwh")
+    remaining          = (_remaining_corr if (USE_CORRECTED_SOLAR and _remaining_corr is not None)
+                          else remaining_raw)
     accuracy           = _accuracy_class(solar.get("forecast_accuracy", ""))
 
     zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h, solar_unavailable, remaining)
@@ -1734,6 +1767,12 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "cost_target_pct":     cost_target,
         "cost_target_method":  cost_target_method,
         "expected_solar_kwh":      round(expected_solar, 2),
+        # Both figures logged so the correction's effect on decisions is measurable
+        # — `solar_remaining_used_kwh` is what the verdict was actually reasoned from.
+        "solar_remaining_raw_kwh":       round(remaining_raw, 2),
+        "solar_remaining_corrected_kwh": (round(_remaining_corr, 2)
+                                          if _remaining_corr is not None else None),
+        "solar_remaining_used_kwh":      round(remaining, 2),
         "net_expected_solar_kwh":  round(net_expected_solar, 2),
         "solar_can_cover":         solar_can_cover,
         "hours_to_cheap_end":  round(hours_to_cheap_end, 2),
@@ -1990,29 +2029,27 @@ Zappi mode except Case 6 above. Never cite FIT when explaining a standard Eco/Fa
 # Agent loop
 # ---------------------------------------------------------------------------
 
-def push_corrected_solar_forecast() -> "float | None":   # quoted: Mac dev python is 3.9 (PEP 604 needs 3.10)
-    """Push `sensor.solar_forecast_corrected` — Solcast, corrected for site bias.
+def _corrected_solar_breakdown(use_cache: bool = True):
+    """Weight Solcast's hourly forecast by the measured per-hour site bias.
 
-    Solcast systematically over-forecasts this flat-roof site in winter, and the
-    error is strongly hour-dependent: measured actual/forecast runs ~0.14 at
-    08:00 and ~0.16 at 09:00, rising to ~0.74 by 13:00 (see
-    model_params.json["solar_correction"], built by build_models.py).
+    Extracted from push_corrected_solar_forecast() on 2026-07-23 so the *control
+    path* can use the same numbers the dashboard shows. Before that split the
+    correction existed only on the dashboard and in the shadow LP, while
+    compute_decision_context() — authoritative since Phase 5 — still read raw
+    Solcast. On 2026-07-23 that had the rule layer holding `peak_solar_will_cover`
+    for 17 consecutive overnight cycles against ~16.6 kWh of forecast when the
+    calibrated expectation was 7.55 kWh, and the battery drained to 17%.
 
-    A single whole-day scalar would therefore be wrong in both directions — too
-    harsh in the morning when the good midday hours are still ahead, too
-    generous late in the day when only poor hours remain. So this weights each
-    *remaining* hour by its own measured ratio, using Solcast's `detailedHourly`
-    breakdown (verified to sum to the headline forecast).
+    Returns a dict of raw/corrected kWh for remaining-today, today-total and
+    tomorrow, or None if Solcast's detailedHourly is unavailable. Never raises.
 
-    Ratios are read from model_params.json rather than hardcoded here, so
-    rebuilding the model updates this automatically. Hours with fewer than
-    min_samples observations fall back to 1.0 (uncorrected) rather than guessing.
-
-    Returns the corrected kWh, or None if unavailable. Never raises.
+    Result is cached per cycle — get_current_state() is called more than once per
+    cycle and this makes two HA attribute reads.
     """
+    if use_cache and "solar_breakdown" in _cycle_context:
+        return _cycle_context["solar_breakdown"]
     try:
-        attrs = ha_attrs(ENTITIES["solcast_today"])
-        hourly = attrs.get("detailedHourly") or []
+        hourly = (ha_attrs(ENTITIES["solcast_today"]) or {}).get("detailedHourly") or []
         if not hourly:
             return None
         corr_map = (_model_params or {}).get("solar_correction") or {}
@@ -2042,18 +2079,64 @@ def push_corrected_solar_forecast() -> "float | None":   # quoted: Mac dev pytho
                     corrected += pv              # no data for this hour — don't guess
             return raw, corrected, applied
 
-        raw, corrected, applied = _apply(hourly, since=hour_now)
+        raw, corrected, applied  = _apply(hourly, since=hour_now)
         today_raw, today_corr, _ = _apply(hourly)
 
-        # Tomorrow matters most on this card: it drives the "overnight top-up
-        # likely needed" call, and raw Solcast runs ~2x optimistic here in winter.
+        # Tomorrow matters most on the dashboard card: it drives the "overnight
+        # top-up likely needed" call, and raw Solcast runs ~2x optimistic here.
         try:
-            tmr_hourly = ha_attrs(ENTITIES["solcast_tomorrow"]).get("detailedHourly") or []
+            tmr_hourly = (ha_attrs(ENTITIES["solcast_tomorrow"]) or {}).get("detailedHourly") or []
         except Exception:
             tmr_hourly = []
         tmr_raw, tmr_corr, _ = _apply(tmr_hourly)
 
-        ratio = round(corrected / raw, 3) if raw > 0 else None
+        result = {
+            "remaining_raw_kwh":       round(raw, 2),
+            "remaining_corrected_kwh": round(corrected, 2),
+            "hours_corrected":         applied,
+            "today_raw_kwh":           round(today_raw, 2),
+            "today_corrected_kwh":     round(today_corr, 2),
+            "tomorrow_raw_kwh":        round(tmr_raw, 2),
+            "tomorrow_corrected_kwh":  round(tmr_corr, 2),
+            "have_tomorrow":           bool(tmr_hourly),
+            "effective_ratio":         round(corrected / raw, 3) if raw > 0 else None,
+        }
+        _cycle_context["solar_breakdown"] = result
+        return result
+    except Exception as exc:
+        print(f"[solar] corrected breakdown unavailable: {exc}")
+        return None
+
+
+def push_corrected_solar_forecast() -> "float | None":   # quoted: Mac dev python is 3.9 (PEP 604 needs 3.10)
+    """Push `sensor.solar_forecast_corrected` — Solcast, corrected for site bias.
+
+    Solcast systematically over-forecasts this flat-roof site in winter, and the
+    error is strongly hour-dependent: measured actual/forecast runs ~0.14 at
+    08:00 and ~0.16 at 09:00, rising to ~0.74 by 13:00 (see
+    model_params.json["solar_correction"], built by build_models.py).
+
+    A single whole-day scalar would therefore be wrong in both directions — too
+    harsh in the morning when the good midday hours are still ahead, too
+    generous late in the day when only poor hours remain. So this weights each
+    *remaining* hour by its own measured ratio, using Solcast's `detailedHourly`
+    breakdown (verified to sum to the headline forecast).
+
+    Ratios are read from model_params.json rather than hardcoded here, so
+    rebuilding the model updates this automatically. Hours with fewer than
+    min_samples observations fall back to 1.0 (uncorrected) rather than guessing.
+
+    Returns the corrected kWh, or None if unavailable. Never raises.
+    """
+    try:
+        b = _corrected_solar_breakdown()
+        if b is None:
+            return None
+        raw, corrected, applied = b["remaining_raw_kwh"], b["remaining_corrected_kwh"], b["hours_corrected"]
+        today_raw, today_corr   = b["today_raw_kwh"], b["today_corrected_kwh"]
+        tmr_raw, tmr_corr       = b["tomorrow_raw_kwh"], b["tomorrow_corrected_kwh"]
+        tmr_hourly              = b["have_tomorrow"]
+        ratio                   = b["effective_ratio"]
         ha_set_state(
             "sensor.solar_forecast_corrected",
             f"{corrected:.2f}",
