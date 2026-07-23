@@ -194,6 +194,10 @@ template:
         attributes:
           peak_months: "Nov, Dec, Jan, Feb, Mar, Jun, Jul, Aug"
           off_peak_months: "Apr, May, Sep, Oct"
+          # Entities-card rows render a binary_sensor as On/Off, which reads oddly
+          # for a month. `type: attribute` rows can show this instead.
+          yes_no: >
+            {{ 'Yes' if now().month in [1, 2, 3, 6, 7, 8, 11, 12] else 'No' }}
 
   - sensor:
       - name: "Solar Power W"
