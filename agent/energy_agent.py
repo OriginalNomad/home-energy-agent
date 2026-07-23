@@ -136,26 +136,42 @@ DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
 #   * unreadable/unavailable → `intended` is substituted, no violation (that is
 #     a transport failure, not a bad value).
 #
-# The bands are meant to catch *pathological* values that break control logic,
-# not to enforce a preference. Widen a band if a value is genuinely wanted —
-# e.g. set max_insurance_floor_pct's lo to 0 to allow disabling Rule 15.
+# NO TARGET VALUES ARE STORED HERE. The HA console is the single source of truth
+# for what the targets *are*; this table only declares what range is structurally
+# valid. That distinction matters:
 #
-# `intended` values were seeded 2026-07-23 from the live helpers after the user
-# reset them, except max_insurance_floor_pct (0 live, but 0 disables Rule 15 —
-# seeded from DEFAULT_MAX_INSURANCE_FLOOR instead). CONFIRM THESE.
+#   * a **target** ("charge the EV fast below 10¢") is a preference. It lives in
+#     HA, is set and displayed there, and is never duplicated in code or docs —
+#     duplicates go stale silently. On 2026-07-23 CONTEXT.md claimed 6¢ while the
+#     console said 10¢, and energy_rules.md gave the same helper two different
+#     "defaults" (5¢ and 6¢) in one document.
+#   * a **band** ("below 0 or above 12 and the rule stops meaning what it should")
+#     is an engineering limit, not a preference. Validation is impossible without
+#     one, so bands are the only numbers kept here.
+#
+# When a value falls outside its band the substitute is, in order:
+#   1. the most recent in-band value HA itself reported (from `settings_used` in
+#      decisions.jsonl) — still HA as the source of truth, just an earlier read;
+#   2. failing that, the bad value clamped to the nearest band edge;
+#   3. failing that (entity unreadable, no history), the key is omitted entirely
+#      so the caller's own `.get(key, default)` applies — which is correct for a
+#      genuinely absent value, and was never the bug. The bug was a key that
+#      *existed* holding a wrong value, where `.get`'s default can never fire.
+#
+# Widen a band if a value is genuinely wanted — e.g. set max_insurance_floor_pct's
+# `lo` to 0 to allow disabling Rule 15's floor.
 SETTINGS_SPEC = {
-    # settings key                 entity alias                  intended  lo    hi
-    "ev_ultra_cheap_c":           ("ev_ultra_cheap_c",           10.0,     0.0,  12.0),
-    "ev_standard_price_c":        ("ev_standard_price_c",        15.0,     0.0,  25.0),
-    "ev_min_charge_price_c":      ("ev_min_charge_price_c",      40.0,     5.0,  45.0),
-    "battery_charge_threshold_c": ("battery_charge_threshold_c", 10.0,     5.0,  30.0),
-    "max_insurance_floor_pct":    ("battery_max_insurance_floor",
-                                   float(DEFAULT_MAX_INSURANCE_FLOOR),     20.0, 95.0),
+    # settings key                 entity alias                    lo     hi
+    "ev_ultra_cheap_c":           ("ev_ultra_cheap_c",             0.0,   12.0),
+    "ev_standard_price_c":        ("ev_standard_price_c",          0.0,   25.0),
+    "ev_min_charge_price_c":      ("ev_min_charge_price_c",        5.0,   45.0),
+    "battery_charge_threshold_c": ("battery_charge_threshold_c",   5.0,   30.0),
+    "max_insurance_floor_pct":    ("battery_max_insurance_floor", 20.0,   95.0),
     # EV helpers — these live under state["ev"], not state["settings"], but are
     # validated by the same machinery because they are read by the same layer.
-    "ev_min_soc_pct":             ("ev_min_soc",                 30.0,     0.0,  50.0),
-    "ev_charge_target_pct":       ("ev_charge_target",           80.0,     50.0, 100.0),
-    "ev_departure_target_pct":    ("ev_departure_target",        95.0,     50.0, 100.0),
+    "ev_min_soc_pct":             ("ev_min_soc",                   0.0,   50.0),
+    "ev_charge_target_pct":       ("ev_charge_target",            50.0,  100.0),
+    "ev_departure_target_pct":    ("ev_departure_target",         50.0,  100.0),
 }
 PRICE_HISTORY_DAYS          = 7    # days of JSONL price history to use
 MIN_HISTORY_RECORDS         = 48   # minimum records before model activates (~1 day)
@@ -344,7 +360,13 @@ def get_current_state() -> dict:
     # values and any violations are logged per cycle to decisions.jsonl, giving
     # an audit trail that does not depend on HA's recorder (which was found on
     # 2026-07-23 not to be capturing these helpers at all).
-    _validated, _setting_violations = _read_validated_settings()
+    # History lets a bad value fall back to the last value the console itself
+    # held, rather than to a target hardcoded in this file.
+    try:
+        _settings_history = get_recent_decisions(20)
+    except Exception:
+        _settings_history = []
+    _validated, _setting_violations = _read_validated_settings(_settings_history)
     _cycle_context["settings_validated"]  = _validated
     _cycle_context["settings_violations"] = _setting_violations
     _notify_setting_violations(_setting_violations)
@@ -406,16 +428,22 @@ def get_current_state() -> dict:
             # Validated via SETTINGS_SPEC — the old `or 20` / `or 80` idioms only
             # caught falsy values, so a drifted-but-truthy 80 sailed through and
             # changed control behaviour (see SETTINGS_SPEC comment).
-            "min_soc_pct":       int(_validated["ev_min_soc_pct"]),
-            "charge_target_pct": int(_validated["ev_charge_target_pct"]),
+            # If the helper is unreadable AND there is no history, fall back to
+            # the *conservative extreme* rather than to an invented target: 0 for
+            # both makes `ev_soc < min` false and `ev_soc >= target` true, so the
+            # EV goes solar-only (Eco+). Losing sight of a setting should never
+            # start grid-charging the car.
+            "min_soc_pct":       int(_validated.get("ev_min_soc_pct", 0)),
+            "charge_target_pct": int(_validated.get("ev_charge_target_pct", 0)),
             "schedule":    _ev_schedule(now),
         },
+        # Only keys that could be established appear here; anything absent leaves
+        # the consumer's own `.get(key, default)` to apply.
         "settings": {
-            "ev_ultra_cheap_c":           _validated["ev_ultra_cheap_c"],
-            "ev_standard_price_c":        _validated["ev_standard_price_c"],
-            "ev_min_charge_price_c":      _validated["ev_min_charge_price_c"],
-            "battery_charge_threshold_c": _validated["battery_charge_threshold_c"],
-            "max_insurance_floor_pct":    _validated["max_insurance_floor_pct"],
+            k: _validated[k] for k in (
+                "ev_ultra_cheap_c", "ev_standard_price_c", "ev_min_charge_price_c",
+                "battery_charge_threshold_c", "max_insurance_floor_pct",
+            ) if k in _validated
             # price_stats injected by run_agent() after get_current_state() returns
         },
     }
@@ -2617,36 +2645,82 @@ def _safe_float(entity_id: str, default: float = 0.0) -> float:
         return default
 
 
-def _validated_setting(key: str):
+def _last_known_good(key: str, history: list):
+    """Most recent in-band value HA itself reported for `key`, or None.
+
+    Reads `settings_used` from past decisions.jsonl records — so the substitute
+    for a bad value is still a value the console actually held, never a target
+    hardcoded here. Returns None when there is no usable history (e.g. before
+    this logging existed, or after a long outage).
+    """
+    _alias, lo, hi = SETTINGS_SPEC[key]
+    for rec in reversed(history or []):
+        try:
+            value = (rec.get("settings_used") or {}).get(key)
+            if value is not None and lo <= float(value) <= hi:
+                return float(value)
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _validated_setting(key: str, history=None):
     """Read one SETTINGS_SPEC helper from HA and range-check it.
 
-    Returns (value, violation_or_None). See SETTINGS_SPEC for the semantics —
-    in-band values are used as-is, out-of-band values fall back to `intended`
-    for this cycle and produce a violation record. An unreadable entity is a
-    transport failure, not a bad value, so it falls back silently.
+    Returns (value_or_None, violation_or_None). See SETTINGS_SPEC for the full
+    semantics. In short: in-band values pass through untouched; out-of-band
+    values are replaced by the last in-band value HA reported, else by the bad
+    value clamped to the nearest band edge. A `None` value means the entity was
+    unreadable and no history exists — the caller should apply its own default,
+    which is the correct handling for a genuinely absent value.
     """
-    alias, intended, lo, hi = SETTINGS_SPEC[key]
-    entity = ENTITIES[alias]
+    _alias, lo, hi = SETTINGS_SPEC[key]
+    entity = ENTITIES[_alias]
     raw = ha_state(entity)
+
+    def _substitute(found, reason):
+        lkg = _last_known_good(key, history)
+        if lkg is not None:
+            used, source = lkg, "last_known_good"
+        elif isinstance(found, float):
+            used, source = min(max(found, lo), hi), "clamped_to_band"
+        else:
+            used, source = None, "unavailable_no_history"
+        return used, {"setting": key, "entity": entity, "found": found,
+                      "used": used, "band": [lo, hi],
+                      "reason": reason, "source": source}
+
     if raw in (None, "", "unknown", "unavailable"):
-        return intended, None
+        # Transport failure, not a bad value. Substitute quietly if we can, and
+        # only raise a violation when we cannot supply anything at all.
+        lkg = _last_known_good(key, history)
+        if lkg is not None:
+            return lkg, None
+        return None, {"setting": key, "entity": entity, "found": raw, "used": None,
+                      "band": [lo, hi], "reason": "unreadable",
+                      "source": "unavailable_no_history"}
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return intended, {"setting": key, "entity": entity, "found": raw,
-                          "used": intended, "band": [lo, hi], "reason": "unparseable"}
+        return _substitute(raw, "unparseable")
     if lo <= value <= hi:
         return value, None
-    return intended, {"setting": key, "entity": entity, "found": value,
-                      "used": intended, "band": [lo, hi], "reason": "out_of_band"}
+    return _substitute(value, "out_of_band")
 
 
-def _read_validated_settings() -> tuple[dict, list]:
-    """Read every SETTINGS_SPEC helper, returning (values, violations)."""
+def _read_validated_settings(history=None) -> tuple[dict, list]:
+    """Read every SETTINGS_SPEC helper, returning (values, violations).
+
+    Keys whose value could not be established at all are omitted, so the
+    caller's own `.get(key, default)` applies — correct for a genuinely absent
+    value, and never the failure mode this guards against (a key that exists
+    holding a wrong value, where `.get`'s default can never fire).
+    """
     values, violations = {}, []
     for key in SETTINGS_SPEC:
-        value, violation = _validated_setting(key)
-        values[key] = value
+        value, violation = _validated_setting(key, history)
+        if value is not None:
+            values[key] = value
         if violation:
             violations.append(violation)
     return values, violations

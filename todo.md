@@ -98,6 +98,38 @@
   floor replaces 20% threshold" change) — so raising it back is a reversal that should be
   reasoned about, not just applied.
 
+- [ ] **HIGH — the agent decides on a 5-minute spot price, not a 30-minute one**
+  (found 2026-07-23 chasing "why did the EV stay on Fast at 11¢ when the threshold is 10¢".)
+
+  `sensor.1a_wigram_road_glebe_general_price` carries **`duration: 5`** — it is a 5-minute
+  settlement price. The agent samples it once per 30-minute cycle and treats that single reading
+  as *the* price for the whole interval. Real 5-minute prices swing hard, so every threshold
+  comparison in the system is being made on what is effectively a sampled coin-flip.
+
+  Measured on 2026-07-23, the sensor crossing the 10¢ EV threshold repeatedly within minutes:
+  ```
+  11:40:14 → 7¢    11:45:14 → 7¢     11:56:16 → 9¢
+  11:41:14 → 11¢   11:46:14 → 10¢    12:00:17 → 11¢
+  ```
+  The 12:00 cycle sampled at 12:00:05 and saw **9¢** (set at 11:56:16) → `ev_ultra_cheap` → Fast.
+  Twelve seconds later it was 11¢, which is what the dashboard showed and would have given Eco.
+  **The agent was correct given what it sampled**; the input is the problem, not the logic.
+
+  Affects every threshold in the system, not just EV: `ev_ultra_cheap_c`, `ev_standard_price_c`,
+  `battery_charge_threshold_c`, the spread calculation, and `forward_min_c`.
+
+  **Options** (needs a decision):
+  1. Use the current **30-minute forecast slot** instead of the live 5-min sensor — the agent
+     already reads a 30-min-granularity forecast for `price_forecast_6h`, so `forecast[0]` is
+     probably the right value and costs nothing extra. Likely the correct fix.
+  2. Average/median the last six 5-minute readings from HA history — more faithful to what you
+     actually pay, but adds a history call per cycle.
+  3. Add hysteresis to threshold comparisons so the mode doesn't flip on noise (worth doing
+     regardless of 1 or 2, since Zappi mode changes have their own cost).
+
+  Note this also explains why the dashboard and the agent can disagree about "the price" at any
+  instant — same class of problem as the sliders: what is displayed is not what was acted on.
+
 - [ ] **Paste the two dashboard cards** — both HA dashboards are `mode: storage` (UI-managed), so card YAML cannot be committed. Supplied in the 2026-07-22 session: the Manual Agent Override card (override toggle, remaining-to-full, corrected solar, reserve buttons) and the rewritten Solar Forecast card (corrected today/tomorrow, recalibrated <5/5–7/≥7 kWh bands, live inverter-vs-Solcast accuracy line).
 - [x] **Re-run `build_models.py`** — done 2026-07-23 10:39 (`built_at: 2026-07-23`, `obs_days: 46`).
   **Answer: the 5 kW regime persisted — it is not a one-day event.** Per-day split of the same
@@ -151,7 +183,12 @@
 - [x] **Run `build_models.py` on Pi** — done 2026-07-22. Required fixing three bugs first (the script had never executed). Solar correction ratios came in at **0.14–0.74**, well below the 0.5–1.5 range anticipated here — Solcast's winter morning over-forecast is far larger than assumed. Re-run periodically to accumulate autonomous samples.
 
 - [x] **Reload HA automations** — `battery_low_soc_emergency_charge` (20¢ ceiling + 85% peak target) and both demand window warning automations (1-min debounce) were updated 2026-06-23. Reloaded 2026-06-24.
-- [ ] **Verify HA slider values** — confirm after June 2 restart: `ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`, `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`.
+- [x] **Verify HA slider values** — deleted 2026-07-23. This item *was* the antipattern: it
+  hardcoded four target values (`ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`,
+  `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`), three of which
+  were wrong against the live console and one of which (`ev_eco_gap_c`) names an entity that has
+  never existed in the code or HA config. Superseded by Rule 28: the console is the source of
+  truth and `settings_used` in `decisions.jsonl` records what the agent actually decided with.
 
 ### Architecture roadmap (in order)
 

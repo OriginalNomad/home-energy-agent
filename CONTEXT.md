@@ -182,7 +182,7 @@ Key agent capabilities added 2026-06-01:
 
 Key agent capabilities added 2026-05-31:
 - **Historical price model (Rule 15)**: `HISTORICAL_PRICE_MODEL = True`. Grid charge target now computed from rolling 7-day price percentiles (p25/p75) — at cheap prices, discounts solar forecast and adds insurance floor. Self-calibrating. Rollback: set flag to False.
-- **Insurance floor**: `input_number.battery_max_insurance_floor_pct` (default 70%) — minimum SoC to lock in while prices are cheap, guards against cheap window closing early.
+- **Insurance floor**: `input_number.battery_max_insurance_floor_pct` — minimum SoC to lock in while prices are cheap, guards against cheap window closing early. Live value in the HA console; never restated here.
 - **Sliding forecast detector (Rule 17)**: `_detect_sliding_forecast()` — if cheap window has been "1–2h away" for 3+ cycles but never arrived, treats forecast as unreliable and charges now.
 - **Solar-unreliable autonomous escalation (Rule 16)**: when solar unreliable, uses 1.5h buffer instead of 0.5h for autonomous escalation — fills from grid before cheap window closes.
 - **EV 3-phase progression (Rule 18)**: Eco (trickle while cheaper upcoming) → Fast (at cheapest moment) → Eco+ (target met). Thresholds user-settable via HA sliders.
@@ -190,7 +190,7 @@ Key agent capabilities added 2026-05-31:
 - **FIT price read**: `sensor.1a_wigram_road_glebe_feed_in_price` now in state + JSONL.
 - **Solar zero threshold raised 8am → 9am**: flat-roof panels don't produce before ~9am; zero output at 8am is expected, not a forecast failure.
 - **`battery_autonomous_revert_target_reached` automation fixed**: changed from Tessie OR gateway to Tessie only — gateway floors at reserve level, causing premature revert when reserve=100%.
-- **New HA sliders**: `ev_ultra_cheap_threshold_c`, `ev_eco_gap_c`, `battery_charge_price_threshold_c`, `battery_max_insurance_floor_pct`.
+- **New HA sliders**: `ev_ultra_cheap_threshold_c`, `battery_charge_price_threshold_c`, `battery_max_insurance_floor_pct`. (`ev_eco_gap_c` was listed here but never existed — removed 2026-07-23.)
 - **60 unit tests** in `agent/test_decision.py`.
 
 Key agent capabilities added 2026-05-29:

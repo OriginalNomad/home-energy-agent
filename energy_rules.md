@@ -209,16 +209,21 @@ The old logic found the first interval exceeding 30¢ — which means it found n
 Use `Eco+` as the default (charges only from actual solar export past the meter). Override to `Eco` or `Fast` only when the grid price is below user-set thresholds and we are outside the demand window.
 
 **Three user-set price thresholds (HA sliders):**
-- `ev_ultra_cheap_threshold_c` (default 5¢) — price at or below this → **Fast** (charge at full speed)
-- `ev_standard_price_c` (default 10¢) — price at or below this → **Eco** (charge slowly from grid+solar)
-- `ev_min_charge_price_c` (default 20¢) — ceiling for the below-minimum emergency charge; above this price even an EV below min SoC stays on Eco+
+- `ev_ultra_cheap_threshold_c` — price at or below this → **Fast** (charge at full speed)
+- `ev_standard_price_c` — price at or below this → **Eco** (charge slowly from grid+solar)
+- `ev_min_charge_price_c` — ceiling for the below-minimum emergency charge; above this price even an EV below min SoC stays on Eco+
+
+> **The values live in the HA console, not here.** They are deliberately not restated in this
+> document — a duplicated number goes stale silently. To read what is actually in force, see
+> `settings_used` in the latest `agent/decisions.jsonl` record, which logs the values the agent
+> decided with, every cycle. Rule 28 covers how they are validated.
 
 **Priority order (first matching condition wins):**
 
 | Priority | Condition | Zappi mode | Notes |
 |----------|-----------|-----------|-------|
 | 1 | Demand window (3–9pm peak months) | `Eco+` | No grid draw ever during demand window — Rule 2 absolute |
-| 2 | EV SoC < min AND price < ev_min_charge_price_c | `Fast` | Critical EV level — override price gate (ceiling is user-set slider, default 20¢) |
+| 2 | EV SoC < min AND price < ev_min_charge_price_c | `Fast` | Critical EV level — override price gate (ceiling is a user-set slider; read the live value from the console) |
 | 3 | FIT < 0¢ AND battery ≥ 85% AND EV < 100% | `Eco+` | Absorb solar surplus into EV rather than paying to export |
 | 4 | EV SoC ≥ target | `Eco+` | Target met — solar surplus only |
 | 5 | Price < ultra_cheap_c | `Fast` | Exceptional price — charge hard |
@@ -452,7 +457,7 @@ Replaces fixed thresholds with a self-calibrating model based on rolling 7-day p
 - `cost_target = max(solar_adjusted_target, insurance_floor)`
 - Falls back to legacy (time-based substitute) when: `HISTORICAL_PRICE_MODEL = False`, insufficient history (< 48 records), price history flat (swing < 2¢), or peak month
 - Rollback: set `HISTORICAL_PRICE_MODEL = False` in `energy_agent.py`
-- User-settable: `input_number.battery_max_insurance_floor_pct` (default 70%)
+- User-settable: `input_number.battery_max_insurance_floor_pct` — live value in the HA console
 
 **Why**: a cheap-window that closes 1.5h early (as observed 2026-05-31) causes under-charging when relying on solar forecast alone. The insurance floor ensures a meaningful minimum SoC is locked in while prices are cheap, independent of the solar forecast.
 
@@ -480,7 +485,8 @@ Three-phase EV charging strategy based on price position:
 2. **Fast** (full grid rate): in cheap window and this IS the cheapest upcoming price → charge hard now
 3. **Eco+** (solar overflow only): target met → absorb any remaining solar export for free
 
-Thresholds user-settable: `input_number.ev_ultra_cheap_threshold_c` (Case 2, default 6¢) and `input_number.ev_eco_gap_c` (eco/fast gap, default 1.5¢).
+Threshold user-settable: `input_number.ev_ultra_cheap_threshold_c` (Case 2) — live value in the HA console.
+(`ev_eco_gap_c` was documented here but **does not exist** in the code or HA config — removed 2026-07-23.)
 
 ### Rule 19 — Negative FIT Solar Dump (EV Case 6)
 
@@ -679,17 +685,39 @@ consults politely — they are **control inputs**, read every cycle by
 `compute_decision_context()`, which has been authoritative since Phase 5. A wrong value
 is therefore a control fault, not a cosmetic UI issue.
 
-Each helper declares an *intended* value and a *sane band*:
+**No target values are stored in code or in this document.** The HA console is the single
+source of truth for what the targets *are*; `SETTINGS_SPEC` declares only the range that
+is structurally valid. The distinction matters:
+
+- a **target** ("charge the EV fast below 10¢") is a preference — it lives in HA, is set
+  and displayed there, and is never duplicated anywhere else, because duplicates go stale
+  silently. On 2026-07-23 `CONTEXT.md` claimed 6¢ while the console said 10¢, and this
+  document gave the same helper two different "defaults" (5¢ and 6¢) in two places.
+- a **band** ("below 0 or above 12 and the rule stops meaning what it should") is an
+  engineering limit. Validation is impossible without one, so bands are the only numbers.
 
 ```
-value inside [lo, hi]  → used as-is, even if it differs from `intended`
-value outside [lo, hi] → `intended` substituted FOR THIS CYCLE ONLY + notification
-unreadable/unavailable → `intended` substituted, no violation (transport failure)
+value inside [lo, hi]  → used as-is
+value outside [lo, hi] → substituted for THIS CYCLE ONLY + notification, preferring:
+                           1. the last in-band value HA itself reported
+                              (from `settings_used` in decisions.jsonl)
+                           2. else the bad value clamped to the nearest band edge
+                           3. else the key is omitted, and the caller's own
+                              `.get(key, default)` applies
+unreadable/unavailable → last in-band value HA reported; silent (transport failure,
+                         not a bad value)
 ```
+
+Step 3 is safe precisely because `.get(key, default)` is correct for a *genuinely absent*
+value — which was never the bug. The bug was a key that **existed** holding a wrong value,
+where `.get`'s default can never fire.
 
 **In-band tuning is never overridden.** The bands catch values that break control logic,
-not values that merely differ from a default. If a value genuinely is wanted, widen the
+not values that merely differ from a preference. If a value genuinely is wanted, widen the
 band — e.g. set `max_insurance_floor_pct`'s `lo` to 0 to allow disabling Rule 15.
+
+**To read what is actually in force**, look at `settings_used` in the most recent
+`agent/decisions.jsonl` record — the values the agent decided with, logged every cycle.
 
 **Validate and warn, not self-heal.** Nothing is written back to HA. The substitution
 protects the *current cycle's decision*; the helper keeps its bad value and the user is

@@ -933,42 +933,83 @@ def _entity(key):
     return ea.ENTITIES[ea.SETTINGS_SPEC[key][0]]
 
 
+def _hist(key, value):
+    """One decisions.jsonl-shaped record carrying a past settings_used value."""
+    return [{"settings_used": {key: value}}]
+
+
 def test_settings_in_band_used_as_is():
-    """A value inside the band is used even when it differs from `intended`."""
+    """An in-band value passes through untouched — tuning is never overridden."""
     with _StubHA({_entity("ev_min_soc_pct"): "45"}):
         value, violation = ea._validated_setting("ev_min_soc_pct")
     check("in-band value used as-is", value == 45.0, f"got {value}")
     check("in-band produces no violation", violation is None, f"got {violation}")
 
 
-def test_settings_out_of_band_falls_back_and_flags():
-    """The real 2026-07-23 failure: ev_min_soc_pct drifted to 80 (band 0–50)."""
+def test_settings_out_of_band_prefers_last_known_good():
+    """The 2026-07-23 failure: ev_min_soc_pct drifted to 80 (band 0–50).
+
+    The substitute must be a value the console itself previously held — not a
+    target hardcoded in energy_agent.py.
+    """
     with _StubHA({_entity("ev_min_soc_pct"): "80"}):
-        value, violation = ea._validated_setting("ev_min_soc_pct")
-    intended = ea.SETTINGS_SPEC["ev_min_soc_pct"][1]
-    check("out-of-band falls back to intended", value == intended, f"got {value}")
+        value, violation = ea._validated_setting(
+            "ev_min_soc_pct", _hist("ev_min_soc_pct", 30.0))
+    check("out-of-band uses last known good", value == 30.0, f"got {value}")
     check("out-of-band is flagged", violation is not None)
     check("violation records what was found", violation and violation["found"] == 80.0)
-    check("violation records what was used", violation and violation["used"] == intended)
-    check("violation reason is out_of_band",
-          violation and violation["reason"] == "out_of_band")
+    check("violation records the substitute source",
+          violation and violation["source"] == "last_known_good", f"got {violation}")
 
 
-def test_settings_unavailable_falls_back_silently():
+def test_settings_out_of_band_clamps_when_no_history():
+    """With no usable history, clamp to the nearest band edge."""
+    with _StubHA({_entity("ev_min_soc_pct"): "80"}):
+        value, violation = ea._validated_setting("ev_min_soc_pct", [])
+    lo, hi = ea.SETTINGS_SPEC["ev_min_soc_pct"][1:]
+    check("clamped to band edge", value == hi, f"got {value} (band {lo}-{hi})")
+    check("clamp is reported as the source",
+          violation and violation["source"] == "clamped_to_band", f"got {violation}")
+
+
+def test_settings_history_must_itself_be_in_band():
+    """A historical value that is also out of band must not be resurrected."""
+    with _StubHA({_entity("ev_min_soc_pct"): "80"}):
+        value, violation = ea._validated_setting(
+            "ev_min_soc_pct", _hist("ev_min_soc_pct", 75.0))
+    check("bad history is ignored, falls through to clamp",
+          violation and violation["source"] == "clamped_to_band", f"got {violation}")
+    check("clamped value used", value == ea.SETTINGS_SPEC["ev_min_soc_pct"][2],
+          f"got {value}")
+
+
+def test_settings_unavailable_uses_history_silently():
     """An unreadable entity is a transport failure, not a bad value."""
     for raw in (None, "", "unknown", "unavailable"):
         with _StubHA({_entity("ev_min_soc_pct"): raw}):
-            value, violation = ea._validated_setting("ev_min_soc_pct")
-        check(f"unavailable ({raw!r}) falls back",
-              value == ea.SETTINGS_SPEC["ev_min_soc_pct"][1], f"got {value}")
+            value, violation = ea._validated_setting(
+                "ev_min_soc_pct", _hist("ev_min_soc_pct", 30.0))
+        check(f"unavailable ({raw!r}) uses last known good", value == 30.0, f"got {value}")
         check(f"unavailable ({raw!r}) is not a violation", violation is None)
+
+
+def test_settings_unavailable_with_no_history_yields_none():
+    """Nothing can be established — the caller must apply its own default."""
+    with _StubHA({_entity("ev_min_soc_pct"): "unavailable"}):
+        value, violation = ea._validated_setting("ev_min_soc_pct", [])
+    check("no value can be established", value is None, f"got {value}")
+    check("reported as unreadable", violation and violation["reason"] == "unreadable")
+    with _StubHA({_entity("ev_min_soc_pct"): "unavailable"}):
+        values, _ = ea._read_validated_settings([])
+    check("key is omitted so the caller's own default applies",
+          "ev_min_soc_pct" not in values, f"got {values}")
 
 
 def test_settings_unparseable_flags():
     with _StubHA({_entity("ev_min_soc_pct"): "not-a-number"}):
-        value, violation = ea._validated_setting("ev_min_soc_pct")
-    check("unparseable falls back",
-          value == ea.SETTINGS_SPEC["ev_min_soc_pct"][1], f"got {value}")
+        value, violation = ea._validated_setting(
+            "ev_min_soc_pct", _hist("ev_min_soc_pct", 30.0))
+    check("unparseable uses last known good", value == 30.0, f"got {value}")
     check("unparseable is flagged with reason",
           violation and violation["reason"] == "unparseable", f"got {violation}")
 
@@ -976,33 +1017,37 @@ def test_settings_unparseable_flags():
 def test_settings_zero_insurance_floor_is_a_violation():
     """0 disables Rule 15 entirely — must not be accepted silently."""
     with _StubHA({_entity("max_insurance_floor_pct"): "0"}):
-        value, violation = ea._validated_setting("max_insurance_floor_pct")
+        value, violation = ea._validated_setting("max_insurance_floor_pct", [])
+    lo = ea.SETTINGS_SPEC["max_insurance_floor_pct"][1]
     check("insurance floor 0 is rejected", violation is not None)
-    check("insurance floor 0 falls back to DEFAULT_MAX_INSURANCE_FLOOR",
-          value == float(ea.DEFAULT_MAX_INSURANCE_FLOOR), f"got {value}")
+    check("insurance floor 0 clamps up to the band floor", value == lo, f"got {value}")
 
 
-def test_settings_drifted_ev_min_soc_is_a_violation():
+def test_settings_drifted_ev_min_soc_no_longer_forces_fast():
     """End-to-end: the drifted helper no longer reaches the EV decision.
 
     With ev_min_soc_pct at 80, `ev_soc(60) < ev_min` was true and the layer
-    chose Fast. After validation the substituted 30 makes it false, so the
-    cycle falls through to the price-based rules instead.
+    chose Fast. Validation substitutes an in-band value, making it false, so
+    the cycle falls through to the price-based rules instead.
     """
     with _StubHA({_entity("ev_min_soc_pct"): "80"}):
-        values, violations = ea._read_validated_settings()
+        values, violations = ea._read_validated_settings(_hist("ev_min_soc_pct", 30.0))
     check("drifted ev_min_soc is reported",
           any(v["setting"] == "ev_min_soc_pct" for v in violations))
-    ev_min = values["ev_min_soc_pct"]
-    check("EV at 60% is no longer 'below minimum'", not (60 < ev_min),
-          f"ev_min={ev_min}")
+    check("EV at 60% is no longer 'below minimum'",
+          not (60 < values["ev_min_soc_pct"]), f"ev_min={values.get('ev_min_soc_pct')}")
 
 
-def test_settings_spec_intended_values_are_all_in_band():
-    """Guards against a typo making a fallback value itself out of band."""
-    for key, (_alias, intended, lo, hi) in ea.SETTINGS_SPEC.items():
-        check(f"{key} intended within its own band", lo <= intended <= hi,
-              f"intended={intended} band={lo}-{hi}")
+def test_settings_spec_holds_no_target_values():
+    """The spec must declare bands only — never a target.
+
+    Targets live in the HA console and are read from it; duplicating one here is
+    how CONTEXT.md came to claim 6¢ while the console said 10¢.
+    """
+    for key, spec in ea.SETTINGS_SPEC.items():
+        check(f"{key} spec is (alias, lo, hi) only", len(spec) == 3, f"got {spec}")
+        _alias, lo, hi = spec
+        check(f"{key} band is ordered", lo < hi, f"lo={lo} hi={hi}")
 
 
 if __name__ == "__main__":
@@ -1056,12 +1101,15 @@ if __name__ == "__main__":
                test_use_corrected_solar_killswitch_reverts_to_raw,
                test_corrected_solar_changes_the_verdict_when_it_matters,
                test_settings_in_band_used_as_is,
-               test_settings_out_of_band_falls_back_and_flags,
-               test_settings_unavailable_falls_back_silently,
+               test_settings_out_of_band_prefers_last_known_good,
+               test_settings_out_of_band_clamps_when_no_history,
+               test_settings_history_must_itself_be_in_band,
+               test_settings_unavailable_uses_history_silently,
+               test_settings_unavailable_with_no_history_yields_none,
                test_settings_unparseable_flags,
                test_settings_zero_insurance_floor_is_a_violation,
-               test_settings_drifted_ev_min_soc_is_a_violation,
-               test_settings_spec_intended_values_are_all_in_band]:
+               test_settings_drifted_ev_min_soc_no_longer_forces_fast,
+               test_settings_spec_holds_no_target_values]:
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'='*50}\n{_passed} passed, {_failed} failed")
