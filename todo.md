@@ -202,7 +202,9 @@
   hardcoded four target values (`ev_ultra_cheap_threshold_c=6`, `ev_eco_gap_c=1.5`,
   `battery_charge_price_threshold_c=12`, `battery_max_insurance_floor_pct=70`), three of which
   were wrong against the live console and one of which (`ev_eco_gap_c`) names an entity that has
-  never existed in the code or HA config. Superseded by Rule 28: the console is the source of
+  no longer exists in the code or HA config (it was real once — the retired Mac HA's
+  `core.restore_state` has it at 1.0 on 2026-06-02 — but was dropped from `configuration.yaml`
+  while the docs kept describing it). Superseded by Rule 28: the console is the source of
   truth and `settings_used` in `decisions.jsonl` records what the agent actually decided with.
 
 ### Architecture roadmap (in order)
