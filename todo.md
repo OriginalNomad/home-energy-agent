@@ -4,6 +4,13 @@
 
 ### Immediate
 
+- [ ] ▶️ **START HERE NEXT SESSION (2026-07-25): #3 — the 5-minute price problem (HIGH).**
+  Full write-up is below under "HIGH — the agent decides on a 5-minute spot price". Needs a design
+  decision first (which price source: the 30-min forecast slot `forecast[0]` the agent already
+  fetches is the likely fix; whether to add threshold hysteresis), then implement. Also review how
+  yesterday's four live changes (solar accuracy, Rule 30 survival floor, rebuilt model, priority-1
+  path) behaved through the 2026-07-24 demand window before layering more on.
+
 - [ ] 🔁 **REVIEW EACH MORNING UNTIL RESOLVED — HA threshold sliders drifting overnight**
   *(added 2026-07-23. `/morning` should check this every day and log the readings below until
   the cause is found. Delete this item once two clean weeks pass or the cause is fixed.)*
