@@ -164,6 +164,17 @@ The agent re-runs this calculation every 30-min cycle. It starts slow (cheap) an
 > the agent starts charging earlier/dearer than it needs to** — the direct cause of the 2026-07-24
 > 08:00 over-charge. Error is in the *safe* (cheap) direction, not the demand-charge direction.
 
+**The reserve−SoC gap is a charge-rate dial (2026-07-24, live experiment).** Firmware `26.18.3`
+(confirmed via Tessie `site_info`) did *not* make grid charging binary 0/5 kW as forum reports
+claimed. Measured on our gateway in `self_consumption`, the rate tapers as SoC approaches reserve:
+`reserve−SoC ≥ 20` → ~5 kW · `10` → ~4 kW · `5` → **~1.7 kW** (the old trickle) · `≤0` → idle. We
+lost "slow charge" only because we always set `reserve = 85` — a 40-point gap from low SoC sits
+permanently in the 5 kW zone. Setting `reserve = SoC + 5` restores ~1.7 kW. It's a *chase* (the rate
+tapers to 0 as SoC reaches reserve), so a steady slow rate means re-setting `reserve = SoC + offset`
+each cycle. A reserve-offset rate controller is proposed in `todo.md` — not yet built; today the
+agent still sets absolute reserve targets and gets 5 kW below 70% SoC. This is the *real* answer to
+the 5 kW regime: not a lost capability, a mis-used lever.
+
 **Asymmetric charge-rate window (2026-07-24).** The headline rate a bucket exposes as `kw` is now
 `min(median over 10 days, median over the last 2 days)` — computed by the pure
 `_aggregate_charge_rates()` in `build_models.py` (unit-tested in `test_build_models.py`). This makes

@@ -125,6 +125,35 @@ not introduced by the asymmetric change, and self-heals as the regime sustains.)
 Crontab backup for rollback on the Pi: `/tmp/cron.bak`. Still open: ARCHITECTURE.md's call for a
 model-accuracy section in the nightly summary (not built).
 
+### Charge-rate control RECOVERED — the reserve−SoC gap is a rate dial (major finding)
+
+Investigated the 5 kW `self_consumption` regime with the user. Read the gateway firmware via
+Tessie `site_info`: **`version: 26.18.3`** — the exact version hypothesised as the 07-22 push.
+The user found forum reports that 26.18.3 made reserve-override charging "binary 0 or 5 kW" and
+removed the 1.7 kW trickle. **A controlled experiment disproved the binary claim for our gateway** —
+the firmware still tapers as SoC approaches reserve; 26.18.3 just widened the fast zone.
+
+Experiment (`/tmp/gap_experiment.py` on the Pi, manual-override-protected, auto-restored
+reserve=85 + override off): held `self_consumption`, stepped reserve, measured `battery_power`:
+
+| reserve − SoC gap | grid charge rate |
+|---:|---:|
+| 37 | 5.01 kW |
+| 20 | 5.00 kW |
+| 10 | 3.96 kW |
+| **5** | **1.67 kW**  (= the old trickle) |
+| ≤0 | idle / holds |
+
+**So we have a charge-rate dial back:** `reserve = SoC + 5` → ~1.7 kW, `+10` → ~4 kW, `+20` → 5 kW.
+We lost it only because we always set reserve = fixed 85, a 40-point gap from low SoC = permanent
+5 kW. Caveat: it's a **chase**, not set-and-forget — a fixed small-gap reserve tapers to 0 as SoC
+climbs into it (gap-3 test charged 3 points then idled), so holding ~1.7 kW means re-setting
+`reserve = SoC + 5` each cycle. The 30-min cadence roughly matches a 5-point chase. Failure mode is
+safe (miss a cycle → charges a few points, stops). See todo for the proposed reserve-offset rate
+controller. **Answer to "Tesla or Tessie?": Tesla firmware — Tessie is a dumb reserve/mode proxy
+with no rate parameter; no cloud/Fleet/local API exposes a kW setpoint, so the forum "re-auth for
+LAN rate control" workaround is a dead end.**
+
 ### Tests
 
 219 total, all green: 192 decision (was 183, +9), 16 optimizer, 11 build_models (new file).

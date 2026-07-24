@@ -11,6 +11,21 @@
   yesterday's four live changes (solar accuracy, Rule 30 survival floor, rebuilt model, priority-1
   path) behaved through the 2026-07-24 demand window before layering more on.
 
+- [ ] ⭐ **NEW CAPABILITY — reserve-offset charge-rate controller** (found 2026-07-24 by live
+  experiment; see energy_log "Charge-rate control RECOVERED"). Firmware 26.18.3 didn't remove the
+  slow charge — it's still there in the taper as SoC approaches reserve. Measured dial (self_consumption):
+  `reserve = SoC+5` → ~1.7 kW · `+10` → ~4 kW · `+20`→ 5 kW · `≤SoC` → idle. We only lost it because
+  we always set reserve=85 (a 40-point gap = permanent 5 kW). **Proposal:** give the agent a target
+  *rate* and translate it to `reserve = SoC + offset`, re-chased each cycle (it tapers to 0 as SoC
+  reaches the reserve, so it's a chase not set-and-forget; 30-min cadence ~matches a 5-point chase;
+  miss-a-cycle failure mode is safe). This directly fixes the summer concern (gentle grid top-ups
+  that blend with solar instead of 5 kW slams) AND the over-import half of the 08:00 problem.
+  **Before building:** characterise the taper at 2–3 more SoC levels (only tested at 63–65% so far) —
+  the curve may shift with SoC/temperature. Then decide how the rule layer picks a target rate
+  (e.g. gentle when time-rich + solar coming; fast near deadline). Interacts with the charge-rate
+  *model* (priority 1): if we control the rate, the model's job shifts from "predict the rate" to
+  "predict how long a chosen rate takes."
+
 - [ ] 🔁 **REVIEW EACH MORNING UNTIL RESOLVED — HA threshold sliders drifting overnight**
   *(added 2026-07-23. `/morning` should check this every day and log the readings below until
   the cause is found. Delete this item once two clean weeks pass or the cause is fixed.)*
