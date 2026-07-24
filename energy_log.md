@@ -1,5 +1,71 @@
 # Energy System Control Log
 
+## 2026-07-24 (session 19 — 8am over-charge diagnosed; solar-accuracy + asymmetric-rate fixes)
+
+### The 8am over-charge, dissected
+
+User asked why the battery was fast-charging at 8am on a peak day with a full day of solar ahead
+(9.5 kWh even by our own corrected estimate = 48% of Solcast's 18.5). Reconstructed from
+`energy_log.db` + `decisions.jsonl`:
+
+| time | SoC | price | rule fired | LP shadow |
+|---|---:|---:|---|---|
+| 03:00→07:30 | 30→11% | 11–15¢ | `wait_for_cheap_go_hard` (hold) | `mpc_hold` |
+| **08:00** | **8%** | 14¢ | `wait_for_cheap_go_hard` (hold) | `mpc_hold` |
+| 08:30 | 23% | 9¢ | `peak_charge_now` → set_reserve(85) | `mpc_hold` |
+| 09:00 | 25% | 9¢ | `peak_deadline_selfcons` → set_reserve(85) | `mpc_hold` |
+
+The 8→23% jump in 30 min (~4 kW) was the `battery_low_soc_emergency_charge` automation firing at
+SoC<20 — the "fast charge at 8am" the user saw. Then the rule layer committed to grid-charging to
+85%. **Three compounding causes, all pre-existing open items:**
+1. **Charge-rate 3× pessimistic** (believes 1.67 kW; reality ~5 kW since 07-22). At 1.67 kW the
+   8.1 kWh gap needs ~4.85 h → from 09:00 that just fits 14:55 → `peak_deadline_selfcons` = "no
+   slack, charge now". At the real 5 kW it needs ~1.6 h and could wait to ~1pm. **Dominant cause.**
+2. **`solar_unreliable=True` zeroed the solar credit** — `kwh_needed_85` = the full 8.1 kWh with
+   none of the 9 kWh corrected solar deducted, because raw actual/forecast at 9am reads ~14% =
+   "unreliable" on a *normal* winter morning.
+3. **Overnight drain to 8% + emergency charge** dug the hole (the survival-floor contradiction:
+   rule layer holds to 5% projected, automation fires at <20% — they fought at 08:00→08:30).
+
+The **LP shadow held every cycle** including 08:30/09:00 — exactly the trickle-and-wait the user
+advocated, and the only LP↔deterministic divergence in 60 cycles. (Nuance surfaced to the user:
+9.5 kWh of solar sounds ample but ~7 kWh is eaten by house load, so only ~2–3 kWh reaches the
+battery — solar alone can't fill 8 kWh; a *short cheap-slot grid top-up* is still needed. Strategy
+is right in shape, wrong to commit the whole grid charge at 09:00/9¢.)
+
+### Priority 2 — solar accuracy vs the corrected forecast (control path, went live this morning)
+
+`_solar_accuracy()` now judges actual output against the **bias-corrected** this-hour forecast
+(raw Solcast × that hour's measured ratio), not raw Solcast. New `_hour_solar_ratio()` reads the
+ratio from `model_params.json["solar_correction"]`; falls back to raw when uncalibrated or Solcast
+attrs are missing. On a normal winter morning the label flips from `unreliable — 13% of forecast`
+to `good — 95% of corrected`, so `expected_solar` is no longer zeroed and `kwh_needed_85` counts
+real solar. Genuine cloud/rain (actual below even the calibrated expectation) still flags
+`poor`/`unreliable`; a near-zero (<0.1 kW) corrected expectation returns `not_applicable` rather
+than condemning the day off noise. 6 unit tests (`test_solar_accuracy_*`, `_hour_solar_ratio`).
+energy_rules.md Rule 11 updated. **Note this is a control-path change that makes the agent charge
+*less* eagerly on a peak day — deployed with the user's sign-off, watch today's demand window.**
+
+### Priority 1 — asymmetric charge-rate window (offline model builder)
+
+Extracted the aggregation into a pure `_aggregate_charge_rates()` and made the headline
+`kw = min(median over 10 days, median over last 2 days)`: **falls within ~1 day, rises only on
+sustained evidence.** On a rise the 2-day median jumps first while the 10-day lags, so `min()`
+holds the pessimistic value until the long window is itself majority new-regime (≈ same timing as a
+plain median — no upside delayed); on a fall the 2-day median drops first and `min()` follows.
+Rationale: believing 5 kW when it's really 1.67 risks a ~$30 demand charge; the reverse costs
+cents. **Run against 07-24 data it keeps `self_consumption` at 1.67** (intended — 2 new days can't
+outvote 8); its value is a *safe* flip to 5 kW once the regime sustains (~07-27) with fall-fast
+protection. It does **not** change tomorrow morning — priority 2 is the 8am lever, not this.
+`kw_long`/`kw_short` recorded for transparency. New `test_build_models.py` (11 tests). energy_rules
+charge-rate section updated.
+
+### Tests
+
+219 total, all green: 192 decision (was 183, +9), 16 optimizer, 11 build_models (new file).
+
+---
+
 ## 2026-07-23 (session 18 — 5 kW regime confirmed; slider drift investigation)
 
 ### `build_models.py` re-run — the 5 kW regime persisted

@@ -650,6 +650,61 @@ def test_solar_unreliable_after_9am():
           ctx["solar_unreliable"])
 
 
+def test_solar_accuracy_corrected_normal_winter_morning_is_good():
+    # 08:00 winter: raw Solcast 1.2 kW, measured actual 0.16 kW. Against RAW that
+    # is 13% -> "unreliable". Against the corrected expectation (1.2 x 0.14 = 0.17)
+    # it is ~94% -> "good". The corrected label is the one that must win, else the
+    # rule layer zeroes the whole day's solar on an ordinary morning (2026-07-24).
+    raw = ea._solar_accuracy(0.16, 1.2)
+    corr = ea._solar_accuracy(0.16, 1.2, corrected_forecast_kw=1.2 * 0.14)
+    check("raw label is unreliable on normal winter morning", raw.startswith("unreliable"), raw)
+    check("corrected label is good on normal winter morning", corr.startswith("good"), corr)
+
+
+def test_solar_accuracy_corrected_flags_genuine_underperformance():
+    # Same hour, but actual is only 0.05 kW — well below even the calibrated
+    # expectation of 0.17. That is a real cloud/rain miss and must still flag.
+    corr = ea._solar_accuracy(0.05, 1.2, corrected_forecast_kw=1.2 * 0.14)
+    check("corrected still flags true underperformance",
+          corr.startswith("poor") or corr.startswith("unreliable"), corr)
+
+
+def test_solar_accuracy_near_zero_corrected_ref_is_not_applicable():
+    # Deep-morning bias: corrected expectation ~0.03 kW. Judging a ratio off that
+    # would be noise, so return not_applicable rather than condemning the day.
+    label = ea._solar_accuracy(0.0, 1.2, corrected_forecast_kw=0.03)
+    check("near-zero corrected ref -> not_applicable", label.startswith("not_applicable"), label)
+
+
+def test_solar_accuracy_falls_back_to_raw_when_uncorrected():
+    # No corrected figure (Solcast attr outage / uncalibrated hour) -> old behaviour.
+    label = ea._solar_accuracy(0.16, 1.2, corrected_forecast_kw=None)
+    check("falls back to raw label when no correction", label.startswith("unreliable"), label)
+
+
+def test_solar_accuracy_night_still_not_applicable():
+    # Raw forecast below 0.2 -> night, regardless of any correction passed.
+    label = ea._solar_accuracy(0.0, 0.1, corrected_forecast_kw=0.05)
+    check("night stays not_applicable", label.startswith("not_applicable"), label)
+
+
+def test_hour_solar_ratio_reads_model_params():
+    # _hour_solar_ratio pulls the per-hour ratio from _model_params when n>=min.
+    saved = ea._model_params
+    try:
+        ea._model_params = {"min_samples": 5,
+                            "solar_correction": {"08": {"ratio": 0.14, "n": 60},
+                                                 "09": {"ratio": 0.16, "n": 3}}}
+        check("ratio returned when enough samples", ea._hour_solar_ratio("08") == 0.14,
+              ea._hour_solar_ratio("08"))
+        check("None when too few samples", ea._hour_solar_ratio("09") is None,
+              ea._hour_solar_ratio("09"))
+        check("None when hour absent", ea._hour_solar_ratio("13") is None,
+              ea._hour_solar_ratio("13"))
+    finally:
+        ea._model_params = saved
+
+
 def make_sliding_records(n, price, forward_min):
     """Build n recent records where cheap window was forecast but never arrived."""
     return [{"actions": [], "price_c": price,
@@ -1171,6 +1226,12 @@ if __name__ == "__main__":
                test_ev_battery_full_solar_absorb_not_when_no_solar,
                test_ev_battery_full_solar_absorb_not_when_battery_not_full,
                test_solar_unreliable_not_before_9am, test_solar_unreliable_after_9am,
+               test_solar_accuracy_corrected_normal_winter_morning_is_good,
+               test_solar_accuracy_corrected_flags_genuine_underperformance,
+               test_solar_accuracy_near_zero_corrected_ref_is_not_applicable,
+               test_solar_accuracy_falls_back_to_raw_when_uncorrected,
+               test_solar_accuracy_night_still_not_applicable,
+               test_hour_solar_ratio_reads_model_params,
                test_nonpeak_solar_unreliable_escalates_autonomous,
                test_nonpeak_solar_good_stays_selfcons,
                test_sliding_forecast_fires, test_sliding_forecast_not_enough_cycles,

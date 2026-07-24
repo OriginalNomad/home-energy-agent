@@ -156,7 +156,29 @@ The agent re-runs this calculation every 30-min cycle. It starts slow (cheap) an
 
 **Why the autonomous taper matters:** it previously had n=2–5, below `MIN_SAMPLES`, so the agent assumed a flat 5.0 kW across the whole range. It was therefore *optimistic* about fill time in exactly the 80–100% band where the 2:55pm deadline is decided. Fill time for 80→95% went from 0.41 h to 0.83 h. Being optimistic there risks a demand charge (~$100/month); being pessimistic costs cents — so the model deliberately errs slow, and buckets with fewer than 20 samples keep their older, slower values.
 
-> **Open anomaly (2026-07-22).** Raising `backup_reserve_percent` above SoC was observed pulling a sustained **5 kW** while `default_real_mode` stayed `self_consumption` — three times, including once triggered manually with the agent uninvolved. Ten days of 30-second data give a median of 1.67 kW for the same operation, with a clean date boundary at 07-22. Cause unknown (mode switch, automations, Storm Watch, SmartShift, reserve−SoC gap and SoC level all eliminated). **If this persists, every fill-time projection below is ~3× too pessimistic and the agent will keep starting to charge earlier than it needs to.** `self_consumption` is deliberately left at 1.67 kW until more than one day of evidence exists. See the 2026-07-22 log entry.
+> **Regime change (2026-07-22, confirmed persistent 07-23).** Raising `backup_reserve_percent`
+> above SoC now pulls a sustained **5 kW** in `self_consumption` — 92%/96% of samples > 3 kW on
+> 07-22/07-23 vs 0–4% on 07-13→07-21, a clean step change (leading hypothesis: a firmware push,
+> unverifiable). Below 70% SoC `self_consumption` and `autonomous` are now indistinguishable.
+> **While the model still reports 1.67 kW, every fill-time projection is ~3× too pessimistic and
+> the agent starts charging earlier/dearer than it needs to** — the direct cause of the 2026-07-24
+> 08:00 over-charge. Error is in the *safe* (cheap) direction, not the demand-charge direction.
+
+**Asymmetric charge-rate window (2026-07-24).** The headline rate a bucket exposes as `kw` is now
+`min(median over 10 days, median over the last 2 days)` — computed by the pure
+`_aggregate_charge_rates()` in `build_models.py` (unit-tested in `test_build_models.py`). This makes
+the model **fall to a slower rate within ~1 day** (safe: budget more charge time) but **rise to a
+faster rate only on sustained evidence** (a spurious fast day must not make the deadline maths
+optimistic). Mechanism: on a *rise* the 2-day median jumps first while the 10-day median lags, so
+`min()` holds the pessimistic long value until the long window is itself majority new-regime
+(≈ the same timing as a plain 10-day median — no upside is delayed); on a *fall* the 2-day median
+drops first, so `min()` follows it down. The rationale is the asymmetric cost: believing 5 kW when
+it is really 1.67 risks a ~$30 demand charge; believing 1.67 when it is really 5 costs cents. A low
+quantile does **not** substitute — within a regime p25≈p50, so quantiles hedge spread, not a regime
+change. Run against the 07-24 data this keeps `self_consumption` at 1.67 (2 new days can't outvote
+8), which is the intended output; the value is a *safe* flip to 5 kW once the regime is sustained
+(~2026-07-27), with fall-fast protection if it ever reverts. `kw_long`/`kw_short` are recorded
+alongside `kw` for transparency.
 
 **Why `hours_to_cheap_end` instead of `hours_to_spike`:**
 The old logic found the first interval exceeding 30¢ — which means it found nothing on mild-spike days (e.g. prices going 15¢ → 19¢) and gave incorrect 6h default deadlines. `hours_to_cheap_end` finds the first *sustained* price rise of ≥ 4¢, which correctly identifies when "cheap now" ends regardless of the absolute price level.
@@ -328,11 +350,23 @@ Use `Eco+` as the default (charges only from actual solar export past the meter)
 | `sensor.solcast_pv_forecast_power_now` | W (÷1000 = kW) | Secondary instantaneous reference |
 | `sensor.solaredge_current_power` | W (÷1000 = kW) | Actual inverter output |
 
-**Accuracy labels:**
-- `good` (actual ≥ 70% of forecast): use `forecast_remaining_today` as-is
-- `poor` (actual 30–70% of forecast): treat `remaining_today` as ~50% of stated value
-- `unreliable` (actual < 30% of forecast): ignore `remaining_today` entirely; treat as zero-solar day
-- `not_applicable`: night or near-zero forecast (< 0.2 kWh) — no meaningful comparison possible
+**Accuracy is measured against the *bias-corrected* forecast, not raw Solcast (2026-07-24).**
+Solcast over-forecasts this flat roof by ~7× at 08:00 and ~6× at 09:00 in winter, so raw
+`actual/forecast` is ~14% on a *perfectly normal* morning — which read `unreliable` and zeroed
+the whole day's solar credit (`expected_solar = 0`), forcing needless grid charging (the
+2026-07-24 08:00 case). `_solar_accuracy()` now weights the this-hour forecast by that hour's
+measured ratio (`model_params.json["solar_correction"]`, via `_hour_solar_ratio()`) before
+comparing, so the ratio below asks the real question: *is solar underperforming its calibrated
+expectation, or just its raw one?* Falls back to raw Solcast when the hour is uncalibrated
+(n < min_samples) or Solcast attributes are missing — degrades to the old behaviour, never to a
+wrong answer.
+
+**Accuracy labels** (ratio = actual ÷ corrected this-hour forecast; ÷ raw only on fallback):
+- `good` (actual ≥ 70% of the corrected expectation): use `forecast_remaining_today` as-is
+- `poor` (actual 30–70%): treat `remaining_today` as ~50% of stated value
+- `unreliable` (actual < 30%): ignore `remaining_today` entirely; treat as zero-solar day
+- `not_applicable`: raw forecast < 0.2 kWh (night), **or** the corrected expectation is < 0.1 kW
+  (deep-morning bias — nothing to be "unreliable" about, so don't condemn the day off noise)
 
 **Solar start hour (2026-05-31):** Zero-solar detection and accuracy-based `solar_unreliable` only activate from **9am** onwards (was 8am). Before 9am, panels on a flat roof in Sydney don't produce meaningfully regardless of cloud — zero output is expected and must not be counted as evidence of a zero-solar day. The `SOLAR_START_HOUR = 9` constant controls this.
 

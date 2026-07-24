@@ -376,6 +376,17 @@ def get_current_state() -> dict:
     # dashboard sensor and (when USE_CORRECTED_SOLAR) the decision layer.
     _solar_bd = _corrected_solar_breakdown()
 
+    # Solar accuracy is judged against the *bias-corrected* this-hour forecast,
+    # not raw Solcast — otherwise a normal winter morning (actual ~14% of raw
+    # Solcast) reads "unreliable" and zeroes the day's solar credit. Read the
+    # this-hour forecast once here and weight it by the current hour's measured
+    # ratio; fall back to raw when the hour has no calibration data.
+    _solar_now_kw     = round(_float(_solar_raw) / 1000, 2)
+    _this_hour_kwh    = round(_float(ha_state(ENTITIES["solcast_this_hour"])) / 1000, 2)
+    _this_hour_ratio  = _hour_solar_ratio()
+    _this_hour_corr   = (round(_this_hour_kwh * _this_hour_ratio, 2)
+                         if _this_hour_ratio is not None else None)
+
     state = {
         "timestamp":       now.strftime("%Y-%m-%d %H:%M %Z"),
         "month":           now.strftime("%B"),
@@ -402,9 +413,10 @@ def get_current_state() -> dict:
             # sensor_unavailable=True means HA returned "unavailable"/"unknown" — treat differently
             # from genuine zero production; do NOT count as a zero-solar cycle.
             "sensor_unavailable":       _solar_unavail,
-            "current_kw":               round(_float(_solar_raw) / 1000, 2),
+            "current_kw":               _solar_now_kw,
             "solcast_power_now_kw":     round(_float(ha_state(ENTITIES["solcast_power_now"])) / 1000, 2),
-            "forecast_this_hour_kwh":   round(_float(ha_state(ENTITIES["solcast_this_hour"])) / 1000, 2),
+            "forecast_this_hour_kwh":   _this_hour_kwh,
+            "forecast_this_hour_corrected_kwh": _this_hour_corr,
             "forecast_next_hour_kwh":   round(_float(ha_state(ENTITIES["solcast_next_hour"])) / 1000, 2),
             "forecast_remaining_kwh":   round(_float(ha_state(ENTITIES["solar_remaining"])), 1),
             # Bias-corrected remaining-today (Solcast hourly × measured site ratio).
@@ -413,10 +425,13 @@ def get_current_state() -> dict:
             # unavailable, in which case the decision layer falls back to raw.
             "forecast_remaining_corrected_kwh": (_solar_bd or {}).get("remaining_corrected_kwh"),
             "correction_ratio":                 (_solar_bd or {}).get("effective_ratio"),
-            # Accuracy: compare actual kW vs forecast_this_hour (Wh→kWh ≈ avg kW for the hour)
+            # Accuracy: actual kW vs the *bias-corrected* this-hour forecast
+            # (Wh→kWh ≈ avg kW for the hour). Corrected ref stops normal winter
+            # mornings reading "unreliable"; falls back to raw when uncalibrated.
             "forecast_accuracy":        _solar_accuracy(
-                                            round(_float(_solar_raw) / 1000, 2),
-                                            round(_float(ha_state(ENTITIES["solcast_this_hour"])) / 1000, 2)
+                                            _solar_now_kw,
+                                            _this_hour_kwh,
+                                            corrected_forecast_kw=_this_hour_corr,
                                         ),
         },
         "home_load_kw":  round(_float(ha_state(ENTITIES["home_load"])), 2),
@@ -2620,16 +2635,66 @@ def _float(val, default=0.0) -> float:
 def _int(val, default=0) -> int:
     return int(_float(val, default))
 
-def _solar_accuracy(actual_kw: float, forecast_kw: float) -> str:
-    """Return a plain-English accuracy label for the agent to reason about."""
+def _hour_solar_ratio(hour_str: "str | None" = None) -> "float | None":
+    """Measured Solcast bias ratio (actual/forecast) for a local hour ("%H").
+
+    Reads model_params.json["solar_correction"] — the same per-hour ratios the
+    dashboard sensor and the LP use. Returns None when the hour has fewer than
+    min_samples observations behind it, so callers fall back to raw Solcast
+    rather than guess. Never raises.
+    """
+    corr_map = (_model_params or {}).get("solar_correction") or {}
+    min_n    = (_model_params or {}).get("min_samples", _MODEL_MIN_SAMPLES)
+    if hour_str is None:
+        hour_str = datetime.now(SYDNEY_TZ).strftime("%H")
+    entry = corr_map.get(hour_str)
+    if entry and entry.get("n", 0) >= min_n:
+        try:
+            return float(entry["ratio"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _solar_accuracy(actual_kw: float, forecast_kw: float,
+                    corrected_forecast_kw: "float | None" = None) -> str:
+    """Return a plain-English accuracy label for the agent to reason about.
+
+    When a bias-corrected forecast is supplied, accuracy is measured against it
+    rather than raw Solcast. This matters because Solcast over-forecasts this
+    flat roof by ~7x at 08:00 and ~6x at 09:00 in winter (model_params
+    solar_correction), so raw actual/forecast is ~0.14 on a *normal* winter
+    morning and the label reads "unreliable". That flag zeroes `expected_solar`
+    in compute_decision_context() (`expected_solar = 0.0 if solar_unreliable`),
+    which made the rule layer plan the whole day as zero-solar and grid-charge
+    needlessly hard (2026-07-24 08:00 case). The corrected forecast already bakes
+    in that hour's expected bias, so comparing against it asks the real question:
+    is solar underperforming its *calibrated* expectation, or just its raw one?
+
+    Falls back to raw Solcast when no corrected figure is available (Solcast
+    attribute outage, or an hour with too few observations) — degrades to the
+    previous behaviour rather than to a wrong answer.
+    """
     if forecast_kw < 0.2:
+        # Raw Solcast itself expects nothing — night or pre-dawn. Keep gating on
+        # raw here so "night is night" regardless of the correction.
         return "not_applicable (night or near-zero forecast)"
-    ratio = actual_kw / forecast_kw
+    if corrected_forecast_kw is not None:
+        if corrected_forecast_kw < 0.1:
+            # Calibrated expectation is ~0 (deep-morning bias), so there is
+            # nothing to be "unreliable" about — don't let a near-zero reference
+            # blow the ratio up and condemn the whole day's remaining solar.
+            return (f"not_applicable (calibrated expectation "
+                    f"{corrected_forecast_kw:.2f}kW ~0)")
+        ref, basis = corrected_forecast_kw, f"corrected {corrected_forecast_kw:.2f}kW"
+    else:
+        ref, basis = forecast_kw, f"forecast {forecast_kw:.1f}kW"
+    ratio = actual_kw / ref
     if ratio < 0.3:
-        return f"unreliable — actual {actual_kw:.1f}kW vs forecast {forecast_kw:.1f}kW ({ratio:.0%} of forecast)"
+        return f"unreliable — actual {actual_kw:.1f}kW vs {basis} ({ratio:.0%})"
     if ratio < 0.7:
-        return f"poor — actual {actual_kw:.1f}kW vs forecast {forecast_kw:.1f}kW ({ratio:.0%} of forecast)"
-    return f"good — actual {actual_kw:.1f}kW vs forecast {forecast_kw:.1f}kW ({ratio:.0%} of forecast)"
+        return f"poor — actual {actual_kw:.1f}kW vs {basis} ({ratio:.0%})"
+    return f"good — actual {actual_kw:.1f}kW vs {basis} ({ratio:.0%})"
 
 def _safe_int(entity_id: str, default=None):
     """Read an entity state as int, returning default if entity missing or unavailable."""

@@ -213,6 +213,25 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capabilities added 2026-07-24 (session 19):
+- **Solar accuracy now measured against the bias-corrected forecast** (`_solar_accuracy()` +
+  new `_hour_solar_ratio()`). Raw Solcast over-forecasts this flat roof ~7× at 08:00 in winter, so
+  `actual/raw` read `unreliable` on a *normal* morning and zeroed `expected_solar`, forcing needless
+  grid charging (the 2026-07-24 08:00 over-charge). Accuracy is now `actual ÷ (raw × hour ratio)`;
+  falls back to raw when the hour is uncalibrated or Solcast attrs are missing. **Control-path
+  change — makes the agent charge less eagerly; deployed live 2026-07-24 mid-morning.** Directly
+  addresses the open "check `solar_unreliable` calibration" item. energy_rules Rule 11 updated.
+- **Asymmetric charge-rate window** (`_aggregate_charge_rates()` in `build_models.py`, pure +
+  unit-tested). Headline `kw = min(10-day median, 2-day median)` → **falls within ~1 day, rises
+  only on sustained evidence**. Resolves the open "make the charge-rate window asymmetric" item.
+  Keeps `self_consumption` at 1.67 today (intended); its value is a *safe* flip to ~5 kW once the
+  07-22 regime sustains (~07-27), with fall-fast protection if it reverts. `kw_long`/`kw_short`
+  recorded. **Offline builder change — no live effect until `build_models.py` is next run on the Pi.**
+- **8am over-charge root-caused** (see energy_log 2026-07-24): emergency automation firing at
+  SoC<20 + 3× pessimistic rate + zeroed solar credit, all compounding out of an overnight drain to
+  8%. The LP shadow held correctly throughout (only LP↔det divergence in 60 cycles).
+- **219 tests** (was 199): 192 decision + 16 optimizer + 11 build_models (new `test_build_models.py`).
+
 Key agent capabilities added 2026-07-23 (session 18):
 - **Rule 28 — control inputs are range-checked (`SETTINGS_SPEC`)**: the **7** `input_number`
   helpers are read every cycle by `compute_decision_context()` and were previously trusted with

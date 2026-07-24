@@ -16,7 +16,7 @@ import json
 import math
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE      = Path(__file__).parent
@@ -29,7 +29,8 @@ MAX_RATE_CAP = 8.0   # kW — filter sensor glitches
 MAX_JUMP_PCT = 20.0  # % SoC per 30 min — filter sensor jumps
 
 # Power-based charge rate model (preferred — see build_charge_rate_model_from_power)
-POWER_DAYS        = 10    # HA recorder keeps ~10 days of 30 s battery_power
+POWER_DAYS        = 10    # long window: HA recorder keeps ~10 days of 30 s battery_power
+POWER_SHORT_DAYS  = 2     # short window: the "fall fast" reactor (see _aggregate_charge_rates)
 POWER_MIN_SAMPLES = 20    # emit a bucket only with real support behind it
 MODE_SETTLE_S     = 180   # ignore samples within 3 min of a mode change (poll lag)
 
@@ -175,7 +176,9 @@ def build_charge_rate_model_from_power(days: int = POWER_DAYS,
             return False
         return (t - series["mode"][i][0]).total_seconds() >= MODE_SETTLE_S
 
-    buckets: dict[tuple, list[float]] = defaultdict(list)
+    # Keep the timestamp with each sample so _aggregate_charge_rates() can split
+    # the long window into a short "fall fast" sub-window (see that function).
+    buckets: dict[tuple, list[tuple]] = defaultdict(list)
     for ts, raw in series["batt"]:
         try:
             batt = float(raw)
@@ -188,24 +191,82 @@ def build_charge_rate_model_from_power(days: int = POWER_DAYS,
             continue
         if not mode_settled(ts):
             continue
-        buckets[(mode, int(soc // 10) * 10)].append(-batt)
+        buckets[(mode, int(soc // 10) * 10)].append((ts, -batt))
 
+    return _aggregate_charge_rates(buckets, now, days=days, min_samples=min_samples)
+
+
+def _aggregate_charge_rates(buckets: dict, now: datetime,
+                            days: int = POWER_DAYS,
+                            short_days: int = POWER_SHORT_DAYS,
+                            min_samples: int = POWER_MIN_SAMPLES) -> dict:
+    """Per-(mode, SoC-bucket) charge-rate summary with an *asymmetric* headline.
+
+    `buckets` maps (mode, soc_bucket) -> list of (timestamp, rate_kw) samples over
+    the full `days` window. Pure — no HA/DB access — so it is unit-tested directly
+    against synthetic regime-change data (test_build_models.py).
+
+    The headline `kw` (what energy_agent._avg_charge_rate_kw and optimizer read)
+    is the **minimum of the long-window median and the short-window median**:
+
+        kw = min( median(all samples), median(last short_days) )
+
+    Why min, and why asymmetric (2026-07-24): the charge rate stepped from
+    ~1.67 kW to ~5.0 kW on 2026-07-22 (a firmware regime change). A symmetric
+    10-day median is slow in *both* directions, but the risk is not symmetric —
+    believing 5 kW when it is really 1.67 means budgeting too little charge time
+    and risking a ~$30 demand charge, while believing 1.67 when it is really 5
+    only costs a few cents of charging earlier/dearer than needed. So the model
+    should fall to a slower rate within ~a day (safe) but rise to a faster rate
+    only on sustained evidence:
+
+      - When the rate *rises*, the short median jumps first while the long median
+        lags (old days still outvote), so min() = the lagging long median →
+        inertia. It rises only once the long window itself is majority new-regime
+        (~same timing as a plain 10-day median — no upside is delayed).
+      - When the rate *falls*, the short median drops first, so min() = the short
+        median → the model follows down within ~short_days.
+
+    A low quantile does NOT substitute for this: within the new regime p25≈p50, so
+    quantiles hedge within-regime spread, not a regime change. Percentiles below
+    are still emitted (over the full window) for deadline-conservative projections.
+    """
+    def _median(sorted_vals):
+        n = len(sorted_vals)
+        return sorted_vals[min(int(n * 0.5), n - 1)]
+
+    short_cutoff = now - timedelta(days=short_days)
     result: dict[str, dict] = {}
-    for (mode, bucket), rates in sorted(buckets.items()):
-        if len(rates) < min_samples:
+    for (mode, bucket), samples in sorted(buckets.items()):
+        if len(samples) < min_samples:
             continue
-        rates.sort()
+        rates = sorted(v for _ts, v in samples)
         n = len(rates)
         q = lambda f: round(rates[min(int(n * f), n - 1)], 3)
+        long_median = _median(rates)
+
+        short_rates = sorted(v for ts, v in samples if ts >= short_cutoff)
+        # Only let the short window pull the headline down if it has real support;
+        # otherwise a quiet couple of days can't spuriously move the model.
+        if len(short_rates) >= min_samples:
+            short_median = _median(short_rates)
+            kw = round(min(long_median, short_median), 3)
+        else:
+            short_median = None
+            kw = round(long_median, 3)
+
         result.setdefault(mode, {})[str(bucket)] = {
-            "kw":     q(0.50),          # median — what _avg_charge_rate_kw() reads
-            "p10":    q(0.10),
-            "p25":    q(0.25),
-            "median": q(0.50),
-            "mean":   round(sum(rates) / n, 3),
-            "max":    round(rates[-1], 3),
-            "n":      n,
-            "source": f"power_{days}d",
+            "kw":           kw,                      # asymmetric — what readers use
+            "kw_long":      round(long_median, 3),   # plain full-window median
+            "kw_short":     round(short_median, 3) if short_median is not None else None,
+            "n_short":      len(short_rates),
+            "p10":          q(0.10),
+            "p25":          q(0.25),
+            "median":       q(0.50),
+            "mean":         round(sum(rates) / n, 3),
+            "max":          round(rates[-1], 3),
+            "n":            n,
+            "source":       f"power_{days}d_asym{short_days}d",
         }
     return result
 
@@ -350,9 +411,14 @@ def main() -> None:
         for bucket, v in sorted(buckets.items(), key=lambda x: int(x[0])):
             src = v.get("source", "soc_delta_legacy")
             if src.startswith("power"):
-                print(f"  {mode}  SoC={int(bucket):3d}%  median={v['kw']:.2f}  "
-                      f"p10={v['p10']:.2f}  p25={v['p25']:.2f}  max={v['max']:.2f} kW"
-                      f"  n={v['n']:<5} [{src}]")
+                asym = ""
+                if v.get("kw_short") is not None and v.get("kw_long") is not None:
+                    held = " (held-down)" if v["kw"] < v["kw_long"] - 1e-9 else ""
+                    asym = (f"  long={v['kw_long']:.2f} short={v['kw_short']:.2f}"
+                            f"(n={v.get('n_short', 0)}){held}")
+                print(f"  {mode}  SoC={int(bucket):3d}%  kw={v['kw']:.2f}"
+                      f"  p10={v['p10']:.2f}  p25={v['p25']:.2f}  max={v['max']:.2f} kW"
+                      f"  n={v['n']:<5} [{src}]{asym}")
             else:
                 flag = "" if v["n"] >= MIN_SAMPLES else "  ← low-n, agent will use fallback"
                 print(f"  {mode}  SoC={int(bucket):3d}%  kw={v['kw']:.2f} kW"

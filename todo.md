@@ -50,6 +50,8 @@
   |------|--------|---------:|---------:|-------|
   | 2026-07-23 | `ev_min_soc_pct` | 80 | 30 | at entity max |
   | 2026-07-23 | (reported "min price") | 70¢ | 40¢ | exceeds `ev_min_charge_price_c` max of 60 — entity unconfirmed |
+  | 2026-07-24 | all six EV helpers | stable | — | **EV sliders held overnight** (`ev_min_soc_pct`=30, rest steady) — this was flagged as "the real test" and it passed |
+  | 2026-07-24 | `battery_max_insurance_floor_pct` | 0 | 30 | drifted back to 0 (set 30% on 07-23); 6 out-of-band violations, clamped to band floor 20. Operationally inert (dormant until April) but confirms drift isn't gone — it moved to a *different*, non-EV helper. Note: no `initial:`, so 0 = HA's default-to-min for an untouched helper → suggests the helper isn't persisting rather than being actively written |
 
 - [x] **Confirm the `SETTINGS_SPEC` values and bands** — resolved 2026-07-23.
   The spec no longer holds *any* target values: it is `(alias, lo, hi)` bands only, because the HA
@@ -149,19 +151,25 @@
   its projected cost went negative while the rule layer charged 47%→80% at 12–13¢ — **the LP was
   right, and the rule layer was wrong because it was budgeting 3× the charging time it needed.**
 
-- [ ] **Make the charge-rate window asymmetric (blocks acting on the 5 kW regime change)** —
-  `build_charge_rate_model_from_power()` uses a symmetric 10-day rolling *median*, which is robust
-  to outliers but by construction slow to a genuine step change. The risk is not symmetric though:
-  believing 5 kW when it is really 1.67 means starting late and risking a ~$30 demand charge;
-  believing 1.67 when it is really 5 costs cents. So the model should be allowed to fall
-  **quickly** (slower charging = safe direction, react in ~1 day) and rise only on **sustained**
-  evidence (keep roughly the current inertia). Note a low quantile does *not* substitute for this:
-  new-regime p25 is 4.96–4.99, so quantiles hedge within-regime variance, not a regime change.
-  Under such a scheme today's data still would not flip `self_consumption` to 5.0 — which is the
-  correct outcome. Decide: implement this, or simply let the median flip naturally ~2026-07-27.
+- [x] **Make the charge-rate window asymmetric (blocks acting on the 5 kW regime change)** —
+  done 2026-07-24 (session 19). Aggregation extracted into pure `_aggregate_charge_rates()`;
+  headline `kw = min(median over POWER_DAYS=10, median over POWER_SHORT_DAYS=2)` → falls within
+  ~1 day, rises only on sustained evidence (`min()` holds the pessimistic long value on a rise
+  until the long window is majority new-regime; follows the short value down on a fall). Keeps
+  `self_consumption` at 1.67 on 07-24 data (intended); safe flip to ~5 kW once the regime sustains
+  (~07-27) with fall-fast protection. `kw_long`/`kw_short` recorded. New `test_build_models.py`
+  (11 tests). Offline builder — no live effect until `build_models.py` is next run on the Pi
+  (couple this with the nightly-cron item below, still open).
 
-  **Remaining next steps**: (b) test the *approach-taper* hypothesis with fine-grained (2-point) reserve−SoC gap buckets — the 12:00 cycle pulled only 0.5 kW at a 6-point gap vs 3.7–5.0 kW at 11–48 points, and the earlier analysis bucketed 1–20 together and averaged that away; (c) poll the Tesla API every ~10 s through a ramp to confirm the mode field genuinely never moves.
-- [ ] **Check `solar_unreliable` calibration** — the solar corrector shows Solcast runs at 0.14–0.16 of actual at 08:00–09:00 in winter, so "7% of forecast" mornings may be normal rather than faults. If the flag fires on ordinary winter mornings it is mislabelling them, and it gates real rule behaviour.
+  **Remaining follow-ups** (separate from the window, still open): (b) test the *approach-taper* hypothesis with fine-grained (2-point) reserve−SoC gap buckets — the 12:00 cycle pulled only 0.5 kW at a 6-point gap vs 3.7–5.0 kW at 11–48 points, and the earlier analysis bucketed 1–20 together and averaged that away; (c) poll the Tesla API every ~10 s through a ramp to confirm the mode field genuinely never moves.
+- [x] **Check `solar_unreliable` calibration** — done 2026-07-24 (session 19). `_solar_accuracy()`
+  now measures actual against the *bias-corrected* this-hour forecast (raw × `_hour_solar_ratio()`
+  from `model_params.json`), not raw Solcast. A normal winter morning flips from `unreliable — 13%`
+  to `good — 95% of corrected`, so `expected_solar` is no longer zeroed on ordinary mornings.
+  Genuine underperformance (below the calibrated expectation) still flags; near-zero corrected
+  expectation → `not_applicable`. Falls back to raw when uncalibrated. 6 tests. Deployed live
+  2026-07-24 mid-morning (control-path change — watch today's demand window). This was the real
+  fix for the 2026-07-24 08:00 over-charge.
 
 
 - [x] **Run `build_models.py` on Pi** — done 2026-07-22. Required fixing three bugs first (the script had never executed). Solar correction ratios came in at **0.14–0.74**, well below the 0.5–1.5 range anticipated here — Solcast's winter morning over-forecast is far larger than assumed. Re-run periodically to accumulate autonomous samples.
