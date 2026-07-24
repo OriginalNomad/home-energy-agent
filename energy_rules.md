@@ -859,6 +859,44 @@ stop it without fighting it every half hour.
 
 ---
 
+### Rule 30 — One Overnight Survival Floor (rule layer and safety net agree)
+
+**Decided 2026-07-24.** The system had *two* survival floors that disagreed by 15 points, and
+they fought:
+
+- The **deterministic rule layer** is designed to ride the battery down to the **5% reserve
+  floor** overnight. `peak_early_morning_hold` and `wait_for_cheap_go_hard` deliberately hold at
+  any SoC — the battery physically stops discharging at its 5% backup reserve, grid covers home
+  load there at overnight prices (no demand charge — the demand window is 3–9pm), and the Solar
+  Sponge deadline logic (`peak_sponge_go_hard` / `peak_deadline_autonomous`) refills it cheaply
+  before 2:55pm. Riding low overnight is *intended*, not a failure.
+- The **`battery_low_soc_emergency_charge` automation** triggered at **SoC < 20%**. So it
+  pre-empted the rule layer's intended low holds every low-SoC morning: it set reserve high, the
+  next HOLD verdict cleared reserve back to 5%, the battery discharged, and the two layers
+  oscillated (observed 2026-07-23 → 24; the 2026-07-24 08:00 over-charge began this way).
+
+**Resolution — trust the projection, ride lower.** The emergency automation's trigger (and its
+matching condition) were lowered **20% → 10%**, aligning the safety net with the rule layer's
+actual operating floor. 10% rather than 5% keeps roughly one 30-minute agent cycle of margin above
+the physical reserve (home load ~1.2 kW drains ~4–5 points/cycle), so the backstop still catches a
+genuine projection failure or a stalled agent before the battery is truly empty, without fighting
+the routine overnight holds. Exactly 5% was rejected: it would leave zero margin and be redundant
+with the reserve floor itself.
+
+**This is a deliberate reversal of scope, not of the 5% floor.** Session 10's "5% survival floor
+replaces the 20% threshold" changed the *rule layer's* decision floor to 5% but left the *safety
+automation* at 20% — this rule finishes that migration by moving the automation too. The rule
+layer's 5% projected floor is unchanged. Residual overlap is narrow: the automation only charges
+when price ≤ 20¢ (and cheap-window or ≤ 10¢), and at genuinely low SoC the rule layer's own
+deadline logic is usually charging too, so they agree rather than fight.
+
+**Not changed:** the automation still targets 85% in peak months before 3pm (full demand-window
+buffer — an emergency is not the time to trust a Solcast-optimistic sub-85% target), still never
+fires during the demand window or above 20¢, and still runs only 07:00–22:00. Overnight low-SoC
+charging is the rule layer's job alone (the overnight top-up automations remain disabled).
+
+---
+
 ## Decision Priority Order
 When multiple rules conflict, apply in this order:
 

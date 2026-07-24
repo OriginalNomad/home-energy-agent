@@ -60,9 +60,31 @@ protection. It does **not** change tomorrow morning — priority 2 is the 8am le
 `kw_long`/`kw_short` recorded for transparency. New `test_build_models.py` (11 tests). energy_rules
 charge-rate section updated.
 
+### Priority 1.5 — overnight survival floor reconciled (Rule 30, deployed live)
+
+Root cause of the whole cascade: the system had two survival floors that disagreed by 15 points
+and fought. The **rule layer is designed to ride to the 5% reserve floor** — `peak_early_morning_hold`
+explicitly holds "at any SoC ... let the battery drain toward the 5% floor if needed — grid covers
+home load there, then Solar Sponge deadline logic catches up cheaply." But
+`battery_low_soc_emergency_charge` triggered at **SoC < 20%**, pre-empting that intent every low-SoC
+morning: it set reserve high → the next HOLD verdict cleared reserve to 5% → battery discharged →
+oscillation.
+
+User's call: **trust the projection, ride lower.** Lowered the automation's trigger + matching
+condition **20% → 10%** (`config/automations.yaml`), aligning the safety net with the rule layer's
+operating floor. Chose 10 not 5: home load ~1.2 kW drains ~4–5 points per 30-min cycle, so 10%
+keeps ~one cycle of margin above the physical 5% reserve; exactly 5% would be zero-margin and
+redundant with the reserve floor. Unchanged: still targets 85% in peak months before 3pm, still
+never fires during the demand window / above 20¢ / outside 07:00–22:00. This finishes session 10's
+migration (which moved the *rule layer* to 5% but left the *automation* at 20%). Rule 30 added to
+energy_rules; deployed via `deploy_ha_config.sh`, zero drift confirmed. Verified no other *active*
+low-SoC charger exists (overnight top-up automations remain disabled; the 25%/10% entries at
+lines 589/613 are demand-window *warnings*, not chargers).
+
 ### Tests
 
 219 total, all green: 192 decision (was 183, +9), 16 optimizer, 11 build_models (new file).
+Rule 30 is a config-only change (HA automation threshold) — no Python tests affected.
 
 ---
 

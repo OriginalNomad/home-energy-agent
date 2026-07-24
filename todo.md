@@ -65,7 +65,14 @@
   Remaining thread, low priority: the Grid Price Forecast card annotates *"Charge threshold (12¢)"*
   — a hardcoded label for a helper that no longer exists. Remove or repoint it.
 
-- [ ] **Reconcile the overnight survival floor — the rule layer and Layer 0 disagree by 15 points**
+- [x] **Reconcile the overnight survival floor — RESOLVED 2026-07-24 (Rule 30).** User chose
+  "trust the projection, ride lower." Lowered `battery_low_soc_emergency_charge` trigger + condition
+  20% → 10% to align the safety net with the rule layer's designed 5%-floor ride (kept ~one
+  agent-cycle margin above the physical reserve rather than going to exactly 5%). Deployed live via
+  `deploy_ha_config.sh`, zero drift. Rule 30 documents it. **Watch:** confirm the oscillation is gone
+  on the next genuine sub-10% morning. Original analysis retained below for context.
+
+  ~~The rule layer and Layer 0 disagree by 15 points~~
   (found 2026-07-23 by replay; this is the *real* cause of the drain to 17%, not the solar
   forecast — see energy_log for the retraction.)
   - `compute_decision_context()` holds while `projected_soc_at_sponge > 5%`. At 00:00 on

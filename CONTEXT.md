@@ -230,6 +230,12 @@ Key agent capabilities added 2026-07-24 (session 19):
 - **8am over-charge root-caused** (see energy_log 2026-07-24): emergency automation firing at
   SoC<20 + 3× pessimistic rate + zeroed solar credit, all compounding out of an overnight drain to
   8%. The LP shadow held correctly throughout (only LP↔det divergence in 60 cycles).
+- **Rule 30 — one overnight survival floor** (config change, deployed live). Resolves the open
+  survival-floor contradiction: `battery_low_soc_emergency_charge` trigger lowered **20% → 10%** to
+  match the rule layer's designed 5%-floor ride (it holds to the reserve floor overnight by design;
+  the 20% automation fought that every low-SoC morning). 10% keeps ~one agent-cycle of margin above
+  the 5% physical reserve. Peak-month 85% target / demand-window / 20¢ / 07:00–22:00 guards
+  unchanged. energy_rules Rule 30.
 - **219 tests** (was 199): 192 decision + 16 optimizer + 11 build_models (new `test_build_models.py`).
 
 Key agent capabilities added 2026-07-23 (session 18):
@@ -490,9 +496,11 @@ Counts below were read from the live HA, not from the file. To re-verify:
 - **The 5-minute price problem (HIGH).** Amber's price sensor carries `duration: 5`; the agent
   samples one 5-min price per 30-min cycle and treats it as the interval price. Every threshold
   comparison is effectively a coin-flip. Not fixed — needs a design decision (`todo.md`).
-- **Survival floor contradiction.** Rule layer holds to a 5% projected floor;
-  `battery_low_soc_emergency_charge` fires at 20%. On 2026-07-23 they actively fought. Needs a
-  decision on the intended floor.
+- **Survival floor contradiction — RESOLVED 2026-07-24 (Rule 30).** Emergency automation trigger
+  lowered 20% → 10% to match the rule layer's designed 5%-floor ride. Deployed live. Watch that the
+  oscillation is actually gone on the next genuine low-SoC morning (should now be rare — the battery
+  is seldom below 10% except on a deep-drain night, and at that SoC the rule layer's own deadline
+  logic is usually charging too, so they agree).
 - **`self_consumption` charge rate should flip to ~5 kW around 2026-07-27** if the new regime
   holds — `POWER_DAYS=10` rolling median needs 6 of 10 days. Until then the agent plans against
   1.67 kW, i.e. 3× pessimistic (safe direction, but it charges earlier and dearer than needed).
