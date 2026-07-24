@@ -34,6 +34,11 @@ agent/__pycache__/
 agent/decisions.jsonl
 agent/daily_energy.jsonl
 agent/agent_decisions.log
+# Derived, machine-local model — rebuilt nightly on the Pi by build_models.py.
+# Tracking it armed a deploy hazard: build_models dirties the working tree, then any
+# push touching the file made the Pi's `git pull` abort and (via &&) stop the agent.
+# The agent loads it with a graceful {} fallback, so absence is safe. (2026-07-24)
+agent/model_params.json
 
 # App (Next.js)
 app/node_modules
