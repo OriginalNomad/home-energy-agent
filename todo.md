@@ -134,16 +134,17 @@
   **But `model_params.json` still reports 1.67 kW**, because `POWER_DAYS = 10` and `kw` is the
   *median*: 9 old-regime days outvote 2 new ones. It cannot flip until ~**2026-07-27**.
   See the new asymmetric-window item below.
-- [ ] **Cron `build_models.py` nightly (~2am)** — Phase 2.5-B isn't finished until retraining is automatic; it is still run by hand. `ARCHITECTURE.md` calls for a model-accuracy section in the nightly summary too.
-  ⚠️ **When cronning this, fix the pull hazard at the same time.** The Pi's agent cron is
-  `git pull -q && … && python3 agent/energy_agent.py` — an `&&` chain. `build_models.py` writes
-  `agent/model_params.json` *in the working tree*, so the Pi always has a locally-modified tracked
-  file. The moment a commit touching `model_params.json` is pushed from the Mac, the Pi's
-  `git pull` fails, the chain short-circuits, and **the agent silently stops running entirely**.
-  Either commit+push `model_params.json` from the Pi (it has working SSH remote access), or
-  gitignore it and treat it as machine-local state, or decouple the pull from the run so a failed
-  pull can't stop the agent. As of 2026-07-23 the Pi has an uncommitted `model_params.json`, so
-  this trap is currently armed.
+- [x] **Cron `build_models.py` nightly (~2am) + fix the pull hazard** — done 2026-07-24 (session 19).
+  Nightly cron added on the Pi (`0 2 * * * … build_models.py`). Pull hazard fixed two ways:
+  (1) `model_params.json` untracked + gitignored (commit cfe7cfc) so writing it no longer dirties a
+  tracked file — it's derived machine-local state like the already-ignored jsonl/db files; the agent
+  loads it with a graceful `{}` fallback; (2) the agent cron's pull decoupled to
+  `{ git pull -q || true; } && …` so a failed/conflicted pull can never stop the agent. Validated by
+  running `build_models.py` on the Pi — completed, wrote the file, tree stayed clean. Cron backup:
+  `/tmp/cron.bak` on the Pi. **Read the live model via SSH now** (Mac copy is a stale snapshot):
+  `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"`.
+  ⏳ Still open (separate): ARCHITECTURE.md's call for a **model-accuracy section in the nightly
+  summary** — not built.
 
 - [x] **Phase 3 — retire the Mac HA instance** — done 2026-07-22. Stopped + `--restart=no`. No tunnel change was needed: cloudflared already pointed at `http://localhost:8123` (the Pi's own HA), so CONTEXT's old "→ 192.168.68.70:8123" was stale. `agent.sol.io` and `energypi.local:8123` both verified 200 after the stop.
 - [ ] **Fix `shell_command.push_virtual_sensors`** — pre-existing, surfaced during consolidation. The command points at a *Mac* path, and the script isn't inside the HA container's mount (`~/homeassistant/config` → `/config`), so `restore_virtual_sensors_on_startup` cannot work on the Pi. Low urgency — `demand_window_summary.py --post` runs hourly via cron and re-pushes the sensors anyway. Fix by either copying the script into `config/` or moving the restore into the Pi's cron.

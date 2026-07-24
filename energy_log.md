@@ -81,6 +81,50 @@ energy_rules; deployed via `deploy_ha_config.sh`, zero drift confirmed. Verified
 low-SoC charger exists (overnight top-up automations remain disabled; the 25%/10% entries at
 lines 589/613 are demand-window *warnings*, not chargers).
 
+### Priority 2 — nightly model rebuild + deploy-hazard defused (Pi infra)
+
+Two intertwined problems in the Pi's deploy path, both fixed:
+
+1. **Models never retrained on their own** — `build_models.py` was only ever run by hand, so the
+   asymmetric window (above), the ~07-27 rate flip, and the solar corrector's seasonal drift all
+   depended on someone remembering. Added a **nightly cron at 02:00**:
+   `0 2 * * * cd ~/home-energy-agent && source agent/venv/bin/activate && python3 agent/build_models.py >> /tmp/build_models.log 2>&1`.
+
+2. **The armed pull-hazard** — `build_models.py` writes `agent/model_params.json` into the working
+   tree, and that file was *tracked*. Once locally modified, any commit pushed from the Mac that
+   touched it made the Pi's cron `git pull` abort; because the cron is a `git pull -q && … && python
+   energy_agent.py` chain, **the agent would silently stop running entirely**. Fixed two ways
+   (belt + braces):
+   - **Untracked `model_params.json`** (`git rm --cached` + `.gitignore`, commit cfe7cfc). It is
+     derived, machine-local state — same category as the already-ignored `decisions.jsonl` /
+     `daily_energy.jsonl` / `energy_log.db`. The agent loads it with a graceful `{}` fallback
+     (`energy_agent.py:1124`), so absence degrades to hardcoded charge rates + raw Solcast, never a
+     crash. Transition on the Pi: backed up the file → pulled the delete commit → restored it as an
+     ignored file, so no degraded window. **Consequence for the workflow:** the Mac's copy is now a
+     stale snapshot; read the *live* model via SSH (consistent with how `/morning` already reads
+     decisions.jsonl). `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"`.
+   - **Decoupled pull from run** — agent cron line changed to
+     `cd … && { git pull -q || true; } && source … && python3 agent/energy_agent.py`. Now a failed
+     or conflicted pull can *never* stop the agent; it runs on whatever code is checked out. This is
+     the real safety fix — even a future hazard of any kind can't silently kill the agent.
+
+   Diagnosis note: the todo warned the hazard was "currently armed" (uncommitted model_params.json),
+   but the Pi tree was actually **clean** — HEAD was merely behind by timing (10:21, next cron 10:30).
+   A cron-equivalent pull (`env -i … BatchMode=yes git pull`) confirmed the Pi authenticates to
+   GitHub via a passphrase-less ed25519 key with no agent forwarding, so cron auth was never the
+   issue. Priority-2 (solar accuracy) code went live on that pull.
+
+**Validated end to end** by running `build_models.py` on the Pi: it completed, wrote
+`model_params.json`, and **`git status` stayed clean** (hazard defused). Output confirmed the
+asymmetric window — `self_consumption` buckets tagged `[power_10d_asym2d]` with `long=1.67
+short=5.00` → held at 1.67; autonomous now populated from real data (n=72–258, was n=2–5 fallback):
+5.0 kW to 70%, 2.92 at 80%, 1.84 at 90%. (Aside: `self_consumption` SoC=20% reads 4.96 — that
+bucket's 10-day median is already majority new-regime due to sparse old-regime samples there, n=111;
+not introduced by the asymmetric change, and self-heals as the regime sustains.)
+
+Crontab backup for rollback on the Pi: `/tmp/cron.bak`. Still open: ARCHITECTURE.md's call for a
+model-accuracy section in the nightly summary (not built).
+
 ### Tests
 
 219 total, all green: 192 decision (was 183, +9), 16 optimizer, 11 build_models (new file).

@@ -110,7 +110,14 @@ repo's `config/` drifted 7 weeks out of sync unnoticed. Retired with `docker sto
 `docker update --restart=no` — reversible via `docker start homeassistant`, but don't:
 two instances is the bug.
 
-**Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `git pull -q` then runs agent. Code deploy = `git push` from Mac.
+**Agent cron on Pi** (`~/home-energy-agent`): every 30 min does `{ git pull -q || true; }` then runs
+agent. Code deploy = `git push` from Mac. **The pull is decoupled from the run (2026-07-24)** — a
+failed or conflicted `git pull` can no longer stop the agent; it runs on whatever code is checked
+out. **Nightly at 02:00** a second cron runs `build_models.py` to retrain the models.
+**`agent/model_params.json` is gitignored/machine-local (2026-07-24)** — rebuilt on the Pi nightly,
+never tracked; read the live model with `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"`
+(the Mac's copy is a stale snapshot). This pairing defuses the deploy hazard where a tracked,
+locally-modified `model_params.json` made `git pull` abort and silently stopped the agent.
 **HA config deploy**: `./deploy_ha_config.sh` (see the warning block above) — *not* git.
 **Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://localhost:8123` (the Pi's own HA). Systemd service, Sydney edge. Verified still 200 after the Mac HA was stopped.
 **HA external URL**: `https://agent.sol.io`. Trusted proxies cover localhost + Pi/Mac subnets + Docker bridge.
@@ -236,6 +243,11 @@ Key agent capabilities added 2026-07-24 (session 19):
   the 20% automation fought that every low-SoC morning). 10% keeps ~one agent-cycle of margin above
   the 5% physical reserve. Peak-month 85% target / demand-window / 20¢ / 07:00–22:00 guards
   unchanged. energy_rules Rule 30.
+- **Nightly model rebuild + deploy-hazard defused** (Pi infra). `build_models.py` now runs on a
+  02:00 cron (was hand-run). `model_params.json` untracked + gitignored (derived machine-local
+  state); agent cron pull decoupled (`{ git pull || true; } && …`) so a git problem can never stop
+  the agent. Validated: ran `build_models.py` on the Pi, tree stayed clean. Read the live model via
+  SSH now. Resolves the "cron build_models + pull hazard" todo.
 - **219 tests** (was 199): 192 decision + 16 optimizer + 11 build_models (new `test_build_models.py`).
 
 Key agent capabilities added 2026-07-23 (session 18):
@@ -502,9 +514,13 @@ Counts below were read from the live HA, not from the file. To re-verify:
   is seldom below 10% except on a deep-drain night, and at that SoC the rule layer's own deadline
   logic is usually charging too, so they agree).
 - **`self_consumption` charge rate should flip to ~5 kW around 2026-07-27** if the new regime
-  holds — `POWER_DAYS=10` rolling median needs 6 of 10 days. Until then the agent plans against
-  1.67 kW, i.e. 3× pessimistic (safe direction, but it charges earlier and dearer than needed).
-  Re-run `build_models.py` and check.
+  holds — the long window needs 6 of 10 days. Until then the agent plans against 1.67 kW, i.e. 3×
+  pessimistic (safe direction, but it charges earlier and dearer than needed). **Now retrains
+  automatically** (nightly `build_models.py` cron, session 19) and the window is **asymmetric**
+  (Rule: `kw = min(10-day median, 2-day median)` — rises only on sustained evidence, falls within
+  ~1 day). As of the 07-24 rebuild most `self_consumption` buckets are still held at 1.67 (intended);
+  note SoC=20% already reads 4.96 due to sparse old-regime samples in that bucket. Check the flip
+  via `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"` — no manual rebuild needed.
 - **Rule 15's insurance floor does nothing until April** (gated `not is_peak`). The 30% set on
   2026-07-23 is parked, not active.
 
