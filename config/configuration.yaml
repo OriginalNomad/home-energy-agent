@@ -43,6 +43,26 @@ automation: !include automations.yaml
 script: !include scripts.yaml
 scene: !include scenes.yaml
 
+# Sonos — the Pi is dual-homed: eth0 = 192.168.0.x (default route, the energy
+# segment) and wlan0 = 192.168.68.80 (the home WiFi). All 4 Sonos speakers live
+# on the WiFi subnet (192.168.68.x). Auto-discovery fires SSDP multicast out the
+# default interface (eth0), where there are no speakers, so HA finds nothing and
+# creates an empty "hub" with no media_players. This block fixes both halves:
+#   - hosts: seeds the four speaker IPs directly, bypassing multicast discovery
+#   - advertise_addr: sets the UPnP event-callback IP to the wlan0 address, so
+#     the speakers can reach HA back (otherwise they'd get the unreachable eth0
+#     IP and every media_player would go Unavailable).
+# If a speaker gets a new DHCP lease its IP here goes stale — reserve these in
+# the 192.168.68.x router's DHCP table. See energy_log.md 2026-07-24.
+sonos:
+  media_player:
+    advertise_addr: 192.168.68.80
+    hosts:
+      - 192.168.68.58
+      - 192.168.68.66
+      - 192.168.68.67
+      - 192.168.68.69
+
 input_boolean:
   ev_schedule_active:
     name: "EV — Schedule active"

@@ -2069,3 +2069,124 @@ reserve (5%), mode (self_consumption) and battery discharge all behaved correctl
 default (`demand_window_summary.py:42`, `log_daily_energy.py:55`) and committed to the repo —
 worth rotating + moving to `.env`/`secrets.yaml`. Also still pending: `build_models.py` run on
 Pi (Phase 2.5-B activation), unchanged from session 16.
+
+---
+
+## 2026-07-24 — Sonos fixed (non-energy); dual-network topology discovered
+
+**Context:** first non-energy use of the HA console — adding Sonos (and exploring Meross
+Smart Plugs) for lighting/audio. Not battery-related, kept fully isolated from the agent.
+
+**Problem:** Sonos integration showed an empty "hub" with no speakers, or speakers stuck
+`Unavailable`. Originally added on the retired Mac instance; re-adding on the Pi still failed.
+
+**Root cause — the Pi is dual-homed on two separate networks:**
+- `eth0` (wired) `192.168.0.67/24` — **default route**, the energy segment (Powerwall gateway etc.)
+- `wlan0` (WiFi) `192.168.68.80/22` — the home LAN, where all 4 Sonos speakers + the Meross
+  plugs live (`192.168.68.x`).
+HA's Sonos SSDP discovery fired out the default interface (eth0), where there are no speakers,
+so it found nothing; and it advertised the eth0 IP for UPnP event callbacks, which the speakers
+on 68.x can't reach → `Unavailable`. Container networking was **not** the issue (already `host`).
+
+**Fix (deployed):** added a `sonos:` block to `config/configuration.yaml` — `hosts:` seeds the
+four current speaker IPs (`.58/.66/.67/.69`, bypassing multicast), `advertise_addr: 192.168.68.80`
+points event callbacks at the wlan0 IP. Verified against HA 2026.6.1 schema (`interface_addr`
+is deprecated, omitted). Deployed via `deploy_ha_config.sh`, HA **restarted** (needed — YAML
+`sonos:` only loads at setup). Post-restart: zero subscription failures (was erroring every 30s);
+all 4 media_players available (Hallway/Kitchen/Living Room paused, Mezzanine idle).
+
+**Note — Hallway proved the DHCP hazard:** it was hardcoded at `.63`, got a new lease, moved,
+went Unavailable. The `hosts:` list pins today's IPs, so **the four 68.x speaker IPs must be
+reserved in the home router** or this recurs. Told user; not yet done.
+
+**Also found (not actioned):**
+- Custom HACS integration `sonos_cloud` installed (flagged "untested by HA") — likely the
+  phantom "hub"; candidate for removal if not used for TTS.
+- Security: the committed HA token (above) is now confirmed **401** against the Pi (stale,
+  Mac-era) — harmless but should be scrubbed. The **Tessie bearer token in
+  `config/configuration.yaml` is live** and committed/pushed — should be rotated in Tessie and
+  moved to `.env`. Re-flagged, user aware.
+- Meross plugs share the 68.x network → same discovery limitation; add-by-IP when revisited.
+
+---
+
+## 2026-07-25 — Morning: "5 kW fast charge again" explained; survival-floor oscillation recurred
+
+**User question:** thought yesterday's "rolling charge threshold" would stop 5 kW fast charging;
+it charged fast again this morning. **Verified against live `decisions.jsonl` on the Pi (20 cycles).**
+
+**Answer — nothing added yesterday limits the charge rate.** Two distinct 5 kW events this morning:
+1. **~07:00 — HA `battery_low_soc_emergency_charge`, not the agent.** Battery correctly rode to the
+   5% floor overnight (held every cycle 02:30–07:00 on flat 11–15¢ prices). At 07:00 the automation's
+   07:00–22:00 gate opened; SoC 5% < 10% trigger (Rule 30's value), price 14¢ < 20¢ ceiling → it set
+   reserve 80 → ~75-pt gap = 5 kW → SoC 5→19%. Agent rule layer disagreed and cleared reserve to 5%
+   at 07:30 (`"…clearing reserve 80%"`). **Rule 30 did NOT prevent the oscillation** — it lowered the
+   trigger 20→10, but the battery went to 5, below 10. This is the "watch on the next genuine sub-10%
+   morning" item, and it failed that test.
+2. **08:30 & 09:30 — agent's own `peak_charge_now`**, reserve=85 deliberately (SoC 19→34%). Same
+   physics: fixed reserve 85 against a low SoC = 40+ pt gap = 5 kW.
+
+**Root cause of "why 5 kW not gentle":** the agent always writes a *fixed* reserve (85) when grid-
+charging; against low SoC that is always a full-gap 5 kW slam. The **reserve-offset rate controller**
+(`reserve = SoC + small offset`, discovered 07-24, commit ba2bf62) that would command a gentle rate is
+**a proposal in `todo.md`, not built.** The "rolling/asymmetric charge-rate window" is only the offline
+*rate-prediction model* (`min(10-day, 2-day median)`), used for fill-time planning — it commands nothing
+and still reports 1.67 kW until ~07-27. So: expected behaviour, the fix is designed but unimplemented.
+
+**Two priorities this surfaces:** (a) build the reserve-offset rate controller (⭐ todo) — the actual fix;
+(b) reconcile the survival floor so the emergency automation and rule layer share one floor and stop
+fighting at the bottom of an overnight ride.
+
+**Demand window 07-24: PASSED** ✅ (peak 0.354 kW / ~$4.09, min SoC 42%, 100% by 3pm). Solar came in at
+0.43× forecast (heavy winter over-forecast) — the rules' peak-day charge-as-insurance hedge looks right
+in hindsight.
+
+**Three-way (20 cycles, all full-field):** LLM↔det 20/20; LLM↔opt 18/20; opt↔det 18/20 → **90% consensus**.
+Both divergences are 08:30/09:30 `peak_charge_now` (reserve 85) vs LP `mpc_hold` — **cause (c)**, the
+robust-MPC hedge (LP holds for Solar Sponge; rules pre-charge as insurance), not a bug. Given the 0.43×
+solar day, the rules' hedge was arguably safer — motivates a conservative solar quantile before LP cutover.
+
+**Slider drift watch:** all seven helpers in band and stable overnight, zero violations. See todo table.
+
+### Built: reserve-offset charge-rate controller (Rule 31, todo #1) — v1
+
+**Why.** This morning's 5 kW fast charge (08:30/09:30) is firmware 26.18.3's doing: a fixed
+reserve=85 against a low SoC = 40+ pt gap = full 5 kW even in self_consumption. The rate dial was
+recovered on 07-24 (gap 5→1.67 kW, 10→3.96, 20+→5). The whole verdict tree already *budgets*
+self_consumption at 1.67 kW (`fill_slow` reads model_params, currently 1.67) — firmware broke the
+actuation, not the plan. This restores the intent.
+
+**Design (confirmed with user, plan approved):** mode-as-selector — every self_consumption charge
+becomes a gentle offset-chase, every autonomous charge stays full 5 kW (unchanged). Build-now +
+log-to-calibrate-later; the `min(…,target)` clamp is structurally safe at any SoC, so we did not
+first re-characterise the taper at more SoC levels.
+
+**Change — all in `agent/energy_agent.py`:**
+- `GENTLE_CHARGE_CONTROL = True` kill-switch + `SELF_CONS_CHARGE_OFFSET_PTS = 6` (→ ~2.1 kW
+  instantaneous, ~1.6 kW cycle-average once the 6-pt gap fills in ~23 of 30 min and idles).
+- Pure `_gentle_charge_reserve(soc, target, offset)` → `min(int(soc)+offset, target)`; `soc None`
+  → returns target (old behaviour, safe).
+- Wired into `_execute_deterministic_verdict()`: on a `self_consumption` charge, command the gentle
+  reserve; `autonomous` and kill-switch-off paths unchanged. Verdict tree **untouched**.
+- `decisions.jsonl` gains `charge_target_pct` / `reserve_cmd_pct` / `charge_offset_pts` /
+  `charge_rate_intent`, stashed via `_cycle_context["rate_control"]`.
+- Tests: 7 new in `test_decision.py` (clamp-at-target, taper, None-fallback, custom offset, and
+  `_execute_deterministic_verdict` end-to-end for gentle/autonomous/kill-switch). One pre-existing
+  manual-override test updated (it asserted a flat reserve=85; a self_consumption charge at soc 47
+  now correctly commands 53 = min(47+6,85)). **203 decision + 16 optimizer + 11 build_models, all green.**
+
+**Explicitly NOT fixed by this:** the HA `battery_low_soc_emergency_charge` automation sets reserve
+directly and still slams 5 kW when it fires (this morning's 07:00 event) — that's the separate
+survival-floor reconciliation (#2). After #1, the *agent's* self_consumption charges are gentle; the
+safety automation can still slam until #2.
+
+**Watch after deploy:** confirm `model_params.json` self_consumption stays ~1.67. The
+`min(10-day,2-day)` window holds it there through ~07-27; after that the restored gentle physics
+keeps *measured* self_consumption power low, so the model should never flip to 5 kW. If build_models
+ever reports it high while the controller is active, `fill_slow` would under-budget charging time
+near the deadline (the one demand-charge-relevant failure mode) → add a fill-time clamp then.
+
+**Not yet deployed** — code change only. Needs `git push` from the Mac; the Pi's 30-min agent cron
+pulls it. This is agent code, not HA config, so no `deploy_ha_config.sh`. Verify live: next
+self_consumption charge cycle should show `reserve_cmd_pct ≈ soc+6` rising each cycle (not a flat 85)
+and `battery_power` ~1.5–2 kW in `energy_log.db` instead of ~5.

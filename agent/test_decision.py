@@ -883,11 +883,128 @@ def test_manual_override():
         ea.ha_get = _with_override_state({"state": "off", "last_changed": now.isoformat()})
         sent.clear()
         ea._execute_deterministic_verdict(ctx, dry_run=False)
-        check("control resumes when override is off", sent == [85], f"sent={sent}")
+        # Control resumed → a reserve command was sent. Under the Rule 31 controller a
+        # self_consumption charge chases SoC+offset (soc 47, target 85 → 53), not a flat 85.
+        check("control resumes when override is off",
+              sent == [ea._gentle_charge_reserve(47, 85)], f"sent={sent}")
     finally:
         ea.ha_get = real_ha_get
         ea.set_powerwall_reserve = real_set_reserve
         ea._cycle_context = real_ctx
+
+
+# ---------------------------------------------------------------------------
+# Rule 31 — gentle self_consumption charge controller (reserve = SoC + offset)
+#
+# Firmware 26.18.3 makes a fixed high reserve pull 5 kW from any large reserve−SoC
+# gap even in self_consumption. The controller chases reserve = SoC + offset so the
+# gap stays small and the Powerwall trickles (~1.6 kW), restoring the rate the whole
+# verdict tree budgets. autonomous charges are untouched (full 5 kW, export-guarded).
+# ---------------------------------------------------------------------------
+
+def test_gentle_charge_reserve_small_gap():
+    # Low SoC: a big charge target must collapse to a small chased reserve.
+    r = ea._gentle_charge_reserve(19, 85)
+    check("gentle reserve = soc + offset at low soc", r == 19 + ea.SELF_CONS_CHARGE_OFFSET_PTS, r)
+
+
+def test_gentle_charge_reserve_clamps_at_target():
+    # Near the target the chase must not overshoot — capped at target_pct.
+    r = ea._gentle_charge_reserve(82, 85)
+    check("gentle reserve clamps at target", r == 85, r)
+    r2 = ea._gentle_charge_reserve(85, 85)
+    check("gentle reserve at target idles (reserve<=soc)", r2 == 85, r2)
+
+
+def test_gentle_charge_reserve_none_soc_falls_back_to_target():
+    # Tessie+gateway both unreadable → can't compute a gap → old fixed-reserve behaviour.
+    r = ea._gentle_charge_reserve(None, 85)
+    check("gentle reserve falls back to target when soc is None", r == 85, r)
+
+
+def test_gentle_charge_reserve_custom_offset():
+    r = ea._gentle_charge_reserve(30, 85, offset=10)
+    check("gentle reserve honours explicit offset", r == 40, r)
+
+
+def test_execute_selfcons_charge_uses_gentle_reserve():
+    real_set_reserve = ea.set_powerwall_reserve
+    real_set_mode    = ea.set_powerwall_mode
+    real_ctx         = ea._cycle_context
+    real_flag        = ea.GENTLE_CHARGE_CONTROL
+    try:
+        sent = []
+        ea.set_powerwall_reserve = lambda pct: sent.append(pct)
+        ea.set_powerwall_mode    = lambda m: None
+        ea.GENTLE_CHARGE_CONTROL = True
+        ea._cycle_context = {"state": {"battery": {"soc_pct": 19, "reserve_pct": 5,
+                                                   "mode": "self_consumption"}}}
+        ctx = {"recommended": {"action": "charge", "target_pct": 85,
+                               "mode": "self_consumption", "rule_fired": "peak_charge_now"},
+               "ev_recommended": {}}
+        ea._execute_deterministic_verdict(ctx, dry_run=False)
+        check("selfcons charge commands SoC+offset, not target",
+              sent == [19 + ea.SELF_CONS_CHARGE_OFFSET_PTS], f"sent={sent}")
+        rc = ea._cycle_context.get("rate_control", {})
+        check("  ...and logs the gentle intent", rc.get("charge_rate_intent") == "gentle", rc)
+        check("  ...and logs the charge target", rc.get("charge_target_pct") == 85, rc)
+    finally:
+        ea.set_powerwall_reserve = real_set_reserve
+        ea.set_powerwall_mode    = real_set_mode
+        ea._cycle_context        = real_ctx
+        ea.GENTLE_CHARGE_CONTROL = real_flag
+
+
+def test_execute_autonomous_charge_unaffected():
+    real_set_reserve = ea.set_powerwall_reserve
+    real_set_mode    = ea.set_powerwall_mode
+    real_ctx         = ea._cycle_context
+    real_flag        = ea.GENTLE_CHARGE_CONTROL
+    try:
+        sent = []
+        ea.set_powerwall_reserve = lambda pct: sent.append(pct)
+        ea.set_powerwall_mode    = lambda m: None
+        ea.GENTLE_CHARGE_CONTROL = True
+        ea._cycle_context = {"state": {"battery": {"soc_pct": 19, "reserve_pct": 5,
+                                                   "mode": "self_consumption"}}}
+        ctx = {"recommended": {"action": "charge", "target_pct": 100,
+                               "mode": "autonomous", "rule_fired": "peak_deadline_autonomous"},
+               "ev_recommended": {}}
+        ea._execute_deterministic_verdict(ctx, dry_run=False)
+        check("autonomous charge still commands reserve=target (full rate)",
+              sent == [100], f"sent={sent}")
+        rc = ea._cycle_context.get("rate_control", {})
+        check("  ...and logs the full intent", rc.get("charge_rate_intent") == "full", rc)
+    finally:
+        ea.set_powerwall_reserve = real_set_reserve
+        ea.set_powerwall_mode    = real_set_mode
+        ea._cycle_context        = real_ctx
+        ea.GENTLE_CHARGE_CONTROL = real_flag
+
+
+def test_execute_gentle_killswitch_reverts_to_target():
+    real_set_reserve = ea.set_powerwall_reserve
+    real_set_mode    = ea.set_powerwall_mode
+    real_ctx         = ea._cycle_context
+    real_flag        = ea.GENTLE_CHARGE_CONTROL
+    try:
+        sent = []
+        ea.set_powerwall_reserve = lambda pct: sent.append(pct)
+        ea.set_powerwall_mode    = lambda m: None
+        ea.GENTLE_CHARGE_CONTROL = False   # kill-switch off
+        ea._cycle_context = {"state": {"battery": {"soc_pct": 19, "reserve_pct": 5,
+                                                   "mode": "self_consumption"}}}
+        ctx = {"recommended": {"action": "charge", "target_pct": 85,
+                               "mode": "self_consumption", "rule_fired": "peak_charge_now"},
+               "ev_recommended": {}}
+        ea._execute_deterministic_verdict(ctx, dry_run=False)
+        check("kill-switch off restores reserve=target (old 5 kW behaviour)",
+              sent == [85], f"sent={sent}")
+    finally:
+        ea.set_powerwall_reserve = real_set_reserve
+        ea.set_powerwall_mode    = real_set_mode
+        ea._cycle_context        = real_ctx
+        ea.GENTLE_CHARGE_CONTROL = real_flag
 
 
 # ---------------------------------------------------------------------------
@@ -1201,6 +1318,13 @@ def test_settings_spec_holds_no_target_values():
 
 if __name__ == "__main__":
     for fn in [test_manual_override,
+               test_gentle_charge_reserve_small_gap,
+               test_gentle_charge_reserve_clamps_at_target,
+               test_gentle_charge_reserve_none_soc_falls_back_to_target,
+               test_gentle_charge_reserve_custom_offset,
+               test_execute_selfcons_charge_uses_gentle_reserve,
+               test_execute_autonomous_charge_unaffected,
+               test_execute_gentle_killswitch_reverts_to_target,
                test_ev_case6_negative_fit_solar_dump,
                test_ev_case6_not_fired_when_battery_low,
                test_historical_model_cheap_price_raises_target,

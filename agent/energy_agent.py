@@ -93,6 +93,14 @@ HISTORICAL_PRICE_MODEL = True
 # Flip to False to revert to LLM-authoritative instantly. Phase 5 — see ARCHITECTURE.md.
 DETERMINISTIC_AUTHORITATIVE = True
 
+# GENTLE_CHARGE_CONTROL: when True, self_consumption charges chase reserve = SoC + offset
+# (a ~1.6 kW cycle-average grid top-up) instead of writing a fixed reserve = target, which
+# under firmware 26.18.3 pulls the full 5 kW from any large reserve−SoC gap. Restores the
+# ~1.7 kW self_consumption rate the whole verdict tree already budgets. autonomous charges
+# are unaffected (they stay reserve=100, export-guarded, full 5 kW). Flip to False to revert
+# to reserve = target. See energy_rules.md Rule 31 and _gentle_charge_reserve().
+GENTLE_CHARGE_CONTROL = True
+
 # USE_CORRECTED_SOLAR: when True, compute_decision_context() reasons about the
 # *bias-corrected* Solcast remaining-today figure rather than the raw one.
 # Solcast over-forecasts this flat-roof site badly in winter (~0.14 of actual at
@@ -827,6 +835,14 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         "grid_target_pct":      battery.get("grid_target_pct"),
         "reserve_set":          reserve_set,
         "mode_set":             mode_set,
+        # Rule 31 gentle-charge controller: on a self_consumption charge, reserve_set is the
+        # small chased reserve (SoC+offset) while charge_target_pct is the SoC being charged
+        # toward. charge_rate_intent is "gentle"/"full"; null on hold cycles. Lets build_models
+        # correlate the commanded offset with realized battery_power to calibrate the dial.
+        "charge_target_pct":    _cycle_context.get("rate_control", {}).get("charge_target_pct"),
+        "reserve_cmd_pct":      _cycle_context.get("rate_control", {}).get("reserve_cmd_pct"),
+        "charge_offset_pts":    _cycle_context.get("rate_control", {}).get("charge_offset_pts"),
+        "charge_rate_intent":   _cycle_context.get("rate_control", {}).get("charge_rate_intent"),
         "zappi_set":            zappi_set,
         "price_c":              grid.get("price_cents_kwh"),
         "in_cheap_window":      grid.get("in_cheap_window"),
@@ -1116,6 +1132,15 @@ SLOW_KW          = 1.7
 FAST_KW          = 5.0
 DEMAND_DEADLINE  = 14 + 55 / 60   # 2:55pm as a decimal hour
 
+# Gentle-charge controller (Rule 31). On a self_consumption charge the agent chases
+# reserve = SoC + SELF_CONS_CHARGE_OFFSET_PTS rather than a fixed high reserve, so the
+# reserve−SoC gap stays small and the Powerwall trickles instead of slamming 5 kW under
+# firmware 26.18.3. Measured dial (2026-07-24, at 63–65% SoC): gap 5 → 1.67 kW, gap 10 →
+# 3.96 kW, gap 20+ → 5 kW. Offset 6 → ~2.1 kW instantaneous, ~1.6 kW cycle-average once the
+# gap fills mid-cycle and the taper idles it — matching the 1.67 kW the rule tree budgets.
+# Tunable; the commanded offset is logged so build_models can learn the real curve later.
+SELF_CONS_CHARGE_OFFSET_PTS = 6
+
 # Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
 # Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
 MODEL_PARAMS_FILE = Path(__file__).parent / "model_params.json"
@@ -1155,6 +1180,24 @@ def _avg_charge_rate_kw(soc_from: float, soc_to: float, mode: str) -> float:
             total_time += seg_kwh / rate
         bucket_floor += 10
     return round(total_kwh / total_time, 3) if total_time > 0 else fallback
+
+
+def _gentle_charge_reserve(soc, target_pct: int,
+                           offset: int = SELF_CONS_CHARGE_OFFSET_PTS) -> int:
+    """Reserve to command for a gentle self_consumption charge (Rule 31).
+
+    Returns ``min(SoC + offset, target_pct)``: a small reserve−SoC gap so the Powerwall
+    trickles (~1.6 kW cycle-average) rather than slamming 5 kW, capped at the charge target
+    so it can never overshoot or drive export, tapering to a stop as SoC climbs into the
+    target. It is a *chase*, not set-and-forget — re-set each 30-min cycle as SoC rises.
+
+    ``soc is None`` (Tessie/gateway both unreadable) falls back to the old fixed-reserve
+    behaviour, which is safe: a missing SoC means we can't compute a gap, and reserve =
+    target is exactly what shipped before this controller existed.
+    """
+    if soc is None:
+        return target_pct
+    return min(int(soc) + offset, target_pct)
 
 
 def _accuracy_class(label: str) -> str:
@@ -2278,10 +2321,28 @@ def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str
         target = rec.get("target_pct")
         mode   = rec.get("mode")
         if target is not None:
-            print(f"  [det] set_powerwall_reserve({target}%) — rule: {rec.get('rule_fired')}")
+            # Rule 31 — gentle self_consumption charge. Under firmware 26.18.3 a fixed
+            # reserve = target pulls the full 5 kW from any large reserve−SoC gap, so a
+            # self_consumption charge chases reserve = SoC + offset instead (~1.6 kW). Fast
+            # (autonomous) charges keep reserve = target = full rate. See _gentle_charge_reserve().
+            _soc = (state.get("battery") or {}).get("soc_pct")
+            if GENTLE_CHARGE_CONTROL and mode == "self_consumption":
+                reserve_cmd = _gentle_charge_reserve(_soc, target)
+                intent      = "gentle"
+            else:
+                reserve_cmd = target
+                intent      = "full"
+            _cycle_context["rate_control"] = {
+                "charge_target_pct": target,
+                "reserve_cmd_pct":   reserve_cmd,
+                "charge_offset_pts": (SELF_CONS_CHARGE_OFFSET_PTS if intent == "gentle" else None),
+                "charge_rate_intent": intent,
+            }
+            print(f"  [det] set_powerwall_reserve({reserve_cmd}%) [{intent}, target {target}%, "
+                  f"soc {_soc}%] — rule: {rec.get('rule_fired')}")
             if not dry_run:
-                set_powerwall_reserve(target)
-            executed.append(f"set_reserve({target}%)")
+                set_powerwall_reserve(reserve_cmd)
+            executed.append(f"set_reserve({reserve_cmd}%)")
         if mode is not None:
             current_mode = (state.get("battery") or {}).get("mode")
             if mode != current_mode:

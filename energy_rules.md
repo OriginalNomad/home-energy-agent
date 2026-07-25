@@ -908,6 +908,47 @@ charging is the rule layer's job alone (the overnight top-up automations remain 
 
 ---
 
+### Rule 31 — Gentle self_consumption Charge (reserve = SoC + offset)
+
+**Added 2026-07-25.** Restores a controllable ~1.7 kW grid-charge rate that firmware **26.18.3**
+had effectively removed.
+
+**The problem.** The agent's only actuator is `backup_reserve_percent`. Historically, setting
+reserve above SoC in `self_consumption` gave a gentle ~1.7 kW trickle. Firmware 26.18.3 (pushed
+~2026-07-22) changed this so that a *large* reserve−SoC gap pulls the full **5 kW** even in
+`self_consumption`. Because the agent always wrote a **fixed reserve of 85** when grid-charging, a
+low SoC meant a 40+ point gap = a permanent 5 kW slam — the same rate as `autonomous`. Below 70%
+SoC the two modes became indistinguishable.
+
+**The dial is still there.** A controlled experiment (2026-07-24, at 63–65% SoC) measured the rate
+against the reserve−SoC gap: gap 5 → **1.67 kW**, gap 10 → 3.96 kW, gap 20+ → 5 kW, gap ≤ 0 → idle.
+The firmware widened the fast zone but did not delete the taper.
+
+**The controller.** On a `self_consumption` charge the agent now chases
+`reserve = min(SoC + SELF_CONS_CHARGE_OFFSET_PTS, target)` (`_gentle_charge_reserve()`), default
+offset **6** (~2.1 kW instantaneous, ~1.6 kW cycle-average once the small gap fills mid-cycle and
+the taper idles it — matching the 1.67 kW the whole verdict tree already budgets via
+`_avg_charge_rate_kw`). It is a **chase, not set-and-forget**: the gap tapers to 0 as SoC climbs
+into the reserve, so it is re-set each 30-min cycle. The `min(…, target)` cap means it can never
+overshoot the charge target or drive export, and it tapers to a natural stop at the target.
+
+**Mode is the rate selector — this is not new policy.** `autonomous` charges are unchanged
+(reserve=100, export-guarded, full 5 kW). The verdict tree already emits `self_consumption` when it
+has decided there is time and `autonomous` when it must go hard, so making `self_consumption`
+actually deliver ~1.6 kW again simply restores the assumption the rules were written against.
+
+**Kill-switch:** `GENTLE_CHARGE_CONTROL = False` reverts to `reserve = target`. **Safe fallback:**
+if SoC is unreadable (Tessie + gateway both down) the controller returns `target`, i.e. the old
+behaviour. **Logged** each cycle to `decisions.jsonl`: `charge_target_pct`, `reserve_cmd_pct`,
+`charge_offset_pts`, `charge_rate_intent` — so `build_models.py` can later calibrate the
+offset→rate curve from `energy_log.db` `battery_power`.
+
+**Does NOT govern the HA safety automations.** `battery_low_soc_emergency_charge` sets reserve
+directly and still produces a 5 kW charge when it fires (see Rule 30) — reconciling that is
+separate work.
+
+---
+
 ## Decision Priority Order
 When multiple rules conflict, apply in this order:
 

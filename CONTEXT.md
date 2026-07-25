@@ -31,6 +31,27 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 
 ---
 
+## Network topology (matters for any non-energy integration)
+
+The Pi is **dual-homed** on two separate networks:
+
+| Interface | IP | Network | Role |
+|-----------|-----|---------|------|
+| `eth0` (wired) | 192.168.0.67/24 | 192.168.0.x | **Default route.** Energy segment — Powerwall gateway etc. |
+| `wlan0` (WiFi) | 192.168.68.80/22 | 192.168.68.x | Home LAN — Sonos speakers, Meross plugs, general devices |
+
+HA runs in the `homeassistant` Docker container in **`host`** network mode. Because the
+**default route is eth0**, any integration relying on multicast/SSDP/mDNS discovery (Sonos,
+Meross, etc.) broadcasts out eth0 and never finds devices on the 192.168.68.x WiFi side — and
+advertises the unreachable eth0 IP for callbacks. **Fix pattern: seed device IPs manually and
+force the callback/advertise address to `192.168.68.80`.** Sonos does this via the `sonos:`
+block in `configuration.yaml` (`hosts:` + `advertise_addr`). Speakers/plugs on 68.x should have
+**reserved DHCP leases** or the hardcoded IPs go stale (Hallway already drifted once — see
+energy_log 2026-07-24). None of this touches the battery agent, which talks to HA at
+`localhost:8123`.
+
+---
+
 ## How the system works
 
 **Control mechanism**: `backup_reserve_percent` via Tessie REST API (the only writable Powerwall parameter available without Tesla Fleet API access).
@@ -40,7 +61,7 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 
 **Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode. **Rebuilt 2026-07-22 from instantaneous `battery_power`** (~30 s resolution, 10 days, n=53–432/bucket) rather than 30-min SoC deltas: `self_consumption` is a tight **1.67 kW** at every bucket 0–70% (80/90% keep conservative legacy values 0.96/0.71). `autonomous` is **5.0 kW to 70%, 2.92 at 80%, 1.84 at 90%** — previously n=2–5 so the agent assumed a flat 5.0 kW and was optimistic exactly where the 2:55pm deadline is decided. `_avg_charge_rate_kw()` reads these from `agent/model_params.json`. Full rate control requires Tesla Fleet API or MPC.
 
-**Open anomaly — 5 kW `self_consumption` grid charging (2026-07-22)**: raising `backup_reserve_percent` above SoC made the Powerwall import at a sustained **5 kW** while `default_real_mode` stayed `self_consumption`. Three events, including one triggered manually with the agent uninvolved — so it is Powerwall behaviour, not ours. Eliminated: mode switch, HA automations, Storm Watch, Amber SmartShift, reserve−SoC gap (median 1.67 kW in *every* gap bucket), SoC level, measurement artefacts. **Unexplained**: 10 days of 30-second data give a median of 1.67 kW for the same operation, with a clean date boundary at 07-22. Leading hypothesis is an overnight firmware push (`26.18.3`) — unverifiable, recorded as hypothesis. Watch whether it persists. Two earlier claims of mine about this model (a "long right tail", then "self_consumption is really 5 kW") were both **retracted** — see energy_log.
+**Open anomaly — 5 kW `self_consumption` grid charging (2026-07-22)**: raising `backup_reserve_percent` above SoC made the Powerwall import at a sustained **5 kW** while `default_real_mode` stayed `self_consumption`. Three events, including one triggered manually with the agent uninvolved — so it is Powerwall behaviour, not ours. Eliminated: mode switch, HA automations, Storm Watch, Amber SmartShift, reserve−SoC gap (median 1.67 kW in *every* gap bucket), SoC level, measurement artefacts. **Unexplained**: 10 days of 30-second data give a median of 1.67 kW for the same operation, with a clean date boundary at 07-22. Leading hypothesis is an overnight firmware push (`26.18.3`) — unverifiable, recorded as hypothesis. Watch whether it persists. Two earlier claims of mine about this model (a "long right tail", then "self_consumption is really 5 kW") were both **retracted** — see energy_log. **RESOLVED 2026-07-25**: firmware 26.18.3 was *confirmed* on the gateway (`site_info version`) and the 2026-07-24 experiment recovered the rate dial (gap 5→1.67 kW, 10→3.96, 20+→5). Rule 31 now chases `reserve = SoC + 6` to hold ~1.7 kW on self_consumption charges; the 5 kW slam only happens on autonomous (intended) or when the HA emergency automation fires (separate).
 
 **Dynamic grid charge target**: `sensor.battery_grid_charge_target`
 - Formula: `clamp(95 − (net_solar_kWh / 13.5 × 100), 5, 95)`
@@ -220,6 +241,24 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capabilities added 2026-07-25 (session 20):
+- **Rule 31 — gentle self_consumption charge controller** (`_gentle_charge_reserve()`,
+  kill-switch `GENTLE_CHARGE_CONTROL`, tunable `SELF_CONS_CHARGE_OFFSET_PTS=6`). Firmware 26.18.3
+  made a fixed reserve=85 pull 5 kW from any large reserve−SoC gap; the agent now chases
+  `reserve = min(SoC + offset, target)` on self_consumption charges → ~1.6 kW cycle-average,
+  restoring the rate the whole verdict tree already budgets. **autonomous unchanged** (reserve=100,
+  full 5 kW, export-guarded). It's a *chase* re-set each cycle; the `min(…,target)` cap can't
+  overshoot or export; SoC-unreadable falls back to the old fixed-reserve behaviour. New JSONL
+  fields `charge_target_pct`/`reserve_cmd_pct`/`charge_offset_pts`/`charge_rate_intent` let
+  build_models later calibrate the offset→rate dial. All in `energy_agent.py`
+  (`_execute_deterministic_verdict`); verdict tree untouched. **Control-path change.**
+  **Does NOT govern the HA emergency automation** (still slams 5 kW when it fires — that's the
+  separate survival-floor reconciliation). 7 new tests. **203 decision + 16 optimizer + 11 build_models.**
+  **Watch:** confirm model_params self_consumption stays ~1.67 (the `min(10-day,2-day)` window holds
+  it there through ~07-27; after that the restored gentle physics keeps measured power low). If it
+  ever reads high while the controller is active, add a fill-time clamp so the deadline budget can't
+  under-count charging time.
+
 Key agent capabilities added 2026-07-24 (session 19):
 - **Solar accuracy now measured against the bias-corrected forecast** (`_solar_accuracy()` +
   new `_hour_solar_ratio()`). Raw Solcast over-forecasts this flat roof ~7× at 08:00 in winter, so
@@ -384,7 +423,7 @@ Counts below were read from the live HA, not from the file. To re-verify:
 
 ## Charge mode policy (as of 2026-05-29)
 
-- **`self_consumption`**: normal operation, ~1.7 kW grid charge rate. Used for long cheap windows (3h+) or when price spread doesn't justify urgency.
+- **`self_consumption`**: normal operation, ~1.7 kW grid charge rate. Used for long cheap windows (3h+) or when price spread doesn't justify urgency. **Since 2026-07-25 (Rule 31)** the ~1.7 kW rate is *actively maintained* by chasing `reserve = SoC + 6` each cycle rather than writing a fixed high reserve — without this, firmware 26.18.3 makes any self_consumption charge slam 5 kW. Kill-switch: `GENTLE_CHARGE_CONTROL`.
 - **`autonomous` + `reserve=100%`**: fast ~5 kW grid charge. `reserve=100%` is the export guard. HA safety net (`battery_autonomous_export_safety_net`) reverts to self_consumption within 30s if export is detected. Previously banned but re-enabled after safety net was patched (2026-05-25).
 
 **Autonomous mode is only justified when the price spread warrants it:**

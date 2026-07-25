@@ -11,20 +11,24 @@
   yesterday's four live changes (solar accuracy, Rule 30 survival floor, rebuilt model, priority-1
   path) behaved through the 2026-07-24 demand window before layering more on.
 
-- [ ] ⭐ **NEW CAPABILITY — reserve-offset charge-rate controller** (found 2026-07-24 by live
-  experiment; see energy_log "Charge-rate control RECOVERED"). Firmware 26.18.3 didn't remove the
-  slow charge — it's still there in the taper as SoC approaches reserve. Measured dial (self_consumption):
-  `reserve = SoC+5` → ~1.7 kW · `+10` → ~4 kW · `+20`→ 5 kW · `≤SoC` → idle. We only lost it because
-  we always set reserve=85 (a 40-point gap = permanent 5 kW). **Proposal:** give the agent a target
-  *rate* and translate it to `reserve = SoC + offset`, re-chased each cycle (it tapers to 0 as SoC
-  reaches the reserve, so it's a chase not set-and-forget; 30-min cadence ~matches a 5-point chase;
-  miss-a-cycle failure mode is safe). This directly fixes the summer concern (gentle grid top-ups
-  that blend with solar instead of 5 kW slams) AND the over-import half of the 08:00 problem.
-  **Before building:** characterise the taper at 2–3 more SoC levels (only tested at 63–65% so far) —
-  the curve may shift with SoC/temperature. Then decide how the rule layer picks a target rate
-  (e.g. gentle when time-rich + solar coming; fast near deadline). Interacts with the charge-rate
-  *model* (priority 1): if we control the rate, the model's job shifts from "predict the rate" to
-  "predict how long a chosen rate takes."
+- [x] ⭐ **NEW CAPABILITY — reserve-offset charge-rate controller** — **v1 built 2026-07-25 (session 20).**
+  Rule 31 / `_gentle_charge_reserve()` in `energy_agent.py`. On a self_consumption charge the agent
+  now chases `reserve = min(SoC + SELF_CONS_CHARGE_OFFSET_PTS, target)` (offset 6 → ~1.6 kW
+  cycle-average) instead of a fixed reserve=85 that slammed 5 kW under firmware 26.18.3. autonomous
+  unchanged. Kill-switch `GENTLE_CHARGE_CONTROL`; SoC-unreadable falls back to old behaviour; JSONL
+  logs `charge_target_pct`/`reserve_cmd_pct`/`charge_offset_pts`/`charge_rate_intent`. 7 tests (203
+  decision total). **Design decision (with user):** mode-as-selector (restore intent), build-now +
+  log-to-calibrate-later — the `min(…,target)` clamp is structurally safe at any SoC, so we did not
+  gate on characterising the taper at more SoC levels first.
+  **Remaining follow-ups (not v1):** (a) characterise the taper at 2–3 more SoC levels and have
+  `build_models.py` learn the offset→rate curve from the newly-logged commanded offsets vs
+  `battery_power`; (b) intermediate rates (offset +10 ≈ 4 kW "medium") if the rule layer ever wants
+  a mid-tier; (c) tune `SELF_CONS_CHARGE_OFFSET_PTS` if the realized cycle-average drifts from the
+  1.67 kW the rules budget. **Watch:** model_params self_consumption must stay ~1.67 while the
+  controller is active (see energy_log 2026-07-25) — if build_models ever reports it high, add a
+  fill-time clamp so the deadline budget can't under-count charging time. **Not fixed by this:** the
+  HA emergency automation still slams 5 kW when it fires → survival-floor reconciliation (#2).
+  ⏳ **Not deployed to the Pi yet** — needs `git push` (agent code auto-pulls on the 30-min cron).
 
 - [ ] 🔁 **REVIEW EACH MORNING UNTIL RESOLVED — HA threshold sliders drifting overnight**
   *(added 2026-07-23. `/morning` should check this every day and log the readings below until
@@ -74,6 +78,7 @@
   | 2026-07-23 | (reported "min price") | 70¢ | 40¢ | exceeds `ev_min_charge_price_c` max of 60 — entity unconfirmed |
   | 2026-07-24 | all six EV helpers | stable | — | **EV sliders held overnight** (`ev_min_soc_pct`=30, rest steady) — this was flagged as "the real test" and it passed |
   | 2026-07-24 | `battery_max_insurance_floor_pct` | 0 | 30 | drifted back to 0 (set 30% on 07-23); 6 out-of-band violations, clamped to band floor 20. Operationally inert (dormant until April) but confirms drift isn't gone — it moved to a *different*, non-EV helper. Note: no `initial:`, so 0 = HA's default-to-min for an untouched helper → suggests the helper isn't persisting rather than being actively written |
+  | 2026-07-25 | all seven helpers | stable, in band | — | **Clean night.** `max_insurance_floor_pct`=30 (held, was 0 yesterday), `ev_min_soc_pct`=30, `ev_ultra_cheap_c`=10, `ev_standard_price_c`=15, `ev_min_charge_price_c`=40, `ev_charge_target_pct`=100, `ev_departure_target_pct`=95. Zero violations across all 20 overnight cycles. Nothing reset. |
 
 - [x] **Confirm the `SETTINGS_SPEC` values and bands** — resolved 2026-07-23.
   The spec no longer holds *any* target values: it is `(alias, lo, hi)` bands only, because the HA
