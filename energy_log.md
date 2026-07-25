@@ -2266,3 +2266,27 @@ while preserving its home-load-deduction point. **221 decision + 16 optimizer + 
 **Scope, honestly:** the HA automations (`battery_low_soc_emergency_charge`, negative-price) still
 read the 5-min sensor directly, but their thresholds are coarse (20¢, 0¢) where noise matters far
 less. Not yet deployed — same `git push` as Rules 30/31.
+
+### Session 20 close-out — all three deployed
+
+The "Not yet deployed" notes above are superseded: all three fixes are committed and pushed to
+`main` (the Pi's 30-min agent cron pulls them; agent code, not HA config, so no
+`deploy_ha_config.sh`).
+
+- `624aa69` Rule 31 — gentle charge controller. **Live-confirmed same day** (2.2 kW / reserve 48%).
+- `b18279d` Rule 30 revised — 12% overnight floor defense. Effective on the next low-SoC night.
+- `28e1e47` Rule 32 — 30-min-slot price anchor. Effective next cycle.
+
+**Test totals at close:** 221 decision + 16 optimizer + 11 build_models, all green. All three carry
+kill-switches (`GENTLE_CHARGE_CONTROL`, `SURVIVAL_FLOOR_DEFENSE`, `PRICE_USE_30MIN_SLOT`).
+
+**Through-line:** this morning's "why is it charging at 5 kW?" had two causes — the agent's fixed
+reserve=85 (Rule 31) and the emergency automation's slam-then-fight (Rule 30 rev) — both fixed; Rule
+32 removes the noisy 5-minute price that was flipping the charge/hold decision underneath it all.
+
+**Watch next session:** (1) SoC should sit ~12–15% overnight and `battery_low_soc_emergency_charge`
+should not fire at 07:00 (Rule 30 confirmation); (2) `price_used_c` vs `price_spot_c` in
+`decisions.jsonl` for any residual boundary flips (would justify Rule 32 hysteresis); (3)
+`model_params.json` self_consumption should stay ~1.67 (Rule 31 keeps measured power low).
+**No HA config or automation changes this session** — `config/` untouched beyond the already-deployed
+session-19 Sonos block; automation count remains 27 (15 active / 12 disabled).
