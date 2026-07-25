@@ -2230,3 +2230,39 @@ above 12%). **216 decision + 16 optimizer + 11 build_models, all green.**
 **Watch after deploy:** on the next genuinely low-SoC night, SoC should sit ~12–15% overnight (not
 ride to 5%), and `battery_low_soc_emergency_charge` should not fire. The 07:00-type churn should be
 gone. Not yet deployed — same `git push` as Rule 31.
+
+### Built: Rule 32 — decide on the 30-min slot, not the 5-min spot (todo #3, the HIGH item)
+
+**Why.** `sensor.1a_wigram_road_glebe_general_price` is `duration:5`. The agent samples it once per
+30-min cycle and treated that single 5-minute settlement price as the interval price. Confirmed the
+anchor: `price = grid.price_cents_kwh` at `compute_decision_context` line ~1573 is the *single*
+value the whole function derives from — spread, forward_min, hours_to_cheap_end, deferral/sliding,
+the cost-target model, and all three EV thresholds (`price <= ultra_cheap_c` / `<= standard_price_c`
+/ `< min_charge_price_c`). So one bad sample skews everything. The 2026-07-23 12:00 case: sampled 9¢
+→ `ev_ultra_cheap` → Fast, twelve seconds before it was 11¢ → Eco.
+
+**Verified `forecast[0]` is the right source.** `get_price_forecast()` buckets the Amber `forecasts`
+attribute into 30-min slots and averages the 5-min sub-intervals. The 2026-07-25 00:00 cycle logged
+`price_c: 11.0` (spot) with `price_forecast[0]: 13.2` at time "00:00" — i.e. forecast[0] is the
+*current* interval, averaged, and it genuinely differs from the spot. Exactly the stable anchor we want.
+
+**Design (user's choice):** 30-min slot only, measure first — no hysteresis yet. The averaging alone
+removes the reported flip; `price_used_c`/`price_spot_c` are now logged so we can see if any
+boundary oscillation remains before adding a deadband.
+
+**Change — `agent/energy_agent.py`, one anchor:**
+- `price_spot = grid.price_cents_kwh` (raw 5-min, kept for logging); `price = price_forecast[0]
+  ["cents_kwh"]` when `PRICE_USE_30MIN_SLOT` and the forecast is non-empty, else `price_spot`.
+- Everything downstream inherits it — no other call sites changed.
+- Return dict + `computed_context` log gain `price_used_c` and `price_spot_c`.
+- Kill-switch `PRICE_USE_30MIN_SLOT`.
+
+**Tests:** 3 new (reproduces the 9¢-spot/11¢-slot EV flip → now stays Eco; empty-forecast fallback
+to spot; kill-switch reverts to spot). **One pre-existing test** (`test_peak_sunny_low_soc_home_
+load_deducted`) *relied on* a spot/forecast mismatch (spot 16 vs `flat(13)`) — exactly the artifact
+the fix removes — so its forecast was made internally consistent (current slot 16, cheaper 13 ahead)
+while preserving its home-load-deduction point. **221 decision + 16 optimizer + 11 build_models, all green.**
+
+**Scope, honestly:** the HA automations (`battery_low_soc_emergency_charge`, negative-price) still
+read the 5-min sensor directly, but their thresholds are coarse (20¢, 0¢) where noise matters far
+less. Not yet deployed — same `git push` as Rules 30/31.

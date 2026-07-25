@@ -131,10 +131,13 @@ def test_peak_sunny_low_soc_home_load_deducted():
     # At 7am with 7.9h to deadline, no urgency yet → peak_on_track (hold) is correct.
     state = mk_state(25, 7, "good", 2.0, 10.0)
     state["home_load_kw"] = 1.2
-    ctx = ea.compute_decision_context(state, flat(13), [], now_at(7))
+    # Current 30-min slot 16¢ (matches mk_state's spot), a genuinely cheaper 13¢ window ahead.
+    # (Under Rule 32 the anchor is forecast[0], so the current slot and the spot must agree —
+    # the old flat(13)-with-spot-16 relied on exactly the mismatch the fix removes.)
+    ctx = ea.compute_decision_context(state, fc([16.0] * 2 + [13.0] * 20), [], now_at(7))
     r = ctx["recommended"]
     check("peak low SoC net solar correctly deducted (no solar_will_cover)", r["rule_fired"] != "peak_solar_will_cover", r)
-    # flat(13) forecast at price=16 → 13¢ window is ahead → correctly waits for it
+    # 13¢ window is ahead of the 16¢ current slot → correctly waits for it
     check("peak 7am cheaper window ahead → wait_for_cheap_go_hard", r["rule_fired"] == "wait_for_cheap_go_hard", r)
     check("wait_for_cheap_go_hard is hold (wait for the cheap slot)", r["action"] == "hold", r)
 
@@ -1073,6 +1076,49 @@ def test_survival_floor_not_triggered_above_floor():
 
 
 # ---------------------------------------------------------------------------
+# Rule 32 — decide on the 30-min slot, not the 5-min spot (added 2026-07-25)
+#
+# The general_price sensor is duration:5, so a single per-cycle sample is a coin-flip.
+# On 2026-07-23 12:00 it sampled 9¢ (→ EV Fast) while the 30-min value was 11¢ (→ Eco).
+# The anchor now derives from price_forecast[0] (the current interval, averaged).
+# ---------------------------------------------------------------------------
+
+def test_price_anchor_uses_30min_slot_not_spot():
+    # Reproduces the 2026-07-23 12:00 flip: 5-min spot 9¢ (would be ev_ultra_cheap → Fast),
+    # but the current 30-min slot is 11¢ → ev_standard_price → Eco. The fix must decide on 11.
+    state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=9,
+                               forward_prices=[11, 11, 13, 13, 14, 14],
+                               ultra_cheap_c=10, standard_price_c=15)
+    ctx = ea.compute_decision_context(state, fcast, [], now_at(12))
+    check("price anchored on the 30-min slot (11c), not the 5-min spot (9c)",
+          ctx["price_used_c"] == 11 and ctx["price_spot_c"] == 9, ctx.get("price_used_c"))
+    check("  ...so the EV stays Eco, not Fast on a 9c blip",
+          ctx["ev_recommended"]["rule_fired"] == "ev_standard_price", ctx["ev_recommended"])
+
+
+def test_price_anchor_falls_back_to_spot_when_forecast_empty():
+    # No forecast → nothing to average → use the spot sample (9c → ev_ultra_cheap → Fast).
+    state, _ = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=9, ultra_cheap_c=10)
+    ctx = ea.compute_decision_context(state, [], [], now_at(12))
+    check("empty forecast falls back to the 5-min spot", ctx["price_used_c"] == 9, ctx.get("price_used_c"))
+    check("  ...and the EV verdict reflects the spot", ctx["ev_recommended"]["rule_fired"] == "ev_ultra_cheap",
+          ctx["ev_recommended"])
+
+
+def test_price_anchor_killswitch_reverts_to_spot():
+    real = ea.PRICE_USE_30MIN_SLOT
+    try:
+        ea.PRICE_USE_30MIN_SLOT = False
+        state, fcast = mk_ev_state(50, 20, 70, batt_soc=80, reserve=20, price=9,
+                                   forward_prices=[11, 11, 13, 13, 14, 14], ultra_cheap_c=10)
+        ctx = ea.compute_decision_context(state, fcast, [], now_at(12))
+        check("kill-switch off → decides on the 5-min spot again", ctx["price_used_c"] == 9,
+              ctx.get("price_used_c"))
+    finally:
+        ea.PRICE_USE_30MIN_SLOT = real
+
+
+# ---------------------------------------------------------------------------
 # Rule 29 — bias-corrected solar in the control path (added 2026-07-23)
 #
 # Raw Solcast runs ~2x optimistic at this flat-roof site in winter. Until now the
@@ -1395,6 +1441,9 @@ if __name__ == "__main__":
                test_survival_floor_not_active_in_demand_window,
                test_survival_floor_killswitch_reverts_to_ride_low,
                test_survival_floor_not_triggered_above_floor,
+               test_price_anchor_uses_30min_slot_not_spot,
+               test_price_anchor_falls_back_to_spot_when_forecast_empty,
+               test_price_anchor_killswitch_reverts_to_spot,
                test_ev_case6_negative_fit_solar_dump,
                test_ev_case6_not_fired_when_battery_low,
                test_historical_model_cheap_price_raises_target,

@@ -4,13 +4,20 @@
 
 ### Immediate
 
-- [ ] ▶️ **START HERE NEXT SESSION: #3 — the 5-minute price problem (HIGH).**
-  Full write-up is below under "HIGH — the agent decides on a 5-minute spot price". Needs a design
-  decision first (which price source: the 30-min forecast slot `forecast[0]` the agent already
-  fetches is the likely fix; whether to add threshold hysteresis), then implement.
-  *(2026-07-25 session 20 cleared the two items that were ahead of this: ⭐ the reserve-offset
-  charge-rate controller (Rule 31 — built, deployed, live-confirmed at 2.2 kW) and the survival-floor
-  reconciliation (Rule 30 revised — built, pending push). #3 is now the top open item.)*
+- [x] **#3 — the 5-minute price problem — DONE 2026-07-25 (Rule 32).** `compute_decision_context()`
+  now anchors `price` on `price_forecast[0]` (the current 30-min slot, averaged) instead of the raw
+  5-min `duration:5` sample, fixing every threshold at once (spread, forward_min, deferral/sliding,
+  cost-target, all three EV thresholds) since `price` is the single anchor. Verified forecast[0] is
+  the current interval (00:00 cycle: spot 11¢ vs slot 13.2¢). Falls back to spot when forecast empty;
+  kill-switch `PRICE_USE_30MIN_SLOT`; logs `price_used_c`+`price_spot_c`. **Design choice:** slot only,
+  hysteresis deferred (measure `price_used_c` for residual boundary flips first). 3 tests + 1
+  pre-existing mismatch-reliant test fixed; 221 decision total. **Not yet deployed** — pending `git
+  push`. HA automations still read the 5-min sensor (coarse 20¢/0¢ thresholds — separate, low value).
+
+  ▶️ **START HERE NEXT SESSION:** with #1/#2/#3 done, the top open items are the ⭐ follow-ups
+  (build_models learning the offset→rate curve from the newly-logged `charge_offset_pts`) and the
+  architecture roadmap (LP-to-control-path divergence collection, analyst agent, savings dashboard).
+  Also: review how Rules 30/31/32 behaved through a full day + the next low-SoC night before layering more on.
 
 - [x] ⭐ **NEW CAPABILITY — reserve-offset charge-rate controller** — **v1 built 2026-07-25 (session 20).**
   Rule 31 / `_gentle_charge_reserve()` in `energy_agent.py`. On a self_consumption charge the agent

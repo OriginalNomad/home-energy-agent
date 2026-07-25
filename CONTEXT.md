@@ -270,9 +270,19 @@ Key agent capabilities added 2026-07-25 (session 20):
   Composes with Rules 22/25 (they ride down to 12, the floor catches there). Post-processing
   override in `compute_decision_context` — only touches holds, never a deadline autonomous charge,
   never in the demand window. Cost ~12¢/night of arbitrage; kill-switch reverts to ride-to-5%.
-  5 tests. **Combined session-20 total: 216 decision + 16 optimizer + 11 build_models.**
-  **Watch:** confirm the oscillation is gone on the next low-SoC morning (SoC should sit ~12–15
-  overnight, not 5, and the emergency automation should not fire).
+  5 tests. **Watch:** confirm the oscillation is gone on the next low-SoC morning (SoC should sit
+  ~12–15 overnight, not 5, and the emergency automation should not fire).
+- **Rule 32 — decide on the 30-min slot, not the 5-min spot** (`PRICE_USE_30MIN_SLOT`).
+  `sensor.…_general_price` is `duration:5`; the agent sampled it once per 30-min cycle and treated
+  that coin-flip as the interval price (on 2026-07-23 12:00 it sampled 9¢ → EV Fast when the 30-min
+  value was 11¢ → Eco). `compute_decision_context()` now anchors `price` on `price_forecast[0]` (the
+  current interval, bucketed+averaged by `get_price_forecast()`), which fixes **every** threshold at
+  once (spread, forward_min, hours_to_cheap_end, deferral/sliding, cost-target, all three EV
+  thresholds) since `price` is the single anchor. Falls back to the spot when the forecast is empty
+  or the flag is off. Logs `price_used_c` + `price_spot_c` to `decisions.jsonl` `computed_context`.
+  HA automations still read the 5-min sensor (coarse 20¢/0¢ thresholds — separate). Hysteresis
+  deferred. 3 new tests; one pre-existing test had a spot/forecast mismatch it *relied on*, made
+  consistent. **Combined session-20 total: 221 decision + 16 optimizer + 11 build_models.**
 
 Key agent capabilities added 2026-07-24 (session 19):
 - **Solar accuracy now measured against the bias-corrected forecast** (`_solar_accuracy()` +

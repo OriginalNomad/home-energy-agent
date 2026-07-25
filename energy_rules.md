@@ -976,6 +976,36 @@ separate work.
 
 ---
 
+### Rule 32 — Decide on the 30-Minute Slot, Not the 5-Minute Spot
+
+**Added 2026-07-25.** `sensor.1a_wigram_road_glebe_general_price` carries **`duration: 5`** — it is
+a 5-minute settlement price. The agent runs every 30 minutes and used to sample this sensor once
+and treat that single reading as *the* price for the whole interval. Real 5-minute prices swing
+hard, so **every threshold in the system was being decided on a sampled coin-flip**: on 2026-07-23
+the sensor crossed the 10¢ EV threshold six times in twenty minutes, and the 12:00 cycle sampled 9¢
+(→ `ev_ultra_cheap` → Fast) twelve seconds before it was 11¢ (→ Eco, which is what the dashboard
+showed). The agent was correct given what it sampled; the *input* was the problem.
+
+**Fix (`PRICE_USE_30MIN_SLOT`).** `compute_decision_context()` now anchors on
+`price_forecast[0]` — the current 30-minute interval, bucketed and averaged over its 5-minute
+sub-intervals by `get_price_forecast()` — instead of the raw sensor sample. Because `price` is the
+single anchor the whole function derives from, this fixes **every** threshold at once: the spread,
+`forward_min`, `hours_to_cheap_end`, the deferral/sliding detectors, the cost-target model, and all
+three EV thresholds (`ev_ultra_cheap_c`, `ev_standard_price_c`, `ev_min_charge_price_c`). The anchor
+and the forward-looking horizon are now on one consistent 30-minute granularity.
+
+**Falls back** to the 5-minute spot when the forecast is empty (agent flying blind) or the flag is
+off. **Logged** each cycle to `decisions.jsonl` `computed_context`: `price_used_c` (the 30-min slot
+the decision was made on) and `price_spot_c` (the raw 5-min sample) — so when they diverge it is
+visible, the same "displayed ≠ acted-on" audit the slider drift needed. **Not changed:** the HA
+automations (`battery_low_soc_emergency_charge`, negative-price) still read the 5-min sensor
+directly, but their thresholds are coarse (20¢, 0¢) where 5-minute noise matters far less; moving
+those is separate. Hysteresis (a deadband so the EV mode can't flip when the 30-min price hovers on
+a threshold across cycles) was deliberately deferred — the averaging alone removes the reported
+flip; add hysteresis only if `price_used_c` shows residual boundary oscillation.
+
+---
+
 ## Decision Priority Order
 When multiple rules conflict, apply in this order:
 

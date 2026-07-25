@@ -909,7 +909,7 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         record["computed_context"]  = {k: ctx[k] for k in (
             "zero_solar_day", "deferral_detected", "sliding_forecast", "solar_unreliable",
             "cost_target_pct", "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85",
-            "spread_c", "forward_min_c", "go_hard_slot")}
+            "spread_c", "forward_min_c", "price_used_c", "price_spot_c", "go_hard_slot")}
         soc_now      = record.get("soc")
         actual_charge = ((reserve_set is not None and soc_now is not None and reserve_set > soc_now)
                          or mode_set == "autonomous")
@@ -1154,6 +1154,16 @@ SELF_CONS_CHARGE_OFFSET_PTS = 6
 SURVIVAL_FLOOR_DEFENSE       = True
 OVERNIGHT_SURVIVAL_FLOOR_PCT = 12   # gently charge below this instantaneous SoC
 SURVIVAL_FLOOR_TARGET_PCT    = 20   # the gentle top-up aims here (buffer above the 10% backstop)
+
+# PRICE_USE_30MIN_SLOT (Rule 32, 2026-07-25): anchor every price threshold on the current
+# 30-min slot (price_forecast[0]) rather than the raw 5-min settlement sample. The
+# `..._general_price` sensor carries duration:5, so a single per-cycle sample is a coin-flip —
+# on 2026-07-23 it crossed the 10¢ EV threshold six times in twenty minutes, and the 12:00
+# cycle sampled 9¢ (→ EV Fast) while the 30-min value was 11¢ (→ Eco). forecast[0] is that same
+# interval bucketed and averaged over its 5-min sub-intervals, so the anchor now matches the
+# 30-min granularity the forward spread/forward_min already use. Flip to False to revert to the
+# spot sample.
+PRICE_USE_30MIN_SLOT = True
 
 # Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
 # Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
@@ -1570,7 +1580,13 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     # ALWAYS the Tessie reading — never the floor-clipped gateway value.
     soc          = battery.get("soc_pct", 0) or 0
     grid_target  = battery.get("grid_target_pct", 5) or 5
-    price        = grid.get("price_cents_kwh", 0.0) or 0.0
+    price_spot   = grid.get("price_cents_kwh", 0.0) or 0.0   # raw 5-min settlement sample
+    # Rule 32 — decide on the current 30-min slot, not the 5-min spot. price_forecast[0] is the
+    # current interval averaged over its sub-intervals (see get_price_forecast); far more stable
+    # and the same source the forward-looking spread/forward_min already use. Falls back to the
+    # spot sample if the forecast is empty (agent flying blind) or the flag is off.
+    _slot0 = price_forecast[0].get("cents_kwh") if price_forecast else None
+    price        = (_slot0 if (PRICE_USE_30MIN_SLOT and _slot0 is not None) else price_spot)
     fit_price    = grid.get("fit_price_cents_kwh", 0.0) or 0.0
     is_peak      = state.get("is_peak_month", False)
     in_demand    = state.get("in_demand_window", False)
@@ -1899,6 +1915,11 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "fill_fast_h":         round(fill_fast, 2),
         "spread_c":            round(spread, 1),
         "forward_min_c":       round(forward_min, 1),
+        # Rule 32 audit: price_used_c is the 30-min-slot price every threshold was decided on;
+        # price_spot_c is the raw 5-min sample. When they differ, the sensor read and the decision
+        # diverge (same class of "displayed ≠ acted-on" as the slider drift).
+        "price_used_c":        round(price, 1),
+        "price_spot_c":        round(price_spot, 1),
         "fit_price_c":         round(fit_price, 1),
         "go_hard_slot":        (lambda b: {"price_c": round(b[0], 1), "hours_until": round(b[1], 1)}
                                 if b else None)(
