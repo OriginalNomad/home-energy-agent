@@ -155,12 +155,14 @@ def test_peak_solar_cover_survival_charges_when_battery_wont_reach_sponge():
 
 
 def test_peak_survival_waits_when_sponge_close_and_cheaper():
-    # SoC=12%, 7:30am, Solcast says solar covers gap (kwh_needed_85=0), battery drains to
+    # SoC=13%, 7:30am, Solcast says solar covers gap (kwh_needed_85=0), battery drains to
     # floor before Solar Sponge (2.5h away). But Solar Sponge is close (≤3h) and 9¢ cheaper
     # (20¢ now vs 11¢ at 10am) — waiting and fast-charging at Solar Sponge saves ~68¢.
-    # Should hold (peak_survival_wait_for_sponge) not charge now.
+    # Should hold (peak_survival_wait_for_sponge) not charge now. SoC 13 is one point above the
+    # 12% survival floor, so this still exercises the wait logic (the floor catches at 12 — the
+    # two compose: ride down to 12, then defend). Sub-floor override tested separately below.
     prices = [20.0] * 5 + [11.0] * 12 + [18.0] * 7     # 20¢ until ~10am, then 11¢
-    state = mk_state(12, 7, "good", 0.1, 20.0, price=20.0)  # kwh_needed_85=0 via Solcast
+    state = mk_state(13, 7, "good", 0.1, 20.0, price=20.0)  # kwh_needed_85=0 via Solcast
     state["home_load_kw"] = 0.5
     ctx = ea.compute_decision_context(state, fc(prices), [], now_at(7, 30))
     r = ctx["recommended"]
@@ -183,12 +185,13 @@ def test_peak_solar_cover_no_survival_holds_when_soc_ok():
 
 
 def test_wait_for_cheap_go_hard_holds_when_sponge_close_and_cheaper():
-    # SoC=8%, 7am, kwh_needed_85>0, cheaper slot at 10am (11¢, 3h away, 19¢ gap).
-    # Battery will drain to floor before 10am, but waiting is cheaper:
-    # drain cost (~0.3 kWh grid) < saving (9.86 kWh × 19¢ gap = 187¢).
-    # Agent should hold and wait for the cheap slot.
+    # SoC=20%, 7am, kwh_needed_85>0, cheaper slot at 10am (11¢, 3h away, 19¢ gap).
+    # A far cheaper feasible go-hard slot exists, so the agent holds and waits for it rather
+    # than charging now at 30¢. SoC 20 is above the 12% survival floor, so this isolates the
+    # wait-for-cheap-slot logic; the sub-floor override (which would defend the floor instead
+    # of riding lower) is tested in the Rule 30 block below.
     prices = [30.0] * 6 + [11.0] * 12 + [20.0] * 6     # 30¢ for 3h, then 11¢
-    state = mk_state(8, 7, "poor", 0.1, 8.0, price=30.0)
+    state = mk_state(20, 7, "poor", 0.1, 8.0, price=30.0)
     state["home_load_kw"] = 0.5
     ctx = ea.compute_decision_context(state, fc(prices), [], now_at(7))
     r = ctx["recommended"]
@@ -1008,6 +1011,68 @@ def test_execute_gentle_killswitch_reverts_to_target():
 
 
 # ---------------------------------------------------------------------------
+# Rule 30 (revised) — overnight survival-floor defense (added 2026-07-25)
+#
+# The rule layer defends a ~12% instantaneous floor: instead of holding while SoC
+# drains toward 5%, it gently self_consumption-charges so the battery never reaches
+# the battery_low_soc_emergency_charge automation's 10% trigger (which slams 5 kW and
+# then fights the next HOLD). Only overrides holds, never during the demand window.
+# ---------------------------------------------------------------------------
+
+def test_survival_floor_overrides_low_soc_overnight_hold():
+    # 2am, peak month, SoC 8% → would be peak_early_morning_hold (ride to 5%). The floor
+    # defense overrides it to a gentle self_consumption top-up.
+    ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
+    r = ctx["recommended"]
+    check("survival floor overrides low-SoC hold", r["rule_fired"] == "survival_floor_defend", r)
+    check("  ...as a charge", r["action"] == "charge", r)
+    check("  ...via self_consumption (gentle, Rule 31)", r["mode"] == "self_consumption", r)
+    # And the gentle controller commands SoC+offset, not the target — a ~1.6 kW trickle.
+    check("  ...reserve chases SoC+offset",
+          ea._gentle_charge_reserve(8, r["target_pct"]) == 8 + ea.SELF_CONS_CHARGE_OFFSET_PTS,
+          ea._gentle_charge_reserve(8, r["target_pct"]))
+
+
+def test_survival_floor_does_not_override_deadline_autonomous():
+    # 1:30pm, peak, SoC 8% → deadline urgency fires an autonomous charge; the floor defense
+    # must NOT downgrade it to a gentle self_consumption top-up.
+    ctx = ea.compute_decision_context(mk_state(8, 13, "poor", 0.5, 1.0), flat(16), [], now_at(13, 30))
+    r = ctx["recommended"]
+    check("survival floor leaves deadline autonomous alone", r["mode"] == "autonomous", r)
+    check("  ...still a charge", r["action"] == "charge", r)
+    check("  ...not relabelled survival_floor_defend", r["rule_fired"] != "survival_floor_defend", r)
+
+
+def test_survival_floor_not_active_in_demand_window():
+    # 4pm, peak, SoC 8% → demand_window_active hold must stand; the battery has to be free to
+    # discharge 3–9pm, and the emergency automation is disabled then too.
+    ctx = ea.compute_decision_context(mk_state(8, 16, "na", 0.0, 0.0), flat(30), [], now_at(16))
+    r = ctx["recommended"]
+    check("survival floor inactive in demand window", r["action"] == "hold", r)
+    check("  ...stays demand_window_active", r["rule_fired"] == "demand_window_active", r)
+
+
+def test_survival_floor_killswitch_reverts_to_ride_low():
+    real = ea.SURVIVAL_FLOOR_DEFENSE
+    try:
+        ea.SURVIVAL_FLOOR_DEFENSE = False
+        ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
+        r = ctx["recommended"]
+        check("kill-switch off → low-SoC hold rides low again", r["action"] == "hold", r)
+        check("  ...not survival_floor_defend", r["rule_fired"] != "survival_floor_defend", r)
+    finally:
+        ea.SURVIVAL_FLOOR_DEFENSE = real
+
+
+def test_survival_floor_not_triggered_above_floor():
+    # SoC 40% overnight → well above the floor, normal hold stands.
+    ctx = ea.compute_decision_context(mk_state(40, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
+    r = ctx["recommended"]
+    check("survival floor idle above 12%", r["rule_fired"] != "survival_floor_defend", r)
+    check("  ...still a hold", r["action"] == "hold", r)
+
+
+# ---------------------------------------------------------------------------
 # Rule 29 — bias-corrected solar in the control path (added 2026-07-23)
 #
 # Raw Solcast runs ~2x optimistic at this flat-roof site in winter. Until now the
@@ -1325,6 +1390,11 @@ if __name__ == "__main__":
                test_execute_selfcons_charge_uses_gentle_reserve,
                test_execute_autonomous_charge_unaffected,
                test_execute_gentle_killswitch_reverts_to_target,
+               test_survival_floor_overrides_low_soc_overnight_hold,
+               test_survival_floor_does_not_override_deadline_autonomous,
+               test_survival_floor_not_active_in_demand_window,
+               test_survival_floor_killswitch_reverts_to_ride_low,
+               test_survival_floor_not_triggered_above_floor,
                test_ev_case6_negative_fit_solar_dump,
                test_ev_case6_not_fired_when_battery_low,
                test_historical_model_cheap_price_raises_target,

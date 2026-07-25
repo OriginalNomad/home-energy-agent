@@ -2190,3 +2190,43 @@ near the deadline (the one demand-charge-relevant failure mode) → add a fill-t
 pulls it. This is agent code, not HA config, so no `deploy_ha_config.sh`. Verify live: next
 self_consumption charge cycle should show `reserve_cmd_pct ≈ soc+6` rising each cycle (not a flat 85)
 and `battery_power` ~1.5–2 kW in `energy_log.db` instead of ~5.
+
+**LIVE CONFIRMATION (same day, after push + Pi pull):** user reports battery charging at **2.2 kW,
+reserve set to 48%** (SoC ~42 + 6) — almost exactly the ~2.1 kW predicted for offset 6. Rule 31
+validated in production on the first self_consumption charge cycle. ✅
+
+### Built: Rule 30 revised — rule layer defends a 12% overnight floor (todo #2)
+
+**Why.** This morning's other 5 kW event (07:00) was the `battery_low_soc_emergency_charge`
+automation, not the agent: the battery rode to the 5% floor overnight (by design), and at 07:00 —
+when the automation's time gate opens — SoC 5% was below its 10% trigger, so it fired (reserve=85,
+5 kW slam) and the 07:30 HOLD cleared reserve to 5%. **The 07-24 fix (lower the trigger 20→10) only
+narrowed the overlap; the oscillation recurred** because the rule layer's floor (5%) is still below
+the trigger (10%). Lowering the trigger further just relocates the sawtooth — the fight is the rule
+layer riding *through* the trigger while the HOLD branch clears reserve.
+
+**Design (user's choice):** "Agent holds ~12% itself, gently" — raise the rule layer's floor above
+the automation trigger rather than chasing the trigger down. Rule 31 makes the overnight top-up a
+~1.6 kW trickle, so the arbitrage cost of not riding to 5% is trivial (~12¢/night).
+
+**Change — `agent/energy_agent.py`, `compute_decision_context()`:** a post-processing override after
+the verdict tree — if the verdict is HOLD, SoC ≤ `OVERNIGHT_SURVIVAL_FLOOR_PCT` (12), and not in the
+demand window, override to `verdict("charge", 20, "self_consumption", "survival_floor_defend")`.
+Only touches holds (never downgrades a deadline autonomous charge); never fires in the demand window
+(battery must discharge 3–9pm, automation disabled then). Constants + `SURVIVAL_FLOOR_DEFENSE`
+kill-switch. The battery now never reaches the floor → the automation never fires in normal
+operation, reverting to a true "agent dead / stalled" backstop (2-pt margin ≈ 2 missed cycles).
+
+**Composition, not replacement:** Rules 22/25 (wait-for-cheap-slot / wait-for-sponge) still ride the
+battery *down* to 12%; the floor defense catches it there. Two pre-existing tests that asserted a
+low-SoC ride-to-floor hold were lifted to SoC 13/20 (above the floor) to keep that coverage; the new
+Rule 30 tests cover the sub-12% override. **HA config unchanged** — the automation stays at 10% as
+the backstop, per the user's choice.
+
+**Tests:** 5 new (`survival_floor_defend` overrides a low-SoC overnight hold; does *not* override a
+deadline autonomous charge; inactive in the demand window; kill-switch reverts to ride-low; idle
+above 12%). **216 decision + 16 optimizer + 11 build_models, all green.**
+
+**Watch after deploy:** on the next genuinely low-SoC night, SoC should sit ~12–15% overnight (not
+ride to 5%), and `battery_low_soc_emergency_charge` should not fire. The 07:00-type churn should be
+gone. Not yet deployed — same `git push` as Rule 31.

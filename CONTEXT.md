@@ -253,11 +253,26 @@ Key agent capabilities added 2026-07-25 (session 20):
   build_models later calibrate the offset→rate dial. All in `energy_agent.py`
   (`_execute_deterministic_verdict`); verdict tree untouched. **Control-path change.**
   **Does NOT govern the HA emergency automation** (still slams 5 kW when it fires — that's the
-  separate survival-floor reconciliation). 7 new tests. **203 decision + 16 optimizer + 11 build_models.**
+  separate survival-floor reconciliation — see next bullet). 7 new tests (combined total below).
   **Watch:** confirm model_params self_consumption stays ~1.67 (the `min(10-day,2-day)` window holds
   it there through ~07-27; after that the restored gentle physics keeps measured power low). If it
   ever reads high while the controller is active, add a fill-time clamp so the deadline budget can't
   under-count charging time.
+- **Rule 30 revised — rule layer defends a 12% overnight floor** (`SURVIVAL_FLOOR_DEFENSE`,
+  `OVERNIGHT_SURVIVAL_FLOOR_PCT=12`, `SURVIVAL_FLOOR_TARGET_PCT=20`). The 07-24 fix (lower the
+  emergency automation 20→10) was necessary but not sufficient: on 07-25 the battery rode to 5%
+  overnight and the automation fired at 07:00 (SoC 5 < 10), the 07:30 HOLD cleared reserve to 5%,
+  and the oscillation recurred. Root cause: the rule layer's floor (5%) is *below* the automation
+  trigger (10%), and lowering the trigger only relocates the sawtooth. Fix (user's choice): when a
+  HOLD verdict lands at instantaneous SoC ≤ 12%, override to a gentle self_consumption top-up
+  (`survival_floor_defend`, target 20%) — Rule 31 makes it ~1.6 kW. The battery never reaches the
+  floor, so the automation never fires in normal operation (stays a true "agent dead" backstop).
+  Composes with Rules 22/25 (they ride down to 12, the floor catches there). Post-processing
+  override in `compute_decision_context` — only touches holds, never a deadline autonomous charge,
+  never in the demand window. Cost ~12¢/night of arbitrage; kill-switch reverts to ride-to-5%.
+  5 tests. **Combined session-20 total: 216 decision + 16 optimizer + 11 build_models.**
+  **Watch:** confirm the oscillation is gone on the next low-SoC morning (SoC should sit ~12–15
+  overnight, not 5, and the emergency automation should not fire).
 
 Key agent capabilities added 2026-07-24 (session 19):
 - **Solar accuracy now measured against the bias-corrected forecast** (`_solar_accuracy()` +

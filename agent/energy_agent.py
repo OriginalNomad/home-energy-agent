@@ -1141,6 +1141,20 @@ DEMAND_DEADLINE  = 14 + 55 / 60   # 2:55pm as a decimal hour
 # Tunable; the commanded offset is logged so build_models can learn the real curve later.
 SELF_CONS_CHARGE_OFFSET_PTS = 6
 
+# Overnight survival floor (Rule 30, revised 2026-07-25). The rule layer defends a ~12%
+# instantaneous SoC floor so it never rides down into the `battery_low_soc_emergency_charge`
+# automation's 10% trigger — which sets reserve=85 directly (a 5 kW slam) and then fought the
+# next HOLD that cleared reserve back to 5% (the 2026-07-25 07:00 oscillation). Instead of
+# holding while SoC drains below the floor, the agent issues a gentle self_consumption top-up
+# (Rule 31, ~1.6 kW). The automation stays at 10% as a true "agent is dead / stalled" backstop:
+# the 2-point margin means it only takes over after ~2 missed agent cycles, which is exactly
+# when it should. Applies year-round (small cost, keeps the battery off the floor). Only ever
+# overrides a HOLD verdict — never a deadline autonomous charge — and never in the demand window.
+# Kill-switch: SURVIVAL_FLOOR_DEFENSE = False reverts to the old ride-to-5% behaviour.
+SURVIVAL_FLOOR_DEFENSE       = True
+OVERNIGHT_SURVIVAL_FLOOR_PCT = 12   # gently charge below this instantaneous SoC
+SURVIVAL_FLOOR_TARGET_PCT    = 20   # the gentle top-up aims here (buffer above the 10% backstop)
+
 # Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
 # Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
 MODEL_PARAMS_FILE = Path(__file__).parent / "model_params.json"
@@ -1840,6 +1854,18 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             rec = verdict("charge", cost_target, "autonomous", "spread_arbitrage")
         else:
             rec = verdict("charge", cost_target, "self_consumption", "spread_selfcons")
+
+    # Rule 30 (revised 2026-07-25) — overnight survival-floor defense. If the verdict is to
+    # HOLD while SoC sits at/below the floor, override to a gentle self_consumption top-up so
+    # the battery never rides down into the emergency automation's 10% trigger (which slams
+    # 5 kW and then fights the next HOLD). Only touches holds — a deadline autonomous charge is
+    # never downgraded — and never during the demand window, where the battery must be free to
+    # discharge and the automation is disabled anyway. Rule 31 keeps this top-up ~1.6 kW.
+    if (SURVIVAL_FLOOR_DEFENSE and not in_demand
+            and rec.get("action") == "hold"
+            and soc <= OVERNIGHT_SURVIVAL_FLOOR_PCT):
+        rec = verdict("charge", SURVIVAL_FLOOR_TARGET_PCT, "self_consumption",
+                      "survival_floor_defend")
 
     return {
         "now_h":               round(now_h, 2),

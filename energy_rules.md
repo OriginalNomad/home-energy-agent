@@ -906,6 +906,33 @@ buffer — an emergency is not the time to trust a Solcast-optimistic sub-85% ta
 fires during the demand window or above 20¢, and still runs only 07:00–22:00. Overnight low-SoC
 charging is the rule layer's job alone (the overnight top-up automations remain disabled).
 
+**Revised 2026-07-25 — the 20→10 move was necessary but not sufficient; the rule layer now
+defends a 12% floor itself.** Lowering the automation trigger only narrowed the overlap from 15
+points to 5. On 2026-07-25 the battery rode to the 5% floor overnight (correct, by design), and at
+07:00 — the moment the automation's time gate opened — SoC 5% was still below the 10% trigger, so
+it fired (reserve=85, a 5 kW slam), and the 07:30 HOLD cleared reserve back to 5%. **The
+oscillation recurred, because the rule layer's operating floor (5%) is still below the automation's
+trigger (10%).** Lowering the trigger further does not fix this — it just relocates the sawtooth,
+since the fight is caused by the rule layer riding *through* the trigger and the HOLD branch then
+clearing reserve.
+
+**The fix (user's choice, 2026-07-25): raise the rule layer's floor above the automation's
+trigger.** `SURVIVAL_FLOOR_DEFENSE` — if the verdict is to HOLD while instantaneous SoC is at/below
+`OVERNIGHT_SURVIVAL_FLOOR_PCT` (**12%**), it is overridden to a gentle self_consumption top-up
+(`survival_floor_defend`, target `SURVIVAL_FLOOR_TARGET_PCT` = 20%). Because Rule 31 is now live,
+this top-up is ~1.6 kW, not a slam. The battery therefore never rides below ~12%, so the automation
+(trigger 10%) **never fires in normal operation** — it reverts to a true "agent is dead / stalled"
+backstop, taking over only after ~2 missed agent cycles (the 2-point margin). The two layers no
+longer overlap: the wait-for-sponge / go-hard-wait holds (Rules 22, 25) still ride the battery
+*down* to 12%, and the floor defense catches it there — they compose rather than fight.
+
+**This is a further deliberate reversal of the ride-to-5% scope, not of the 5% reserve floor.** The
+cost is ~12¢/night of earlier, gentle overnight charging (giving up some ride-low arbitrage); the
+benefit is the end of the oscillation and its wasted 5 kW churn, plus a genuine safety margin above
+the emergency trigger. Kill-switch: `SURVIVAL_FLOOR_DEFENSE = False` restores the ride-to-5%
+behaviour. Only ever overrides a HOLD (never a deadline autonomous charge) and never in the demand
+window (the battery must discharge 3–9pm, where the automation is disabled too).
+
 ---
 
 ### Rule 31 — Gentle self_consumption Charge (reserve = SoC + offset)

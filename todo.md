@@ -4,12 +4,13 @@
 
 ### Immediate
 
-- [ ] ▶️ **START HERE NEXT SESSION (2026-07-25): #3 — the 5-minute price problem (HIGH).**
+- [ ] ▶️ **START HERE NEXT SESSION: #3 — the 5-minute price problem (HIGH).**
   Full write-up is below under "HIGH — the agent decides on a 5-minute spot price". Needs a design
   decision first (which price source: the 30-min forecast slot `forecast[0]` the agent already
-  fetches is the likely fix; whether to add threshold hysteresis), then implement. Also review how
-  yesterday's four live changes (solar accuracy, Rule 30 survival floor, rebuilt model, priority-1
-  path) behaved through the 2026-07-24 demand window before layering more on.
+  fetches is the likely fix; whether to add threshold hysteresis), then implement.
+  *(2026-07-25 session 20 cleared the two items that were ahead of this: ⭐ the reserve-offset
+  charge-rate controller (Rule 31 — built, deployed, live-confirmed at 2.2 kW) and the survival-floor
+  reconciliation (Rule 30 revised — built, pending push). #3 is now the top open item.)*
 
 - [x] ⭐ **NEW CAPABILITY — reserve-offset charge-rate controller** — **v1 built 2026-07-25 (session 20).**
   Rule 31 / `_gentle_charge_reserve()` in `energy_agent.py`. On a self_consumption charge the agent
@@ -92,12 +93,19 @@
   Remaining thread, low priority: the Grid Price Forecast card annotates *"Charge threshold (12¢)"*
   — a hardcoded label for a helper that no longer exists. Remove or repoint it.
 
-- [x] **Reconcile the overnight survival floor — RESOLVED 2026-07-24 (Rule 30).** User chose
-  "trust the projection, ride lower." Lowered `battery_low_soc_emergency_charge` trigger + condition
-  20% → 10% to align the safety net with the rule layer's designed 5%-floor ride (kept ~one
-  agent-cycle margin above the physical reserve rather than going to exactly 5%). Deployed live via
-  `deploy_ha_config.sh`, zero drift. Rule 30 documents it. **Watch:** confirm the oscillation is gone
-  on the next genuine sub-10% morning. Original analysis retained below for context.
+- [x] **Reconcile the overnight survival floor — RE-RESOLVED 2026-07-25 (Rule 30 revised).**
+  The 07-24 fix (lower `battery_low_soc_emergency_charge` 20% → 10%) was necessary but **not
+  sufficient — the oscillation recurred on 2026-07-25**: battery rode to 5% overnight, the automation
+  fired at 07:00 (SoC 5 < 10 trigger, its time gate opening), the 07:30 HOLD cleared reserve to 5%,
+  churn. Root cause: the rule layer's floor (5%) is still below the automation trigger (10%), and
+  lowering the trigger only relocates the sawtooth. **Fix (user chose "agent holds ~12% itself,
+  gently"):** `SURVIVAL_FLOOR_DEFENSE` — a HOLD verdict at instantaneous SoC ≤ 12% is overridden to a
+  gentle self_consumption top-up (`survival_floor_defend`, target 20%; Rule 31 makes it ~1.6 kW). The
+  battery never reaches the floor, so the automation never fires in normal operation (stays a true
+  "agent dead" backstop). HA automation unchanged (10% trigger kept as backstop). 5 tests; 216
+  decision total. **Not yet deployed** — same `git push` as Rule 31. **Watch:** next low-SoC night,
+  SoC should sit ~12–15% (not 5) and the emergency automation should not fire. Original 07-24
+  analysis retained below for context.
 
   ~~The rule layer and Layer 0 disagree by 15 points~~
   (found 2026-07-23 by replay; this is the *real* cause of the drain to 17%, not the solar
