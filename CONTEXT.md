@@ -86,12 +86,15 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 - 30-min rolling average (HA statistics platform) used in grid charge target and forecast card
 
 **Tessie API credentials:**
-- Energy site ID: `2252120180790091`
-- Token: **hardcoded in `config/configuration.yaml`** under `rest_command:` (not in `secrets.yaml`, despite this doc previously claiming so — corrected 2026-07-22). Also a hardcoded HA long-lived token in `agent/energy_agent.py`. Repo is private, so not urgent, but both should move to `secrets.yaml` / `.env`
+- Energy site ID: `2252120180790091` (an identifier, not a secret)
+- Token: lives in **`agent/.env`** (`TESSIE_TOKEN`) for the agent. **Scrubbed from the code 2026-07-26** —
+  `energy_agent.py`/`push_virtual_sensors.py` no longer carry hardcoded defaults. ⚠️ Still inline in
+  `config/configuration.yaml` (`rest_command:` headers) because HA can't read `.env`; migrate to
+  `!secret` when the Tessie token is rotated (see `todo.md`).
 - Endpoints: `POST /api/1/energy_sites/{id}/backup` with `{"backup_reserve_percent": N}`
 
 **Solcast credentials:**
-- API Key: `I6bgkuZyCcOuP4YeRmJWBaWkIgxoYCPW`
+- API Key: stored in the HA Solcast integration config (not in this repo)
 - Resource ID: `fd2e-343e-680f-b27e`
 - DC capacity: 6.12 kWp, AC: ~5 kW, Tilt: 0° (flat roof)
 - Integration: HACS "HA Solcast PV Solar Forecast Integration" by BJReplay

@@ -12,6 +12,7 @@ Pushes:
   - sensor.demand_window_monitor    (demand window pass/fail card data)
 """
 
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -21,8 +22,17 @@ import pytz
 import requests
 
 # --- Config (mirrors energy_agent.py) -----------------------------------------
-HA_URL     = "http://localhost:8123"
-HA_TOKEN   = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIxZjQxNDVmOTBjYTI0ZDgyYjk5MTI5ZjE2YzY3ZWEzNSIsImlhdCI6MTc3OTY2OTMyNiwiZXhwIjoyMDk1MDI5MzI2fQ.Gu5FPRLbn3PpTOstsR-B87fyVeEC00dRXAB6ZiYiFt0"
+# Secrets come from agent/.env only — never hardcode a token here.
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
+HA_URL     = os.environ.get("HA_URL", "http://localhost:8123")
+HA_TOKEN   = os.environ.get("HA_TOKEN", "")
 HA_HEADERS = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
 TZ         = pytz.timezone("Australia/Sydney")
 

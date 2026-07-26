@@ -21,6 +21,40 @@
   curve from `charge_offset_pts`) and the architecture roadmap (LP divergence, analyst agent, savings
   dashboard).
 
+- [ ] 🔐 **HIGH — rotate the secrets that were in git history, then finish the config scrub** (2026-07-26).
+  Secret-bearing files (4 PNGs) and hardcoded tokens had been committed/pushed to GitHub, so per the
+  global rule they are **compromised — rotation is the real fix**, not just removal.
+  - **Working tree scrubbed 2026-07-26** (this session, no force-push, Pi untouched): removed the
+    hardcoded HA token from `energy_agent.py` / `push_virtual_sensors.py` / `demand_window_summary.py` /
+    `log_daily_energy.py` (all read `HA_TOKEN` from `agent/.env` now), the Solcast key from `CONTEXT.md` /
+    `app/docs/homeassistant-context.md` / `energy_log.md`, and the dead Anthropic key from
+    `PI_MIGRATION.md`; added `agent/.env.example`. Committed the user's deletion of the 4 secret PNGs.
+    History was **not** rewritten (deferred by choice) — so the old values still exist in history +
+    on GitHub until rotated.
+  - **⚠️ ROTATE (user action, essential):**
+    1. **Tessie token** (`BEVtCQ…`) — controls the Powerwall. Regenerate at tessie.com; update
+       `agent/.env` (Pi) `TESSIE_TOKEN` **and** the Pi's `~/homeassistant/config/secrets.yaml`.
+    2. **HA long-lived token** (`eyJhbGci…`) — regenerate in HA (Profile → Long-lived tokens); update
+       `agent/.env` (Pi) `HA_TOKEN`.
+    3. **Solcast API key** (`I6bgku…`) — regenerate at solcast.com; update the HA Solcast integration.
+    4. Anthropic key `…xAAA` already dead (401'd 2026-07-26); `…dAAA` is live in `agent/.env` (Pi).
+    5. Consider regenerating the HA backup **encryption key** and Tesla Powerwall installer passcodes
+       (they were in the deleted PNGs).
+  - **Remaining scrub — `config/configuration.yaml` Tessie token** (still inline in 4 `rest_command`
+    Authorization headers; HA can't read `.env`). Do this **with the Tessie rotation**: add
+    `tessie_bearer: "Bearer <new-token>"` to the Pi's `~/homeassistant/config/secrets.yaml`, change the
+    4 headers to `Authorization: !secret tessie_bearer`, then `./deploy_ha_config.sh` and confirm
+    rest_commands still load (`/api/services` has `rest_command`). Needs a deploy — excluded from this
+    session's "Pi untouched" scope.
+  - **Optional later — history rewrite** (git-filter-repo to purge the PNGs + secret strings from all
+    170 commits and the 8 stale `claude/*` branches, force-push, reconcile the Pi). Only worthwhile if
+    rotation is somehow delayed; rotation makes the historical copies worthless.
+
+- [ ] 🧹 **LOW — delete the 8 stale `claude/*` remote branches** (abandoned morning-standup / automation
+  runs, June–July 2026). They clutter `git branch -r` and carry the pre-scrub secrets in their history.
+  Confirm none hold unmerged real work first (`git log origin/main..<branch>`), then
+  `git push origin --delete <branch>`.
+
 - [ ] 🛡️ **HIGH — agent robustness hardening** (surfaced by the 2026-07-26 incident: an expired
   `ANTHROPIC_API_KEY` crashed the agent at the LLM narrative call every cycle — control survived, but
   logging/notifications went dark and it looked frozen). In priority order:

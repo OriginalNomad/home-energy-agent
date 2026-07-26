@@ -178,7 +178,7 @@ pip3 install anthropic requests pytz scipy
 
 # Create .env with Anthropic key
 cat > .env << 'EOF'
-ANTHROPIC_API_KEY="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"
+ANTHROPIC_API_KEY="sk-ant-api03-...  # in agent/.env — never commit the real key"
 EOF
 ```
 
@@ -193,7 +193,7 @@ crontab -e
 Add these lines (same as Mac, paths updated for Pi):
 
 ```
-*/30 * * * * ANTHROPIC_API_KEY="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" /usr/bin/python3 /root/home-energy-console/agent/energy_agent.py >> /tmp/energy_agent.log 2>&1
+*/30 * * * * ANTHROPIC_API_KEY="sk-ant-api03-...  # in agent/.env — never commit the real key" /usr/bin/python3 /root/home-energy-console/agent/energy_agent.py >> /tmp/energy_agent.log 2>&1
 
 5 21 * * * /usr/bin/python3 /root/home-energy-console/agent/log_daily_energy.py >> /tmp/daily_energy.log 2>&1 && /usr/bin/python3 /root/home-energy-console/agent/demand_window_summary.py --post >> /tmp/demand_window.log 2>&1
 

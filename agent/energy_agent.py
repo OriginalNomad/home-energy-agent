@@ -56,11 +56,12 @@ if _env_file.exists():
             if not os.environ.get(_key):   # set if missing OR empty
                 os.environ[_key] = _val
 
-# Defaults work on Mac Studio (localhost). Override via .env on other machines.
+# HA_URL default is fine (localhost). Secrets come from agent/.env only — never hardcode
+# a token here (a committed token is compromised and must be rotated). See .env.example.
 HA_URL   = os.environ.get("HA_URL",   "http://localhost:8123")
-HA_TOKEN = os.environ.get("HA_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIxZjQxNDVmOTBjYTI0ZDgyYjk5MTI5ZjE2YzY3ZWEzNSIsImlhdCI6MTc3OTY2OTMyNiwiZXhwIjoyMDk1MDI5MzI2fQ.Gu5FPRLbn3PpTOstsR-B87fyVeEC00dRXAB6ZiYiFt0")
+HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
-TESSIE_TOKEN   = os.environ.get("TESSIE_TOKEN",   "REDACTED_TOKEN")
+TESSIE_TOKEN   = os.environ.get("TESSIE_TOKEN",   "")
 TESSIE_SITE_ID = os.environ.get("TESSIE_SITE_ID", "2252120180790091")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # set via agent/.env

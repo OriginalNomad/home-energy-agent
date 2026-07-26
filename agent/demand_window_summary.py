@@ -59,7 +59,7 @@ if _env_file.exists():
                 os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
 
 HA_URL   = os.environ.get("HA_URL",   "http://localhost:8123")
-HA_TOKEN = os.environ.get("HA_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIxZjQxNDVmOTBjYTI0ZDgyYjk5MTI5ZjE2YzY3ZWEzNSIsImlhdCI6MTc3OTY2OTMyNiwiZXhwIjoyMDk1MDI5MzI2fQ.Gu5FPRLbn3PpTOstsR-B87fyVeEC00dRXAB6ZiYiFt0")
+HA_TOKEN = os.environ.get("HA_TOKEN", "")   # from agent/.env — never hardcode
 HA_HEADERS = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
 TZ = pytz.timezone("Australia/Sydney")
 

@@ -1897,7 +1897,7 @@ The May 23 log incorrectly concluded that autonomous mode was "banned permanentl
 ## 2026-05-18 (continued)
 
 ### Solcast credentials
-- **API Key**: `I6bgkuZyCcOuP4YeRmJWBaWkIgxoYCPW`
+- **API Key**: (redacted 2026-07-26 — stored in the HA Solcast integration config, not in this repo)
 - **Resource ID**: `fd2e-343e-680f-b27e`
 - **Rooftop site URL**: `https://api.solcast.com.au/rooftop_sites/fd2e-343e-680f-b27e/forecasts?format=json`
 - Panels: flat (tilt ~0°), azimuth irrelevant

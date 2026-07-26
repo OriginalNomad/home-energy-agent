@@ -46,7 +46,7 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 - Endpoints: `POST /api/1/energy_sites/{id}/backup` with `{"backup_reserve_percent": N}`
 
 **Solcast credentials:**
-- API Key: `I6bgkuZyCcOuP4YeRmJWBaWkIgxoYCPW`
+- API Key: stored in the HA Solcast integration config (not in this repo)
 - Resource ID: `fd2e-343e-680f-b27e`
 - Integration: HACS "HA Solcast PV Solar Forecast Integration" by BJReplay
 
