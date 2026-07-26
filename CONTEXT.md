@@ -241,6 +241,30 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capabilities added 2026-07-26 (session 21):
+- **Rule 33 — receding-horizon deadline escalation** (`DEADLINE_GENTLE_LEAD`,
+  `FAST_ESCALATE_BUFFER_H=1.5`). The peak deadline branch used to jump straight to autonomous (5 kW)
+  the instant self_consumption could no longer fill the *whole* 85% gap in time (`fill_slow ≥
+  hours_remaining`). On 2026-07-26 that slammed 5 kW at 10:00 with SoC 16% and ~4.9h to the deadline —
+  ~3h of slack, at the worst-informed moment (winter-morning solar credit ≈ 0). Now it escalates to
+  autonomous only at the fast rate's point-of-no-return (`hours_remaining ≤ fill_fast +
+  FAST_ESCALATE_BUFFER_H`); below that it leads with a gentle self_consumption charge
+  (`peak_deadline_gentle_lead`) and re-evaluates each cycle. The buffer *is* the demand-charge safety
+  margin. **Control-path change**, kill-switch reverts to straight-to-autonomous.
+- **Hold verdict reverts autonomous mode + drops reserve unconditionally.** A `hold` inheriting
+  `mode=autonomous` from an earlier deadline charge could not be stopped — under 26.18.3 autonomous
+  grid-charges at ~5 kW regardless of reserve, and the hold's reserve-drop was gated on
+  `sensor.powerwall_backup_reserve`, which read a stale **5%** while the true setpoint was ~57%. The
+  hold branch (`_execute_deterministic_verdict`) now commands `self_consumption` when the mode isn't
+  already that, and forces reserve=5% (untrusting the lagging sensor) when it reverts; steady-state
+  holds still send nothing. This was the direct cause of today's un-stoppable 5 kW charge.
+- **Incident: expired `ANTHROPIC_API_KEY` crashed the agent every cycle** at the LLM narrative call
+  (control survived — it runs before that line — but all post-crash logging died). Fixed by updating
+  the key in the **Pi's** `.env` (the user had updated only the Mac's, which never syncs — `.env` is
+  gitignored). Robustness follow-ups (LLM try/except, liveness alert, key-expiry ping, secrets
+  single-source, Pi fallback) are logged in `todo.md`, not yet built.
+- **222 decision + 16 optimizer + 11 build_models tests** (was 221/16/11).
+
 Key agent capabilities added 2026-07-25 (session 20):
 - **Rule 31 — gentle self_consumption charge controller** (`_gentle_charge_reserve()`,
   kill-switch `GENTLE_CHARGE_CONTROL`, tunable `SELF_CONS_CHARGE_OFFSET_PTS=6`). Firmware 26.18.3
@@ -520,6 +544,29 @@ Counts below were read from the live HA, not from the file. To re-verify:
 ---
 
 ## What to watch for
+
+**Open from 2026-07-26 (session 21) — watch these first:**
+
+- **Rule 33 gentle-lead on the next low-SoC peak morning.** On a peak day with a low morning SoC the
+  agent should now *gentle-lead* (self_consumption ~1.7 kW) from ~10am and only escalate to 5 kW
+  autonomous near ~1pm if gentle + solar are falling behind — not slam 5 kW at 10am. Confirm it
+  reaches 85% by 2:55pm without an early 5 kW burst. If it ever cuts it close, raise
+  `FAST_ESCALATE_BUFFER_H` (currently 1.5h).
+- **Hold reverts autonomous within one cycle.** After any autonomous charge, the first `hold` verdict
+  should flip mode back to self_consumption and stop grid-charging. Confirmed by hand today; watch it
+  happen unattended.
+- **Agent liveness (robustness gap, NOT yet fixed).** Today's whole incident was an expired
+  `ANTHROPIC_API_KEY` crashing the agent at the narrative call — control survived but logging went
+  dark and it *looked* frozen. Until the LLM call is wrapped in try/except (top todo item), a key
+  expiry or Anthropic outage will do this again. If `decisions.jsonl` stops updating, check
+  `/tmp/energy_agent.log` on the Pi for a 401/traceback first.
+- **Why it arrived empty.** The battery rode 11–18% overnight on `wait_for_cheap_go_hard` (prices
+  never dropped below ~14¢), so it hit the peak morning near-empty and needed the big charge. Rule 33
+  softens the *response*; the overnight strategy leaving it that low on a peak day is worth revisiting
+  (todo). Note: Rule 30's 12% floor held — the emergency automation did **not** fire overnight.
+- **Slider drift (ongoing check):** 2026-07-26 overnight — **0 `settings_violations`, all 7 helpers
+  stable and in-band** (`ev_charge_target_pct` reads 90, was 100 on 07-25 — in-band, likely a
+  deliberate change). Clean night.
 
 **June 1 demand window — PASSED ✅ (2026-06-01).** Agent correctly held overnight (Rule 20), charged via Solar Sponge 09:30–14:30 (39%→96% at 7–11¢), entered demand window at 99% SoC, zero grid imports 3–9pm. Rule 2 maintained. Backstop automation did not need to fire.
 

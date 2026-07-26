@@ -2363,3 +2363,11 @@ Totals: **222 decision + 16 optimizer + 11 build_models, 0 failures.**
 — no `config/` change). **Watch next low-SoC peak morning:** it should gentle-lead from ~10am and
 only escalate to 5 kW near ~1pm if still behind; and a `hold` after any autonomous charge should
 revert to self_consumption and stop within one cycle.
+
+**Close-out verification.** Commit `a7a8c38` pushed and pulled on the Pi (`git rev-parse` confirms);
+`python3 test_decision.py` on the Pi → **222 passed, 0 failed**; a live cycle ran clean on the
+deployed code (no crash, key working). **Demand window outcome (peak day):** the day recovered to
+SoC **81%** and at 17:21 the battery was covering the whole house load from storage — battery power
++920 W (discharging), grid ~0 W (**zero import**), reserve at 5%. No demand-charge risk. Rule 30's
+12% floor held overnight and `battery_low_soc_emergency_charge` did not fire. Slider check: 0
+violations, all 7 helpers in-band.

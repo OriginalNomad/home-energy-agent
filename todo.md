@@ -14,10 +14,54 @@
   pre-existing mismatch-reliant test fixed; 221 decision total. **Not yet deployed** — pending `git
   push`. HA automations still read the 5-min sensor (coarse 20¢/0¢ thresholds — separate, low value).
 
-  ▶️ **START HERE NEXT SESSION:** with #1/#2/#3 done, the top open items are the ⭐ follow-ups
-  (build_models learning the offset→rate curve from the newly-logged `charge_offset_pts`) and the
-  architecture roadmap (LP-to-control-path divergence collection, analyst agent, savings dashboard).
-  Also: review how Rules 30/31/32 behaved through a full day + the next low-SoC night before layering more on.
+  ▶️ **START HERE NEXT SESSION:** the 2026-07-26 incident (see below) exposed robustness gaps that now
+  outrank the ⭐ model-calibration follow-ups. Do the **agent-robustness hardening** item first (LLM
+  try/except is small and highest-value), then revisit the **overnight strategy** that left the battery
+  near-empty on a peak morning. After that: the ⭐ follow-ups (build_models learning the offset→rate
+  curve from `charge_offset_pts`) and the architecture roadmap (LP divergence, analyst agent, savings
+  dashboard).
+
+- [ ] 🛡️ **HIGH — agent robustness hardening** (surfaced by the 2026-07-26 incident: an expired
+  `ANTHROPIC_API_KEY` crashed the agent at the LLM narrative call every cycle — control survived, but
+  logging/notifications went dark and it looked frozen). In priority order:
+  1. **Fault-isolate the LLM call** (`energy_agent.py` ~line 2674): wrap `client.messages.create` in
+     try/except so a bad key or Anthropic outage degrades to "no narrative" and the cycle still writes
+     `decisions.jsonl` / dashboard helpers / notifications. Small, highest-value — prevents the whole
+     failure mode. Control already runs before this line, so only observability is at risk, which makes
+     the silent-failure worse, not better.
+  2. **Liveness alerting**: heartbeat written each successful cycle + an external monitor
+     (Healthchecks.io / UptimeRobot / phone push) that alerts if no cycle completes in ~40 min — loudly
+     if stale going into the demand window.
+  3. **Silent key-expiry**: startup key-health ping that notifies on 401; consider a non-expiring key +
+     billing alert.
+  4. **Single source of truth for secrets** so a key update can't miss the Pi again (the user edited the
+     Mac's `.env`; the agent runs on the Pi; `.env` is gitignored so it never synced). Options: keep
+     secrets only on the Pi, or a deploy step that scp's `.env` to the Pi.
+  5. **Pi single-point-of-failure**: a coarse always-on fallback in the Tesla app (Time-Based Control /
+     a reserve schedule) so a dead Pi can't cost a demand charge; UPS / auto-restart.
+
+- [ ] **MEDIUM — revisit the overnight charging strategy** (surfaced 2026-07-26). The battery rode
+  11–18% overnight on `wait_for_cheap_go_hard` because prices never dropped below ~14¢, so it arrived at
+  the peak morning near-empty and needed a big morning charge. Rule 30's 12% floor held (good) and Rule
+  33 now softens the morning *response*, but the strategy of waiting all night for a cheap sponge window
+  that doesn't come — on a **peak day** where 85% is required by 2:55pm — leaves no margin. Consider: on a
+  peak-day eve, top up gently overnight when the cheapest available slot is still above threshold, rather
+  than riding the floor. Check the `wait_for_cheap_go_hard` overnight cycles against the actual morning
+  charge cost before changing anything.
+
+- [x] **#2 (from the incident) — a `hold` must revert autonomous mode — DONE 2026-07-26.** The hold
+  branch of `_execute_deterministic_verdict` now commands `self_consumption` if the current mode isn't
+  already that, and drops reserve to 5% unconditionally when it reverts (was gated on
+  `sensor.powerwall_backup_reserve`, which read a stale 5% while the true setpoint was ~57%). This was the
+  direct cause of the un-stoppable 5 kW charge on 2026-07-26. 3 tests. Deployed (`a7a8c38`).
+
+- [x] **Rule 33 — receding-horizon deadline escalation — DONE 2026-07-26.** The peak deadline branch no
+  longer slams 5 kW autonomous the instant self_consumption can't fill the whole gap; it gentle-leads
+  (`peak_deadline_gentle_lead`) and escalates to autonomous only at the fast rate's point-of-no-return
+  (`hours_to_2_55 ≤ fill_fast_85 + FAST_ESCALATE_BUFFER_H`, default 1.5h). Kill-switch
+  `DEADLINE_GENTLE_LEAD`. 3 tests + `test_peak_deferral_trap_selfcons` updated. Deployed (`a7a8c38`).
+  **Watch:** confirm gentle-lead on the next low-SoC peak morning; tune the buffer if it ever cuts 85%
+  close.
 
 - [x] ⭐ **NEW CAPABILITY — reserve-offset charge-rate controller** — **v1 built 2026-07-25 (session 20).**
   Rule 31 / `_gentle_charge_reserve()` in `energy_agent.py`. On a self_consumption charge the agent
@@ -87,6 +131,7 @@
   | 2026-07-24 | all six EV helpers | stable | — | **EV sliders held overnight** (`ev_min_soc_pct`=30, rest steady) — this was flagged as "the real test" and it passed |
   | 2026-07-24 | `battery_max_insurance_floor_pct` | 0 | 30 | drifted back to 0 (set 30% on 07-23); 6 out-of-band violations, clamped to band floor 20. Operationally inert (dormant until April) but confirms drift isn't gone — it moved to a *different*, non-EV helper. Note: no `initial:`, so 0 = HA's default-to-min for an untouched helper → suggests the helper isn't persisting rather than being actively written |
   | 2026-07-25 | all seven helpers | stable, in band | — | **Clean night.** `max_insurance_floor_pct`=30 (held, was 0 yesterday), `ev_min_soc_pct`=30, `ev_ultra_cheap_c`=10, `ev_standard_price_c`=15, `ev_min_charge_price_c`=40, `ev_charge_target_pct`=100, `ev_departure_target_pct`=95. Zero violations across all 20 overnight cycles. Nothing reset. |
+  | 2026-07-26 | all seven helpers | stable, in band | — | **Clean night.** 0 `settings_violations` across the overnight cycles; all seven in-band. `ev_charge_target_pct`=90 (was 100 on 07-25 — in-band, presumed deliberate), `ev_min_soc_pct`=30, `max_insurance_floor_pct`=30, rest steady. Nothing reset. |
 
 - [x] **Confirm the `SETTINGS_SPEC` values and bands** — resolved 2026-07-23.
   The spec no longer holds *any* target values: it is `(alias, lo, hi)` bands only, because the HA
