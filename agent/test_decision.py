@@ -351,16 +351,20 @@ def test_peak_cloudy_1330_autonomous():
 
 
 def test_peak_deferral_trap_selfcons():
-    # With Phase 2.5-A charge rate model, avg rate 45%→85% is ~1.36 kW (tapers above 80%),
-    # so fill_slow ≈ 3.97h vs 3.42h deadline at 11:30 — autonomous is now correct.
-    # (Pre-model: flat 1.7 kW gave 3.18h which fits, so self_consumption was right then.)
+    # 11:30, SoC 45%, unreliable solar, deferral trap. fill_slow ≈ 3.97h > 3.42h deadline, so
+    # gentle alone can't fill the whole gap — but a 5 kW charge still has margin (fill_fast ≈
+    # 1.5h < 3.42 - 1.5h buffer). Under Rule 33 (receding-horizon escalation) the correct move
+    # is to break the deferral trap by charging *gently now* (peak_deadline_gentle_lead), holding
+    # the 5 kW option for a later cycle at the point-of-no-return. (Pre-Rule-33 this slammed
+    # autonomous immediately, the exact over-eagerness the 2026-07-26 fix removes.)
     holds = [{"actions": [], "price_c": 16, "ts": "2026-06-15T10:30", "solar_current_kw": 0.3},
              {"actions": [], "price_c": 16, "ts": "2026-06-15T11:00", "solar_current_kw": 0.3}]
     ctx = ea.compute_decision_context(
         mk_state(45, 11, "unreliable", 0.3, 1.5), flat(16), holds, now_at(11, 30))
     r = ctx["recommended"]
     check("peak deferral trap charges", r["action"] == "charge", r)
-    check("peak deferral trap autonomous", r["mode"] == "autonomous", r)
+    check("peak deferral trap leads gently (Rule 33)", r["rule_fired"] == "peak_deadline_gentle_lead", r)
+    check("peak deferral trap self_consumption", r["mode"] == "self_consumption", r)
 
 
 def test_soc_gateway_divergence():
@@ -1011,6 +1015,105 @@ def test_execute_gentle_killswitch_reverts_to_target():
         ea.set_powerwall_mode    = real_set_mode
         ea._cycle_context        = real_ctx
         ea.GENTLE_CHARGE_CONTROL = real_flag
+
+
+# ---------------------------------------------------------------------------
+# Rule 33 — receding-horizon deadline escalation (added 2026-07-26)
+#
+# The peak deadline branch used to jump straight to autonomous (5 kW) the instant
+# self_consumption could no longer fill the WHOLE 85% gap in time. On 2026-07-26 that
+# slammed 5 kW at 10:00 with SoC 16% and ~4.9h to the deadline — a 5 kW charge fills in
+# <2h, so there was ~3h of slack. The fix leads with a gentle self_consumption charge and
+# only escalates to autonomous at the fast rate's point-of-no-return
+# (hours_to_2_55 <= fill_fast_85 + FAST_ESCALATE_BUFFER_H).
+# ---------------------------------------------------------------------------
+
+def test_peak_deadline_gentle_lead_when_slack():
+    # The 2026-07-26 incident: SoC 16%, 10:00, poor solar, peak. Plenty of runway → the
+    # agent should lead gently (self_consumption), NOT slam 5 kW autonomous.
+    ctx = ea.compute_decision_context(mk_state(16, 10, "poor", 0.3, 1.0), flat(14), [], now_at(10))
+    r = ctx["recommended"]
+    check("10am low-SoC with slack → gentle lead (not autonomous)",
+          r["rule_fired"] == "peak_deadline_gentle_lead", r)
+    check("  ...is a charge", r["action"] == "charge", r)
+    check("  ...at self_consumption (~1.7 kW), not autonomous", r["mode"] == "self_consumption", r)
+
+
+def test_peak_deadline_escalates_at_point_of_no_return():
+    # Same low SoC but at 1:30pm: only ~1.4h to the deadline, so even a 5 kW charge is now
+    # within the safety buffer → escalate to autonomous.
+    ctx = ea.compute_decision_context(mk_state(20, 13, "poor", 0.3, 1.0), flat(14), [], now_at(13, 30))
+    r = ctx["recommended"]
+    check("1:30pm low-SoC at point-of-no-return → autonomous",
+          r["rule_fired"] == "peak_deadline_autonomous", r)
+    check("  ...at autonomous (5 kW)", r["mode"] == "autonomous", r)
+
+
+def test_deadline_gentle_lead_killswitch():
+    # DEADLINE_GENTLE_LEAD = False must restore the old straight-to-autonomous behaviour.
+    real = ea.DEADLINE_GENTLE_LEAD
+    try:
+        ea.DEADLINE_GENTLE_LEAD = False
+        ctx = ea.compute_decision_context(mk_state(16, 10, "poor", 0.3, 1.0), flat(14), [], now_at(10))
+        r = ctx["recommended"]
+        check("kill-switch off → old peak_deadline_autonomous at 10am",
+              r["rule_fired"] == "peak_deadline_autonomous", r)
+        check("  ...autonomous", r["mode"] == "autonomous", r)
+    finally:
+        ea.DEADLINE_GENTLE_LEAD = real
+
+
+# ---------------------------------------------------------------------------
+# Hold-branch executor fix — a hold must revert autonomous mode (added 2026-07-26)
+#
+# 2026-07-26 incident: a `hold` verdict left mode=autonomous from an earlier deadline
+# charge. Under firmware 26.18.3 autonomous grid-charges at ~5 kW regardless of reserve,
+# so the reserve-only cleanup was powerless — the charge ran until reverted by hand. And
+# the reserve drop itself was gated on sensor.powerwall_backup_reserve, which read a stale
+# 5% while the true setpoint was ~57%, so it skipped. A hold must revert the mode AND, when
+# it does, drop reserve unconditionally (not trusting the lagging sensor).
+# ---------------------------------------------------------------------------
+
+def _run_hold_executor(battery_state):
+    """Run a hold verdict through the executor with mocked control calls; return (reserves, modes)."""
+    real_set_reserve = ea.set_powerwall_reserve
+    real_set_mode    = ea.set_powerwall_mode
+    real_ctx         = ea._cycle_context
+    reserves, modes  = [], []
+    try:
+        ea.set_powerwall_reserve = lambda pct: reserves.append(pct)
+        ea.set_powerwall_mode    = lambda m: modes.append(m)
+        ea._cycle_context = {"state": {"battery": battery_state}}
+        ctx = {"recommended": {"action": "hold", "target_pct": None, "mode": None,
+                               "rule_fired": "peak_solar_will_cover"},
+               "ev_recommended": {}}
+        ea._execute_deterministic_verdict(ctx, dry_run=False)
+    finally:
+        ea.set_powerwall_reserve = real_set_reserve
+        ea.set_powerwall_mode    = real_set_mode
+        ea._cycle_context        = real_ctx
+    return reserves, modes
+
+
+def test_hold_reverts_autonomous_and_forces_reserve_drop():
+    # The exact failure mode: mode=autonomous, reserve sensor reads a stale 5% (true was ~57%).
+    reserves, modes = _run_hold_executor({"soc_pct": 49, "reserve_pct": 5, "mode": "autonomous"})
+    check("hold reverts autonomous → self_consumption", modes == ["self_consumption"], modes)
+    check("hold forces reserve=5 despite stale sensor reading 5%", reserves == [5], reserves)
+
+
+def test_hold_selfcons_at_floor_no_redundant_writes():
+    # Steady state: already self_consumption at the 5% floor → no commands (avoid write spam).
+    reserves, modes = _run_hold_executor({"soc_pct": 40, "reserve_pct": 5, "mode": "self_consumption"})
+    check("hold sends no mode command when already self_consumption", modes == [], modes)
+    check("hold sends no reserve command when already at floor", reserves == [], reserves)
+
+
+def test_hold_selfcons_high_reserve_drops_to_floor():
+    # self_consumption but a stale high reserve → drop to 5%, no mode change.
+    reserves, modes = _run_hold_executor({"soc_pct": 40, "reserve_pct": 80, "mode": "self_consumption"})
+    check("hold leaves mode alone when already self_consumption", modes == [], modes)
+    check("hold drops a high reserve to 5%", reserves == [5], reserves)
 
 
 # ---------------------------------------------------------------------------

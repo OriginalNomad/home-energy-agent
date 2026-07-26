@@ -451,13 +451,15 @@ If `kWh_needed ≤ 0`: fire `peak_solar_will_cover` (hold — net solar covers t
 
 | Condition | Action |
 |-----------|--------|
-| `hours_to_fill_fast ≥ hours_remaining` | Autonomous NOW — already very tight |
-| `hours_to_fill_slow ≥ hours_remaining` | Autonomous NOW — self_consumption too slow |
-| `hours_to_fill_slow ≥ hours_remaining − 1.0h` | Self_consumption NOW — stop deferring |
+| `hours_to_fill_fast ≥ hours_remaining − FAST_ESCALATE_BUFFER_H` (1.5h) | **Autonomous NOW** (`peak_deadline_autonomous`) — the 5 kW rate's point-of-no-return |
+| else if `hours_to_fill_slow ≥ hours_remaining` | **Gentle self_consumption lead** (`peak_deadline_gentle_lead`) — start charging now at ~1.7 kW, hold the 5 kW option for a later cycle |
+| `hours_to_fill_slow ≥ hours_remaining − 1.0h` (in-sponge branch) | Self_consumption NOW — stop deferring |
 
 Price spread is irrelevant. Demand charge ≈ $100/month ($3.30/day). Paying 5¢/kWh extra on 10 kWh costs 50¢. Always charge — the maths is obvious.
 
-**Implementation note (fixed 2026-06-24):** when `fill_slow ≥ hours_remaining` (self_consumption too slow), the code previously checked `price ≤ forward_min` and used `self_consumption` if prices were flat — but self_consumption physically cannot reach 85% in the available time regardless of price. Fixed: when in deadline urgency, always go `autonomous`. Rule `peak_deadline_autonomous`.
+**Rule 33 — receding-horizon deadline escalation (2026-07-26).** The escalation used to jump straight to `autonomous` (5 kW) the instant `fill_slow ≥ hours_remaining` — i.e. the moment gentle self_consumption could no longer fill the *whole* remaining gap in one shot. On 2026-07-26 that slammed 5 kW at 10:00 with SoC 16% and ~4.9h to the deadline, even though a 5 kW charge fills in <2h (≈3h of slack), and at the worst-informed moment of the day (winter-morning solar credit is ~0 because Solcast over-forecasts mornings ~7×). Fix: escalate to `autonomous` only at the **fast rate's** point-of-no-return — `hours_remaining ≤ fill_fast + FAST_ESCALATE_BUFFER_H`. Below that, lead with a gentle self_consumption charge (`peak_deadline_gentle_lead`) that makes progress while holding the 5 kW option in reserve; every cycle re-evaluates with fresher solar/price/SoC. `FAST_ESCALATE_BUFFER_H` (default **1.5h**) *is* the demand-charge safety margin — it guarantees there is always time to finish at 5 kW even if solar craters. Bigger buffer = escalate earlier (safer, more premature 5 kW); smaller = leaner. Kill-switch `DEADLINE_GENTLE_LEAD = False` reverts to the old straight-to-autonomous behaviour. (Supersedes the 2026-06-24 note below, which made deadline urgency *always* autonomous.)
+
+**Implementation note (fixed 2026-06-24, since superseded by Rule 33):** when `fill_slow ≥ hours_remaining` (self_consumption too slow), the code previously checked `price ≤ forward_min` and used `self_consumption` if prices were flat — but self_consumption physically cannot reach 85% in the available time regardless of price. That fix made deadline urgency always go `autonomous`; Rule 33 refines it to gentle-lead-until-the-fast-point-of-no-return.
 
 Quick checks:
 - Past 12:30pm + battery < 40% + peak month → autonomous immediately
@@ -973,6 +975,19 @@ offset→rate curve from `energy_log.db` `battery_power`.
 **Does NOT govern the HA safety automations.** `battery_low_soc_emergency_charge` sets reserve
 directly and still produces a 5 kW charge when it fires (see Rule 30) — reconciling that is
 separate work.
+
+**A `hold` verdict reverts autonomous mode (fixed 2026-07-26).** Because mode is the rate
+selector, a `hold` must return the battery to `self_consumption`, not just drop the reserve. The
+executor's hold branch previously *only* managed reserve, and its reserve-drop was gated on
+`sensor.powerwall_backup_reserve > 5`. On 2026-07-26 both failed at once: a `hold`/`peak_solar_will_cover`
+verdict inherited `mode=autonomous` from an earlier `peak_deadline_autonomous` charge, and under
+26.18.3 autonomous grid-charges at ~5 kW **regardless of reserve** — so dropping reserve was
+powerless — while the reserve sensor itself read a stale **5%** (true setpoint ~57%), so even the
+reserve drop was skipped. The charge ran until reverted by hand. Fix: on a `hold`, if the current
+mode is not `self_consumption`, command `self_consumption`; and when a revert happens, drop reserve
+to 5% **unconditionally** (do not trust the lagging sensor). In steady state (already
+`self_consumption` at the 5% floor) the hold still sends nothing, avoiding write spam. Covered by
+`test_hold_reverts_autonomous_and_forces_reserve_drop` and companions.
 
 ---
 

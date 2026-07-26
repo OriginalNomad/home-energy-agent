@@ -2290,3 +2290,76 @@ should not fire at 07:00 (Rule 30 confirmation); (2) `price_used_c` vs `price_sp
 `model_params.json` self_consumption should stay ~1.67 (Rule 31 keeps measured power low).
 **No HA config or automation changes this session** — `config/` untouched beyond the already-deployed
 session-19 Sonos block; automation count remains 27 (15 active / 12 disabled).
+
+---
+
+## 2026-07-26 (session 21) — Live incident: expired API key → crash loop → stuck 5 kW autonomous charge; two control fixes
+
+**What the user saw.** Mid-morning on a peak day: battery pinned at reserve=100%, grid-charging at
+5 kW "for no good reason", the agent's own commentary saying it was *holding*, and the manual
+override apparently doing nothing to stop it.
+
+**Root cause — the `ANTHROPIC_API_KEY` had gone invalid (401).** The agent crashes at the LLM
+*narrative* call (`energy_agent.py` ~line 2674) every 30-min cycle. Critically, the deterministic
+executor (`_execute_deterministic_verdict`, ~2576) and the demand-window guard (~2521) both run
+*before* that line, so **control kept running while all post-crash logging died** — `decisions.jsonl`,
+dashboard helpers, HA notifications. That's why there was no 10:30 record and it looked frozen.
+
+**The 10:00 charge itself was legitimate.** The battery had drained to 16% overnight (rode 11–18%
+on `wait_for_cheap_go_hard` — prices never dropped below ~14¢), so at 10:00 `peak_deadline_autonomous`
+correctly fired the 5 kW rescue to make 85% by 2:55pm.
+
+**Why the key fix didn't take at first — cross-device drift.** The user updated the key in the
+**Mac's** `agent/.env`, but the agent runs on the **Pi**, and `.env` is gitignored so it never
+syncs (exactly the hazard in global CLAUDE.md). Fixed by copying just the `ANTHROPIC_API_KEY` line to
+the Pi's `.env` (backup at `~/home-energy-agent/agent/.env.bak`), verified it authenticates, ran a
+clean cycle. The Pi's HA and Tessie tokens were always valid — only Anthropic was broken.
+
+**Why the charge wouldn't stop — two real control bugs.**
+1. **A `hold` never reverts the mode.** The 10:50 verdict was `hold`/`peak_solar_will_cover`, but it
+   inherited `mode=autonomous` from the 10:00 charge, and under firmware 26.18.3 autonomous
+   grid-charges at ~5 kW *regardless of reserve*. The hold branch only managed reserve.
+2. **The hold reserve-drop trusted a stale sensor.** `sensor.powerwall_backup_reserve` read **5%**
+   while the true setpoint was ~57% (gateway sensor confirmed 57), so the `if reserve > 5` guard
+   skipped the drop. The manual override made it worse — it *freezes* commands, so it locked in the
+   charging state rather than stopping it.
+   Diagnosis was empirical: forcing `set_reserve(5)` via Tessie did nothing (5 kW continued);
+   forcing `set_mode(self_consumption)` dropped it 5 kW → 1.7 kW immediately. Mode was the driver.
+   The 11:00 cron then correctly took over: solar had flipped to **poor (44% of forecast)**, so it
+   fired `solar_sponge_floor` → gentle 1.7 kW self_consumption charge toward the peak target. Correct.
+
+**Fixes implemented this session (all with kill-switches + tests, deterministic control path):**
+
+- **Rule 33 — receding-horizon deadline escalation.** `energy_agent.py` deadline branch no longer
+  jumps to autonomous the instant `fill_slow ≥ hours_remaining`. It escalates to autonomous only at
+  the *fast* rate's point-of-no-return (`hours_remaining ≤ fill_fast + FAST_ESCALATE_BUFFER_H`,
+  default **1.5h**); below that it leads with a gentle self_consumption charge
+  (`peak_deadline_gentle_lead`) and re-evaluates each cycle. This is the user's "chase until at least
+  noon, only go hard if actually behind." The buffer is the demand-charge safety margin. Kill-switch
+  `DEADLINE_GENTLE_LEAD`. On today's 10:00/16% case this yields gentle-lead, not 5 kW.
+- **Hold branch reverts autonomous + unconditional reserve drop.** A `hold` now commands
+  `self_consumption` if the current mode isn't already that, and drops reserve to 5%
+  unconditionally when it reverts (no longer trusting the lagging sensor). Steady-state holds still
+  send nothing. This is the direct fix for "stuck in autonomous / override won't stop it."
+- **`energy_rules.md`** updated: Rule 13 table + new Rule 33 block; Rule 31 gains the
+  "hold reverts autonomous" note.
+
+**Tests:** updated `test_peak_deferral_trap_selfcons` (now correctly gentle-leads at 11:30) and added
+6 tests (3 for Rule 33 incl. kill-switch, 3 for the hold-branch revert). **Source of truth is the
+script runner** `python3 test_decision.py` (`check()` doesn't raise, so pytest masks failing checks).
+Totals: **222 decision + 16 optimizer + 11 build_models, 0 failures.**
+
+**NOT done — flagged for next session (robustness, the user's Q3):**
+- **Fault-isolate the LLM call** (highest value): wrap ~line 2674 in try/except so an expired key or
+  Anthropic outage degrades to "no narrative" instead of crashing the agent and killing logging.
+- **Liveness alerting**: heartbeat per successful cycle + external monitor (no cycle in ~40 min →
+  alert; loud if stale going into the demand window).
+- **Silent key-expiry**: startup key-health ping that notifies on 401; consider a non-expiring key.
+- **Single source of truth for secrets** so a key update can't miss the Pi again.
+- **Pi single-point-of-failure**: a coarse always-on fallback in the Tesla app (Time-Based Control)
+  so a dead Pi can't cost a demand charge; UPS/auto-restart.
+
+**Deploy:** committed + pushed to `main` (Pi's 30-min cron pulls agent code; no `deploy_ha_config.sh`
+— no `config/` change). **Watch next low-SoC peak morning:** it should gentle-lead from ~10am and
+only escalate to 5 kW near ~1pm if still behind; and a `hold` after any autonomous charge should
+revert to self_consumption and stop within one cycle.

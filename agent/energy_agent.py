@@ -1165,6 +1165,23 @@ SURVIVAL_FLOOR_TARGET_PCT    = 20   # the gentle top-up aims here (buffer above 
 # spot sample.
 PRICE_USE_30MIN_SLOT = True
 
+# Receding-horizon deadline escalation (Rule 33, 2026-07-26). The peak-month deadline branch
+# used to jump straight to autonomous (5 kW) the instant self_consumption could no longer fill
+# the WHOLE remaining 85% gap in the time left (fill_slow_85 >= hours_to_2_55). On 2026-07-26 that
+# fired at 10:00 with SoC 16% and ~4.9h to the deadline — but a 5 kW charge fills in <2h, so there
+# were ~3h of slack. It slammed 5 kW at the worst-informed moment of the day (morning solar credit
+# is ~0 because Solcast over-forecasts winter mornings ~7×), when gentle self_consumption + midday
+# solar would have made 85% comfortably. Fix: escalate to autonomous only at the FAST rate's
+# point-of-no-return — when hours_to_2_55 <= fill_fast_85 + FAST_ESCALATE_BUFFER_H. Below that,
+# lead with a gentle self_consumption charge (peak_deadline_gentle_lead) that makes progress while
+# holding the 5 kW option in reserve; each cycle re-evaluates with fresher solar/price/SoC. The
+# buffer IS the demand-charge safety margin: it guarantees there is always enough time to finish at
+# 5 kW even if solar craters, so the ~$100/month demand charge stays protected. Bigger buffer =
+# escalate earlier (safer, more premature 5 kW); smaller = leaner. Kill-switch: DEADLINE_GENTLE_LEAD
+# = False reverts to the old straight-to-autonomous behaviour.
+DEADLINE_GENTLE_LEAD   = True
+FAST_ESCALATE_BUFFER_H = 1.5   # go autonomous when hours_to_2_55 <= fill_fast_85 + this
+
 # Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
 # Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
 MODEL_PARAMS_FILE = Path(__file__).parent / "model_params.json"
@@ -1790,10 +1807,22 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                         rec = verdict("charge", 85, "self_consumption", "peak_solar_cover_survival")
                 else:
                     rec = verdict("hold", None, None, "peak_solar_will_cover")
-        elif fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55:
-            # Deadline urgency: self_consumption won't reach 85% in time (or even autonomous
-            # is very tight). Price arbitrage is irrelevant here — the demand charge penalty
-            # (~$100/month) dwarfs any charging cost differential. Always go autonomous.
+        elif DEADLINE_GENTLE_LEAD and fill_fast_85 >= hours_to_2_55 - FAST_ESCALATE_BUFFER_H:
+            # Deadline point-of-no-return: even a 5 kW autonomous charge is now within the safety
+            # buffer of the deadline. Price arbitrage is irrelevant here — the demand charge
+            # penalty (~$100/month) dwarfs any charging cost differential. Go autonomous.
+            rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
+        elif DEADLINE_GENTLE_LEAD and fill_slow_85 >= hours_to_2_55:
+            # Gentle self_consumption alone can't fill the whole remaining gap in time, but a
+            # 5 kW charge still has margin (fill_fast_85 < hours_to_2_55 - buffer). Rather than
+            # slamming 5 kW now (Rule 33), lead with a gentle charge that makes progress and holds
+            # the fast option in reserve; a later cycle escalates to peak_deadline_autonomous at
+            # the point-of-no-return if gentle + solar fall behind. The FAST_ESCALATE_BUFFER_H
+            # margin keeps the demand-window target guaranteed.
+            rec = verdict("charge", 85, "self_consumption", "peak_deadline_gentle_lead")
+        elif not DEADLINE_GENTLE_LEAD and (fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55):
+            # Kill-switch path: old straight-to-autonomous behaviour (escalate the instant
+            # self_consumption can't fill the whole gap in time).
             rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
         elif (now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70):
             rec = verdict("charge", 100, "autonomous", "peak_deadline_quickcheck")
@@ -2398,16 +2427,35 @@ def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str
                     set_powerwall_mode(mode)
                 executed.append(f"set_mode({mode})")
     else:
-        # Hold: ensure reserve is at the 5% floor. Any value above 5% would cause the
-        # Powerwall to charge from grid (if reserve > SoC) or leave a stale reserve set
-        # by a previous agent cycle or HA automation. Drop unconditionally so the hold
-        # verdict is authoritative even when sensor.powerwall_backup_reserve lags the
-        # Tessie API (automation may have set reserve seconds before this cycle ran).
+        # Hold: the battery must not be grid-charging. It can be charging two ways, and a hold
+        # must undo BOTH:
+        #   (1) mode == autonomous — under firmware 26.18.3 autonomous grid-charges at ~5 kW
+        #       regardless of reserve, so dropping reserve alone is powerless. A hold MUST revert
+        #       the mode. (2026-07-26 incident: a `hold`/peak_solar_will_cover verdict left
+        #       mode=autonomous from an earlier deadline charge; the reserve-only cleanup could
+        #       not stop the 5 kW charge and it kept running until reverted by hand.)
+        #   (2) reserve > SoC in self_consumption — the gentle ~1.7 kW top-up toward reserve.
         _batt        = state.get("battery") or {}
         _reserve_now = _batt.get("reserve_pct")
         _soc_now     = _batt.get("soc_pct")
-        if _reserve_now is not None and _reserve_now > 5:
-            print(f"  [det] set_powerwall_reserve(5%) — hold verdict, clearing stale reserve {_reserve_now}% (soc={_soc_now}%)")
+        _mode_now    = _batt.get("mode")
+
+        _reverted_autonomous = False
+        if _mode_now is not None and _mode_now != "self_consumption":
+            print(f"  [det] set_powerwall_mode(self_consumption) — hold verdict, reverting {_mode_now} (soc={_soc_now}%)")
+            if not dry_run:
+                set_powerwall_mode("self_consumption")
+            executed.append(f"set_mode(self_consumption) — hold verdict, reverting {_mode_now}")
+            _reverted_autonomous = True
+
+        # Drop reserve to the 5% floor. Send unconditionally when we just reverted autonomous:
+        # after an autonomous charge the real reserve is high (~100) and
+        # sensor.powerwall_backup_reserve can lag by 50+ points (it read 5% on 2026-07-26 while
+        # the true setpoint was ~57%), so trusting that sensor is exactly what defeated the drop.
+        # Otherwise send only when the best-effort read is above the floor, to avoid a redundant
+        # Tessie write on every routine hold cycle.
+        if _reverted_autonomous or _reserve_now is None or _reserve_now > 5:
+            print(f"  [det] set_powerwall_reserve(5%) — hold verdict, clearing reserve (read={_reserve_now}%, soc={_soc_now}%)")
             if not dry_run:
                 set_powerwall_reserve(5)
             executed.append(f"set_reserve(5%) — hold verdict, clearing reserve {_reserve_now}%")
