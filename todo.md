@@ -78,11 +78,17 @@
 - [ ] 🛡️ **HIGH — agent robustness hardening** (surfaced by the 2026-07-26 incident: an expired
   `ANTHROPIC_API_KEY` crashed the agent at the LLM narrative call every cycle — control survived, but
   logging/notifications went dark and it looked frozen). In priority order:
-  1. **Fault-isolate the LLM call** (`energy_agent.py` ~line 2674): wrap `client.messages.create` in
-     try/except so a bad key or Anthropic outage degrades to "no narrative" and the cycle still writes
-     `decisions.jsonl` / dashboard helpers / notifications. Small, highest-value — prevents the whole
-     failure mode. Control already runs before this line, so only observability is at risk, which makes
-     the silent-failure worse, not better.
+  1. **Fault-isolate the LLM call — DONE 2026-07-28.** The LLM narrative loop is wrapped in try/except;
+     on failure (expired key / outage / network) the cycle no longer crashes — it degrades to the same
+     deterministic `_build_auto_summary` + `log_decision` the Phase-7 routine path uses, so
+     `decisions.jsonl` / dashboard helpers / notifications still get written. Guards: a `_llm_logged`
+     flag prevents a double-write/re-notify if the LLM fails on a *later* turn (after it already logged);
+     the fallback reads `_cycle_context["decision_context"]` (not bare `_ctx`) so the safety-net can't
+     itself NameError if the shadow block failed early. New JSONL field `llm_narrative_failed` marks
+     degraded cycles (feeds the liveness/expiry items below). Verified: 222 decision tests still pass,
+     module imports clean, `_build_auto_summary({})` tolerates a sparse ctx. **Not yet a dedicated unit
+     test of the fallback path** — that needs mocking the whole cycle (Anthropic+HA+Tessie) or a small
+     refactor to extract the loop; deferred (offered).
   2. **Liveness alerting**: heartbeat written each successful cycle + an external monitor
      (Healthchecks.io / UptimeRobot / phone push) that alerts if no cycle completes in ~40 min — loudly
      if stale going into the demand window.

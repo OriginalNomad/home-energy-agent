@@ -2478,3 +2478,26 @@ rotation is the real fix). User regenerated all three; verified live as we went:
 
 Repo working tree now has **no live secret anywhere**; the values still in git *history* are dead post-
 rotation, so the history rewrite stays optional. Not committed/pushed yet (awaiting user go-ahead).
+
+### Robustness #1 — LLM narrative call fault-isolated (2026-07-28)
+
+Directly fixes the 2026-07-26 failure mode: an expired `ANTHROPIC_API_KEY` raised at
+`client.messages.create` every cycle and, because `log_decision()` is called *by the LLM as a tool*,
+the crash killed all post-crash logging (decisions.jsonl / dashboard / notifications) — control was
+fine but the agent looked frozen. Change (`energy_agent.py`, control path untouched):
+- Wrapped the whole LLM narrative `while` loop in try/except. On any failure the cycle degrades to the
+  deterministic `_build_auto_summary` + `log_decision` fallback (same primitives the Phase-7 routine
+  path uses), so the cycle still records itself instead of going dark. Prints a clear
+  `LLM narrative call failed (Type: msg)` to stderr.
+- **Double-write guard:** a `_llm_logged` flag is set when the LLM successfully calls `log_decision`
+  during the loop; the fallback only fires if it hasn't, so a *later-turn* failure (after the narrative
+  already logged) can't duplicate the JSONL row or re-fire notifications.
+- **Scope-safe:** the fallback reads `_cycle_context.get("decision_context") or {}` rather than bare
+  `_ctx` (which is assigned inside the shadow-context try and could be undefined if that block failed),
+  so the safety-net itself can't NameError.
+- New JSONL field **`llm_narrative_failed`** (default False) marks degraded cycles — feeds the
+  liveness-alert / silent-key-expiry follow-ups (robustness #2/#3, still open).
+Verified: `py_compile` OK, module imports clean, **222 decision tests pass** (0 fail),
+`_build_auto_summary({})` returns valid strings on a sparse ctx. No dedicated unit test of the fallback
+path yet (needs full-cycle mocking or a loop-extraction refactor) — deferred. Not deployed yet
+(awaiting go-ahead; Pi cron pulls `main`).

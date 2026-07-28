@@ -830,6 +830,10 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
 
     record = {
         "ts":                   now.isoformat(),
+        # True only on cycles where the LLM narrative call failed and this row was written by
+        # the deterministic fallback (2026-07-28 robustness hardening). Lets a liveness monitor
+        # / analyst distinguish "agent degraded" cycles from normal ones.
+        "llm_narrative_failed": _cycle_context.get("llm_narrative_failed", False),
         "soc":                  battery.get("soc_pct"),
         "reserve_before":       battery.get("reserve_pct"),
         "mode_before":          battery.get("mode"),
@@ -2719,64 +2723,95 @@ def run_agent(dry_run: bool = False):
     # System prompt as a cacheable content block — static content cached across turns
     system_prompt_block = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
 
-    while True:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=2048,
-            system=system_prompt_block,
-            tools=TOOLS,
-            messages=messages,
-            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
-        )
+    # Fault-isolate the LLM narrative loop. The deterministic control path already ran
+    # (above), so an LLM failure here (expired ANTHROPIC_API_KEY, Anthropic outage, network)
+    # threatens only observability — but critically, log_decision() is called BY the LLM as a
+    # tool, so a crash here means decisions.jsonl / dashboard helpers / notifications never get
+    # written and the agent LOOKS frozen though control is fine (the 2026-07-26 incident).
+    # On failure we degrade to the same deterministic auto-summary the Phase-7 routine path uses.
+    _llm_logged = False   # did the LLM successfully call log_decision this cycle?
+    try:
+        while True:
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=2048,
+                system=system_prompt_block,
+                tools=TOOLS,
+                messages=messages,
+                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+            )
 
-        messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant", "content": response.content})
 
-        # Accumulate token usage — track cache hits separately for accurate cost calculation
-        _cycle_context["input_tokens"]        = _cycle_context.get("input_tokens", 0)        + response.usage.input_tokens
-        _cycle_context["output_tokens"]       = _cycle_context.get("output_tokens", 0)       + response.usage.output_tokens
-        _cycle_context["cache_read_tokens"]   = _cycle_context.get("cache_read_tokens", 0)   + getattr(response.usage, "cache_read_input_tokens", 0)
-        _cycle_context["cache_write_tokens"]  = _cycle_context.get("cache_write_tokens", 0)  + getattr(response.usage, "cache_creation_input_tokens", 0)
+            # Accumulate token usage — track cache hits separately for accurate cost calculation
+            _cycle_context["input_tokens"]        = _cycle_context.get("input_tokens", 0)        + response.usage.input_tokens
+            _cycle_context["output_tokens"]       = _cycle_context.get("output_tokens", 0)       + response.usage.output_tokens
+            _cycle_context["cache_read_tokens"]   = _cycle_context.get("cache_read_tokens", 0)   + getattr(response.usage, "cache_read_input_tokens", 0)
+            _cycle_context["cache_write_tokens"]  = _cycle_context.get("cache_write_tokens", 0)  + getattr(response.usage, "cache_creation_input_tokens", 0)
 
-        if response.stop_reason == "end_turn":
-            break
+            if response.stop_reason == "end_turn":
+                break
 
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
+            if response.stop_reason == "tool_use":
+                tool_results = []
+                for block in response.content:
+                    if block.type != "tool_use":
+                        continue
 
-                name  = block.name
-                args  = block.input or {}
-                is_write = name.startswith("set_") or name == "log_decision"
+                    name  = block.name
+                    args  = block.input or {}
+                    is_write = name.startswith("set_") or name == "log_decision"
 
-                print(f"→ {name}({_args_summary(args)})")
+                    print(f"→ {name}({_args_summary(args)})")
 
-                det_noop = DETERMINISTIC_AUTHORITATIVE and name.startswith("set_") and name != "log_decision"
-                if dry_run and is_write:
-                    result = f"[dry-run] {name} skipped"
-                elif det_noop:
-                    result = f"[deterministic-authoritative] {name} ignored — rule layer already acted"
-                    print(f"  (no-op: deterministic mode)")
-                else:
-                    try:
-                        result = TOOL_MAP[name](args)
-                    except Exception as exc:
-                        result = f"ERROR: {exc}"
-                        print(f"  !! {result}", file=sys.stderr)
+                    det_noop = DETERMINISTIC_AUTHORITATIVE and name.startswith("set_") and name != "log_decision"
+                    if dry_run and is_write:
+                        result = f"[dry-run] {name} skipped"
+                    elif det_noop:
+                        result = f"[deterministic-authoritative] {name} ignored — rule layer already acted"
+                        print(f"  (no-op: deterministic mode)")
+                    else:
+                        try:
+                            result = TOOL_MAP[name](args)
+                        except Exception as exc:
+                            result = f"ERROR: {exc}"
+                            print(f"  !! {result}", file=sys.stderr)
 
-                print(f"  ← {json.dumps(result)[:120]}")
-                tool_results.append({
-                    "type":        "tool_result",
-                    "tool_use_id": block.id,
-                    "content":     json.dumps(result),
-                })
+                    # Record a successful narrative log so the except-handler below won't
+                    # double-write the JSONL row / re-notify if the LLM fails on a LATER turn.
+                    if name == "log_decision" and not (isinstance(result, str) and result.startswith("ERROR")):
+                        _llm_logged = True
 
-            messages.append({"role": "user", "content": tool_results})
-        else:
-            break   # unexpected stop reason
+                    print(f"  ← {json.dumps(result)[:120]}")
+                    tool_results.append({
+                        "type":        "tool_result",
+                        "tool_use_id": block.id,
+                        "content":     json.dumps(result),
+                    })
 
-    print("\nCycle complete.")
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                break   # unexpected stop reason
+
+        print("\nCycle complete.")
+    except Exception as exc:
+        # Control already executed; only the narrative failed. Write the deterministic
+        # fallback so the cycle still records itself — unless the LLM already logged before
+        # failing (a later-turn error), which would otherwise double-write and re-notify.
+        print(f"  !! LLM narrative call failed ({type(exc).__name__}: {exc}) — "
+              f"writing deterministic fallback summary", file=sys.stderr)
+        if not _llm_logged:
+            _cycle_context["llm_narrative_failed"] = True
+            try:
+                # decision_context mirrors _ctx but via _cycle_context so this never NameErrors
+                # even if the shadow-context block above failed before _ctx was assigned.
+                _fb_ctx = _cycle_context.get("decision_context") or {}
+                _fb_bat, _fb_ev = _build_auto_summary(_fb_ctx)
+                _fb_actions = _det_executed_actions or ["hold — no change needed"]
+                log_decision(_fb_bat, _fb_actions, _fb_ev)
+            except Exception as exc2:
+                print(f"  !! deterministic fallback summary also failed: {exc2}", file=sys.stderr)
+        print("\nCycle complete (LLM degraded — deterministic fallback logged).")
 
 
 # ---------------------------------------------------------------------------
