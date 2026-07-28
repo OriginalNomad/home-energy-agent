@@ -66,6 +66,12 @@ TESSIE_SITE_ID = os.environ.get("TESSIE_SITE_ID", "2252120180790091")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # set via agent/.env
 
+# Optional liveness dead-man's-switch (Healthchecks.io or any ping-URL service). The agent
+# pings this on each completed cycle; the external monitor alerts if the pings STOP (Pi down,
+# cron broken, crash-loop) — the one failure mode nothing on the Pi can self-report. Unset =
+# disabled (no-op). Lives in the Pi's agent/.env only.
+HEALTHCHECK_URL = os.environ.get("HEALTHCHECK_URL", "")
+
 LOG_FILE   = Path(__file__).parent / "agent_decisions.log"
 JSONL_FILE = Path(__file__).parent / "decisions.jsonl"
 
@@ -3041,6 +3047,36 @@ def _args_summary(args: dict) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _send_heartbeat(suffix: str = "", body: str = "") -> None:
+    """Ping the liveness dead-man's-switch so an external monitor alerts if cycles stop.
+
+    Monitor-agnostic (any ping-URL service; recommended: Healthchecks.io). No-op when
+    HEALTHCHECK_URL is unset, and NEVER raises — liveness reporting must not affect the
+    control cycle. suffix: "" = success/up, "/fail" = hard failure.
+    """
+    if not HEALTHCHECK_URL:
+        return
+    try:
+        requests.post(HEALTHCHECK_URL.rstrip("/") + suffix,
+                      data=body.encode("utf-8")[:10000], timeout=8)
+    except Exception as exc:
+        print(f"  (heartbeat ping failed, non-fatal: {exc})", file=sys.stderr)
+
+
 if __name__ == "__main__":
     dry = "--dry-run" in sys.argv
-    run_agent(dry_run=dry)
+    try:
+        run_agent(dry_run=dry)
+    except Exception as exc:
+        # Cycle failed hard (control-path exception, HA totally unreachable, ...). Signal the
+        # external monitor so it can alert, then re-raise so the crash stays visible in logs/cron.
+        if not dry:
+            _send_heartbeat("/fail", f"run_agent crashed: {type(exc).__name__}: {exc}")
+        raise
+    else:
+        # Cycle completed — including LLM-degraded cycles, which now return normally (robustness
+        # #1). Ping success so the dead-man's-switch stays satisfied; tag degraded cycles in the
+        # body for visibility on the monitor. Skipped for --dry-run (manual test, not production).
+        if not dry:
+            _degraded = bool(_cycle_context.get("llm_narrative_failed"))
+            _send_heartbeat("", "degraded: llm_narrative_failed" if _degraded else "ok")

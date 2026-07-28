@@ -89,9 +89,17 @@
      module imports clean, `_build_auto_summary({})` tolerates a sparse ctx. **Not yet a dedicated unit
      test of the fallback path** — that needs mocking the whole cycle (Anthropic+HA+Tessie) or a small
      refactor to extract the loop; deferred (offered).
-  2. **Liveness alerting**: heartbeat written each successful cycle + an external monitor
-     (Healthchecks.io / UptimeRobot / phone push) that alerts if no cycle completes in ~40 min — loudly
-     if stale going into the demand window.
+  2. **Liveness alerting — agent side DONE 2026-07-28 (Healthchecks.io chosen).** The agent pings a
+     dead-man's-switch on every completed cycle via `_send_heartbeat()` (monitor-agnostic ping URL;
+     no-op if `HEALTHCHECK_URL` unset; never raises). Entrypoint wraps `run_agent`: success ping on
+     normal return (body `ok`, or `degraded: llm_narrative_failed` on an LLM-degraded cycle), `/fail`
+     ping if `run_agent` raises. Skipped for `--dry-run`. **Alert cadence is set on the check, not in
+     code** — recommended period 30 min, grace ~2 h (≈4 missed cycles) per the user's "don't hair-trigger"
+     preference. **User setup still needed:** create the free Healthchecks.io check, pick an alert
+     channel, add its ping URL to the Pi's `agent/.env` as `HEALTHCHECK_URL`. **Deferred follow-on:** a
+     tighter HA-side staleness check *during* the 3–9pm demand-window run-up (a relaxed grace could
+     alert after 2:55pm) — the "loudly going into the demand window" piece; the user called it an edge
+     case for now.
   3. **Silent key-expiry**: startup key-health ping that notifies on 401; consider a non-expiring key +
      billing alert.
   4. **Single source of truth for secrets** — **DECIDED + DOCUMENTED 2026-07-28: the Pi is canonical.**

@@ -2501,3 +2501,22 @@ Verified: `py_compile` OK, module imports clean, **222 decision tests pass** (0 
 `_build_auto_summary({})` returns valid strings on a sparse ctx. No dedicated unit test of the fallback
 path yet (needs full-cycle mocking or a loop-extraction refactor) — deferred. Not deployed yet
 (awaiting go-ahead; Pi cron pulls `main`).
+
+### Robustness #2 (agent side) — liveness heartbeat / dead-man's-switch (2026-07-28)
+
+The one failure mode nothing on the Pi can self-report is the Pi (or cron, or the whole process) dying —
+HA can't alert about its own host being down. So the agent now pings an external dead-man's-switch each
+cycle; the monitor alerts when the pings STOP. Monitor: **Healthchecks.io** (user's choice).
+- `_send_heartbeat(suffix, body)` in `energy_agent.py`: POSTs `HEALTHCHECK_URL + suffix` (8s timeout),
+  no-op if the env var is unset, wrapped so it can NEVER raise into the cycle. `requests` already imported.
+- Entrypoint (`__main__`) wraps `run_agent`: on normal return → success ping (`ok`, or
+  `degraded: llm_narrative_failed` when the LLM fallback fired this cycle); on exception → `/fail` ping
+  then re-raise so the crash still surfaces in cron/logs. `--dry-run` never pings (manual test ≠ prod).
+- **Cadence decision (user):** keep pinging every cycle (cheap, fine-grained last-seen); set the ALERT
+  threshold on the Healthchecks check, not in code — recommended period 30 min / grace ~2 h (~4 missed
+  cycles). Rationale: don't hair-trigger on a single missed 30-min cycle; a dead agent is an edge case.
+- **Trade-off noted, deferred:** a relaxed grace can alert *after* the 2:55pm reserve reset. A tighter
+  HA-side staleness check during the 3–9pm run-up ("loudly into the demand window") is the follow-on.
+Verified: py_compile OK; `HEALTHCHECK_URL` unset → true no-op (no network); a bad URL is caught (prints
+non-fatal warning, no raise); 222 decision tests pass. **User setup pending:** create the Healthchecks
+check + add `HEALTHCHECK_URL` to the Pi's `agent/.env`. Not committed yet (awaiting go-ahead).
