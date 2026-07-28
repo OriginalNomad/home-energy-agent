@@ -21,7 +21,27 @@
   curve from `charge_offset_pts`) and the architecture roadmap (LP divergence, analyst agent, savings
   dashboard).
 
-- [ ] 🔐 **HIGH — rotate the secrets that were in git history, then finish the config scrub** (2026-07-26).
+- [x] 🔐 **HIGH — rotate the three live keys + finish the config scrub — DONE 2026-07-28.**
+  All three rotated by the user and verified live; the config `!secret` migration is deployed. Details:
+  - **HA long-lived token** — regenerated, `.env` (Pi) updated, old revoked. Verified: `GET /api/` → 200.
+  - **Solcast key** — regenerated + reconfigured in HA. Verified: `sensor.solcast_pv_forecast_*` all
+    fresh (updated 1 min ago, `api_used` reset), same entity ids.
+  - **Tessie token** — regenerated (tessie.com → Settings → Developer); updated in **both** Pi stores
+    (`agent/.env` `TESSIE_TOKEN` raw, and `secrets.yaml` `tessie_bearer: "Bearer …"`). Config migrated:
+    the 4 `configuration.yaml` headers now use `!secret tessie_bearer` (0 inline tokens), deployed via
+    `./deploy_ha_config.sh`, then `rest.reload` + `rest_command.reload` (a plain deploy-reload does NOT
+    reload those domains). Verified all three paths: agent `.env` token → Tessie live_status 200;
+    HA read → `sensor.tessie_powerwall_charge` = 32; HA write → `rest_command.powerwall_set_backup_reserve`
+    no-op → 200 (the exact 2:55pm safety call). Zero config drift after deploy.
+  - **The historical copies in git are now worthless** (rotation done) — history rewrite stays optional.
+  - **Secrets now single-source on the Pi** (see robustness #4): Mac `.env` bannered dev-only,
+    `.env.example` + CONTEXT updated.
+  - Still optional (low priority): regenerate the HA backup **encryption key** + Tesla Powerwall
+    installer passcodes (were in the deleted PNGs); the git-history rewrite for the 8 stale `claude/*`
+    branches. Neither blocks anything now that the live keys are rotated.
+
+- [x] ~~🔐 **HIGH — rotate the secrets that were in git history, then finish the config scrub** (2026-07-26).~~
+  *(superseded by the DONE entry above — original detail retained below for the record.)*
   Secret-bearing files (4 PNGs) and hardcoded tokens had been committed/pushed to GitHub, so per the
   global rule they are **compromised — rotation is the real fix**, not just removal.
   - **Working tree scrubbed 2026-07-26** (this session, no force-push, Pi untouched): removed the
@@ -68,9 +88,13 @@
      if stale going into the demand window.
   3. **Silent key-expiry**: startup key-health ping that notifies on 401; consider a non-expiring key +
      billing alert.
-  4. **Single source of truth for secrets** so a key update can't miss the Pi again (the user edited the
-     Mac's `.env`; the agent runs on the Pi; `.env` is gitignored so it never synced). Options: keep
-     secrets only on the Pi, or a deploy step that scp's `.env` to the Pi.
+  4. **Single source of truth for secrets** — **DECIDED + DOCUMENTED 2026-07-28: the Pi is canonical.**
+     Production secrets live only in `energypi.local:~/home-energy-agent/agent/.env`; the Mac's `.env` is
+     dev-only and now carries a DEV-ONLY banner; `agent/.env.example` + CONTEXT.md "Secrets" spell out the
+     model. This closes the incident's root cause (edited Mac, agent runs on Pi). *Optional future nicety
+     (not built):* a small Pi helper to derive HA's `secrets.yaml` `tessie_bearer` from `.env`'s
+     `TESSIE_TOKEN`, so a Tessie rotation is one edit instead of two — deferred (secrets.yaml is
+     root-owned; not worth injecting into the live rotation path today).
   5. **Pi single-point-of-failure**: a coarse always-on fallback in the Tesla app (Time-Based Control /
      a reserve schedule) so a dead Pi can't cost a demand charge; UPS / auto-restart.
 
@@ -82,6 +106,23 @@
   peak-day eve, top up gently overnight when the cheapest available slot is still above threshold, rather
   than riding the floor. Check the `wait_for_cheap_go_hard` overnight cycles against the actual morning
   charge cost before changing anything.
+
+- [ ] **MEDIUM — `survival_floor_defend` is price-blind; the LP handles the spike better**
+  (surfaced 2026-07-28). On 07-28 the battery rode to ~10% and a morning price spike hit (34¢ realised
+  at 07:30, forecast **36¢** at the 07:00 cycle). Rule 30's `survival_floor_defend` is *reactive and
+  price-blind* — it topped up **at the 34¢ peak** because it only looks at SoC ≤ 12%, never the forward
+  price. The LP shadow got it right: at the 07:00 cycle it fired `mpc_charge_grid` (target 24%, 2.95 kW)
+  to **pre-charge across the spike** one slot before it landed. A human would do the same — buy the
+  survival minimum at the cheapest pre-spike slot (~05:00/14¢) instead of at the peak.
+  **Just collecting data points this week — no change yet.** Watch `survival_floor_defend` cycles vs the
+  LP's `optimizer_verdict` on low-SoC mornings; note each time the rule buys at a local spike the LP
+  avoided. Caveats to keep in mind: (i) the LP charged at 07:00/22¢, not 05:00/14¢, because its floor is
+  5% and it cuts survival fine — a higher floor / the `risk` knob would make it buy earliest-and-cheapest;
+  (ii) the LP is *not* uniformly better — on flat-price peak mornings (e.g. 07-26) it held too long and
+  would have missed the deadline. **Two fix options when we act:** (a) *incremental* — make Rule 30
+  forward-price-aware (defend the floor at the cheapest look-ahead slot before the projected breach; don't
+  top up *at* a spike if the floor won't breach before a cheaper slot); (b) *structural* — hand
+  survival/spike timing to the LP (the Phase-5 / LP-to-control direction). See energy_log 2026-07-28.
 
 - [x] **#2 (from the incident) — a `hold` must revert autonomous mode — DONE 2026-07-26.** The hold
   branch of `_execute_deterministic_verdict` now commands `self_consumption` if the current mode isn't
@@ -166,6 +207,7 @@
   | 2026-07-24 | `battery_max_insurance_floor_pct` | 0 | 30 | drifted back to 0 (set 30% on 07-23); 6 out-of-band violations, clamped to band floor 20. Operationally inert (dormant until April) but confirms drift isn't gone — it moved to a *different*, non-EV helper. Note: no `initial:`, so 0 = HA's default-to-min for an untouched helper → suggests the helper isn't persisting rather than being actively written |
   | 2026-07-25 | all seven helpers | stable, in band | — | **Clean night.** `max_insurance_floor_pct`=30 (held, was 0 yesterday), `ev_min_soc_pct`=30, `ev_ultra_cheap_c`=10, `ev_standard_price_c`=15, `ev_min_charge_price_c`=40, `ev_charge_target_pct`=100, `ev_departure_target_pct`=95. Zero violations across all 20 overnight cycles. Nothing reset. |
   | 2026-07-26 | all seven helpers | stable, in band | — | **Clean night.** 0 `settings_violations` across the overnight cycles; all seven in-band. `ev_charge_target_pct`=90 (was 100 on 07-25 — in-band, presumed deliberate), `ev_min_soc_pct`=30, `max_insurance_floor_pct`=30, rest steady. Nothing reset. |
+  | 2026-07-28 | all seven helpers | stable, in band | — | **Clean night (4th consecutive).** 0 `settings_violations` across 27 overnight cycles (20:00 07-27 → 10:00 07-28). All seven in-band and unchanged: `ev_charge_target_pct`=90, `ev_departure_target_pct`=95, `ev_min_charge_price_c`=40, `ev_min_soc_pct`=30, `ev_standard_price_c`=15, `ev_ultra_cheap_c`=10, `max_insurance_floor_pct`=30. (No 07-27 morning row was logged.) Nothing reset. |
 
 - [x] **Confirm the `SETTINGS_SPEC` values and bands** — resolved 2026-07-23.
   The spec no longer holds *any* target values: it is `(alias, lo, hi)` bands only, because the HA

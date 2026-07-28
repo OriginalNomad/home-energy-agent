@@ -85,12 +85,27 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 - Instantaneous `load_power` spiked from stove/kettle and distorted the solar shortfall forecast
 - 30-min rolling average (HA statistics platform) used in grid charge target and forecast card
 
+**Secrets — single source of truth is the Pi (established 2026-07-28):**
+- The agent runs on the Pi, so **production secrets live in exactly one place:**
+  `energypi.local:~/home-energy-agent/agent/.env`. Rotate/update keys there
+  (`ssh -t energypi.local nano ~/home-energy-agent/agent/.env`). The **Mac's `agent/.env` is
+  DEV-ONLY** (only `ANTHROPIC_API_KEY`, for local script runs) and now carries a banner saying so —
+  editing it does **not** change what the running agent uses. That Mac/Pi mismatch is exactly what
+  caused the 2026-07-26 key-expiry outage. `.env` is gitignored; `agent/.env.example` documents the
+  model. Full-line `#` comments are safe in `.env`; avoid inline comments after a value.
+
 **Tessie API credentials:**
+- Regenerate the token at **tessie.com → Settings → Developer** (regenerating kills the old token
+  immediately — see the two-file update + `!secret` deploy in `todo.md`).
 - Energy site ID: `2252120180790091` (an identifier, not a secret)
-- Token: lives in **`agent/.env`** (`TESSIE_TOKEN`) for the agent. **Scrubbed from the code 2026-07-26** —
-  `energy_agent.py`/`push_virtual_sensors.py` no longer carry hardcoded defaults. ⚠️ Still inline in
-  `config/configuration.yaml` (`rest_command:` headers) because HA can't read `.env`; migrate to
-  `!secret` when the Tessie token is rotated (see `todo.md`).
+- Token lives in **two** files on the Pi (both need the new value on rotation): the agent reads
+  `TESSIE_TOKEN` from `agent/.env`; HA reads `tessie_bearer` from the **root-owned**
+  `~/homeassistant/config/secrets.yaml` (`tessie_bearer: "Bearer <token>"`, edit with `sudo nano`).
+  `config/configuration.yaml`'s 4 rest headers (2 `rest:` sensors + `powerwall_set_backup_reserve` +
+  `powerwall_set_mode`) reference `!secret tessie_bearer` — **no token inline** (migrated + deployed
+  2026-07-28 during the Tessie rotation; code scrubbed 2026-07-26). After a token change, HA's `rest:`
+  sensors and `rest_command:` need `rest.reload` + `rest_command.reload` (or an HA restart) to pick up
+  the new secret — a plain `deploy_ha_config.sh` reload does *not* cover those two domains.
 - Endpoints: `POST /api/1/energy_sites/{id}/backup` with `{"backup_reserve_percent": N}`
 
 **Solcast credentials:**

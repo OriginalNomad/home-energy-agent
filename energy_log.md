@@ -2371,3 +2371,110 @@ SoC **81%** and at 17:21 the battery was covering the whole house load from stor
 +920 W (discharging), grid ~0 W (**zero import**), reserve at 5%. No demand-charge risk. Rule 30's
 12% floor held overnight and `battery_low_soc_emergency_charge` did not fire. Slider check: 0
 violations, all 7 helpers in-band.
+
+## 2026-07-28 (morning review — read-only)
+
+`/morning` run against the **live Pi** (Mac's `decisions.jsonl`/`daily_energy.jsonl` are stale, end
+07-Jun; analysis used `energypi.local` — 2,989 cycles, current to 09:00). No code changes.
+
+- **Peak day (July); battery rode to ~10–12% overnight again** (3rd morning running). Rule 33
+  gentle-lead is live: 09:00 fired `peak_deadline_gentle_lead` at SoC 10 / 10¢. Watching it reach
+  85% by 2:55pm without an early 5 kW burst. 07:30 price spike to **34¢** met by `survival_floor_defend`
+  (Rule 30) — emergency automation did **not** fire. The overnight `wait_for_cheap_go_hard` strategy
+  leaving it near-empty on a peak day is the standing MEDIUM todo.
+- **Three-way (last 48h, ~100 cycles):** LLM↔det 99/100 (tautological post-cutover), LLM↔opt 83/100,
+  opt↔det **82/100**. All 14 divergences are LP-holds while rules charge. 07-27 solar over-delivered
+  (LP hold defensible, cause c). **07-26 & 07-28 solar poor/unreliable yet LP still `mpc_hold`,
+  `grid_charge_now=0`, SoC 10–16%, projecting 23–66 kWh import** — deferring all charging to the last
+  feasible slot under flat winter prices with no margin; rules correctly charged (07-26 recovered to
+  81%). LP still not a cutover candidate — needs the risk knob / conservative solar quantile, and a
+  check that the demand-window penalty is landing in the horizon. Det stays authoritative.
+- **Journal (07-27):** PASS, min SoC 53%, 87% by 3pm, net 83¢. Schema gaps flagged (not built):
+  autonomous-mode event timing/energy, intraday forecast evolution, an EV block (EV unplugged 07-27
+  so not relevant yesterday, but a standing gap). Weather not suggested (no sensors).
+- **Architecture:** Layer-1 logger healthy (`observations` 2,486 rows, ~52 days; `price_forecasts` 94k).
+  Models rebuilt nightly (`built_at 07-28`, 51 obs-days). `self_consumption` held ~1.67 kW — the 07-22
+  5 kW regime did **not** sustain; Rule 31 gentle-charge is keeping measured power ~1.6 kW as designed,
+  so the "watch for flip to 5 kW" item resolves as *no flip, Rule 31 working*. `autonomous` populated
+  (5.0 kW → 4.05@80 / 0.97@90). In Phase 4; advancement blocked on LP quality, not data.
+- **Slider drift: clean night #4** — 0 violations / 27 cycles, all 7 helpers in-band (logged in todo).
+- **Secrets rotation (Tessie/HA/Solcast) still outstanding** — HIGH, user action.
+
+### Rule 31 gentle-charge — confirmed working (user observation, 2026-07-28)
+
+User confirms the reserve-offset controller is behaving as intended: setting reserve only a little
+above current SoC makes the battery **slow-charge** rather than slamming 5 kW. Matches this morning's
+model read — `self_consumption` holds ~1.67 kW across 0–50% SoC (Rule 31 chasing `reserve = SoC + 6`,
+not the 26.18.3 5 kW pull). Good outcome. **Monitoring over the next week** to confirm the
+cycle-average stays ~1.6–1.7 kW while the controller is active (the session-20 watch item: if
+`build_models` ever reports it high, add a fill-time clamp so the deadline budget can't under-count
+charging time).
+
+### Survival-floor defense is price-blind — the LP got the spike right (2026-07-28)
+
+User observed the battery hit ~10% and gently charged at 05:30, 07:30 and 09:00 — the correct
+*pattern*, but a human would have looked forward, seen the 07:30 price spike (34¢ realised, forecast
+**36¢** at 07:00), and pre-charged earlier to cross it without buying at the peak. Asked whether the LP
+would do better.
+
+**Answer from the shadow log: yes, and it did.** At the **07:00** cycle the LP fired
+`mpc_charge_grid` (target 24%, 2.95 kW) — pre-charging across the spike it saw one slot ahead — while
+the rule layer held (`wait_for_cheap_go_hard`) and then bought at the **34¢** peak at 07:30 via
+`survival_floor_defend`. Root cause: **Rule 30 (`survival_floor_defend`) is reactive and price-blind**
+— it tops up whenever SoC ≤ 12% regardless of the forward price, so it can (and did) buy at a spike.
+The LP's cost-min-over-horizon naturally pre-charges before a spike.
+
+Caveats logged: (1) the LP charged at 07:00/22¢, not 05:00/14¢, because its floor is 5% and it saw no
+breach until ~08:00 — so the *human* strategy (higher buffer, buy at the genuinely cheapest pre-spike
+slot) is marginally cheaper than the current LP; raising the LP floor / adding the `risk` knob would
+close that. (2) The LP is not uniformly better — on 07-26 (flat prices, poor solar, peak day) it held
+too long and would have missed the deadline. LP shines with a price signal, flounders on flat days.
+
+Dollar impact this morning ~10¢ (≈0.8 kWh at 34¢ vs ~15¢) — minor, but scales with spike size.
+
+**Two fix options (not yet actioned — user's call):**
+(a) *Incremental* — make Rule 30 forward-price-aware: defend the floor by charging at the cheapest
+    slot in the look-ahead before the projected breach; don't top up *at* a spike if the floor won't
+    breach before a cheaper slot. Stays in the rule layer.
+(b) *Structural* — hand survival/spike-timing to the LP (Phase 5 direction); the 07:00 charge shows it
+    already solves this.
+
+### Secrets single-source-of-truth — Pi is canonical (2026-07-28)
+
+Robustness item #4. Root cause of the 2026-07-26 outage was two unsynced `.env` copies: the user
+updated the **Mac's** `.env`, but the agent runs on the **Pi**, and `.env` is gitignored so it never
+synced. Decision + docs (no live-system change):
+- **The Pi's `~/home-energy-agent/agent/.env` is the single source of truth** for production secrets.
+  Confirmed the Mac's `.env` holds only `ANTHROPIC_API_KEY` while the Pi's holds all five
+  (`ANTHROPIC_API_KEY`, `HA_URL`, `HA_TOKEN`, `TESSIE_TOKEN`, `TESSIE_SITE_ID`).
+- Added a **DEV-ONLY banner** to the Mac's `.env` (full-line `#` comments, no key value touched/echoed).
+- Rewrote tracked **`agent/.env.example`** to state the Pi-canonical model + the two Tessie stores.
+- Updated **CONTEXT.md** with a "Secrets — single source of truth is the Pi" block; corrected the
+  Tessie section (token is inline in `configuration.yaml` *pending* the rotation, not yet migrated).
+- Noted operational detail: Pi `secrets.yaml` is **root-owned** → `sudo nano` for the Tessie step.
+Optional future nicety (deferred): a Pi helper to derive HA's `tessie_bearer` from `.env` so a Tessie
+rotation is one edit, not two — not worth adding to today's live rotation path (peak day, root-owned file).
+
+### All three live keys rotated + Tessie `!secret` migration deployed (2026-07-28)
+
+Closed the security exposure from the 2026-07-26 scrub (keys were compromised in git history →
+rotation is the real fix). User regenerated all three; verified live as we went:
+- **HA long-lived token** — Pi `.env` `HA_TOKEN` (183 chars). Verified `GET /api/` → 200; old revoked.
+  Method note: nano rendered blank over `ssh -t`, and `read -rsp` failed on the Mac's zsh — switched to
+  a no-echo `read -rs` + stdin→python line-replace run **on the Pi** (secrets never touched chat).
+  Also caught the user editing the **Mac's** `.env` (the 07-26 trap) — production `.env` is on the Pi.
+- **Solcast key** — regenerated + reconfigured in HA. `sensor.solcast_pv_forecast_*` all fresh, same
+  entity ids, `api_used` reset. Agent reads Solcast only via these sensors → done.
+- **Tessie token** (tessie.com → Settings → Developer) — 32 chars, updated in **both** Pi stores:
+  `agent/.env` `TESSIE_TOKEN` (raw) and root-owned `secrets.yaml` `tessie_bearer: "Bearer …"` (via
+  `sudo -v` then `sudo python3` stdin replace). Migrated `configuration.yaml`'s 4 headers
+  (2 `rest:` sensors + `powerwall_set_backup_reserve` + `powerwall_set_mode`) from inline `Bearer` to
+  `!secret tessie_bearer` (0 inline tokens left), deployed with `./deploy_ha_config.sh`.
+  **Gotcha logged:** the deploy's reload covers input_*/template/automation but **not** `rest:` /
+  `rest_command:` — `sensor.tessie_powerwall_charge` read `unknown` until I called `rest.reload` +
+  `rest_command.reload`. Then verified all three paths: agent token → Tessie `live_status` 200 (SoC 31.8);
+  HA read → `tessie_powerwall_charge` = 32; HA write → `powerwall_set_backup_reserve(34)` no-op → 200
+  (the exact call the 2:55pm safety automation makes), reserve unchanged. Zero config drift after deploy.
+
+Repo working tree now has **no live secret anywhere**; the values still in git *history* are dead post-
+rotation, so the history rewrite stays optional. Not committed/pushed yet (awaiting user go-ahead).

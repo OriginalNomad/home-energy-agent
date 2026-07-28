@@ -378,7 +378,7 @@ template:
 rest:
   - resource: "https://api.tessie.com/api/1/energy_sites/2252120180790091/site_info"
     headers:
-      Authorization: "Bearer REDACTED_TOKEN"
+      Authorization: !secret tessie_bearer
     scan_interval: 120
     sensor:
       - name: "Tessie Powerwall Info"
@@ -392,7 +392,7 @@ rest:
   # Live status — true SoC from cloud, not floor-clipped by reserve like the local gateway
   - resource: "https://api.tessie.com/api/1/energy_sites/2252120180790091/live_status"
     headers:
-      Authorization: "Bearer REDACTED_TOKEN"
+      Authorization: !secret tessie_bearer
     scan_interval: 120
     sensor:
       - name: "Tessie Powerwall Charge"
@@ -407,7 +407,7 @@ rest_command:
     url: "https://api.tessie.com/api/1/energy_sites/2252120180790091/backup"
     method: POST
     headers:
-      Authorization: "Bearer REDACTED_TOKEN"
+      Authorization: !secret tessie_bearer
       "Content-Type": "application/json"
     payload: '{"backup_reserve_percent": {{ percent | int }}}'
 
@@ -415,7 +415,7 @@ rest_command:
     url: "https://api.tessie.com/api/1/energy_sites/2252120180790091/operation"
     method: POST
     headers:
-      Authorization: "Bearer REDACTED_TOKEN"
+      Authorization: !secret tessie_bearer
       "Content-Type": "application/json"
     payload: '{"default_real_mode": "{{ mode }}"}'
 
