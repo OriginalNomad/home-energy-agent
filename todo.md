@@ -95,8 +95,11 @@
      normal return (body `ok`, or `degraded: llm_narrative_failed` on an LLM-degraded cycle), `/fail`
      ping if `run_agent` raises. Skipped for `--dry-run`. **Alert cadence is set on the check, not in
      code** — recommended period 30 min, grace ~2 h (≈4 missed cycles) per the user's "don't hair-trigger"
-     preference. **User setup still needed:** create the free Healthchecks.io check, pick an alert
-     channel, add its ping URL to the Pi's `agent/.env` as `HEALTHCHECK_URL`. **Deferred follow-on:** a
+     preference. **User setup DONE 2026-07-28:** Healthchecks.io check created; ping URL
+     (`hc-ping.com/b7f45e84-…`) added to the Pi's `agent/.env`; test ping verified HTTP 200/"OK" (check
+     is "up"). Code deployed (`3c40668`) — the Pi starts real per-cycle pings on its next cron pull.
+     ⏳ Confirm the check's **period 30 min / grace ~2 h** so the gap before the first real agent ping
+     doesn't false-alarm. **Deferred follow-on:** a
      tighter HA-side staleness check *during* the 3–9pm demand-window run-up (a relaxed grace could
      alert after 2:55pm) — the "loudly going into the demand window" piece; the user called it an edge
      case for now.

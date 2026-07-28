@@ -249,6 +249,23 @@ Key agent capabilities added 2026-05-29:
 - **Solar Sponge minimum floor (Rule 14)**: 10am–1pm, SoC < 50% → always charge to 50%, spread table irrelevant.
 - **Price risk asymmetry**: evening prices have fat right tail — Solar Sponge charging is insurance, not arbitrage.
 
+Key agent capabilities added 2026-07-28 (session 22):
+- **Robustness — LLM narrative call fault-isolated**: the LLM loop is wrapped in try/except; on failure
+  (expired key / Anthropic outage / network) the cycle no longer crashes — it degrades to the
+  deterministic `_build_auto_summary` + `log_decision` fallback, so `decisions.jsonl` / dashboard /
+  notifications still get written (control was never at risk; it runs earlier). Guards: `_llm_logged`
+  prevents a double-write on a later-turn failure; the fallback reads `_cycle_context["decision_context"]`
+  so it can't itself NameError. New JSONL field **`llm_narrative_failed`** marks degraded cycles. Fixes
+  the 2026-07-26 outage where an expired key crashed the agent and blanked all logging.
+- **Robustness — liveness heartbeat** (`_send_heartbeat()`, `HEALTHCHECK_URL` in the Pi's `.env`): the
+  agent pings a Healthchecks.io dead-man's-switch each completed cycle (`ok` / `degraded:…`), `/fail` on
+  a hard crash. No-op if the URL is unset; never raises. Alert cadence (period 30m / grace ~2h) is set on
+  the check, not in code. Catches Pi-down / cron-broken / crash-loop — the one failure HA can't
+  self-report. Deferred: a tighter HA-side staleness check during the 3–9pm demand window.
+- **Secrets single source of truth = the Pi**, and **all three live keys rotated** (HA / Solcast /
+  Tessie); Tessie's 4 `configuration.yaml` headers migrated to `!secret tessie_bearer` (0 inline tokens).
+  See the "Secrets" block above.
+
 Key agent capabilities added 2026-07-22 (session 17):
 - **Manual override kill-switch**: `input_boolean.agent_manual_override`. While ON the rule layer still computes and logs its verdict (cycles tagged `manual_override` in `decisions.jsonl`, so they can be excluded from divergence analysis) but sends no commands, leaving the user's reserve/mode in place. Auto-expires after 12h (`MANUAL_OVERRIDE_MAX_HOURS`), fails open if HA is unreachable. Suppresses hold verdicts too — a hold would otherwise drive reserve back to 5% and undo the manual setting. **Does not suppress** the Rule 2 demand-window guard or the HA safety automations.
 - **LP optimiser SoC fix**: from its 2026-06-01 wire-in until 2026-07-22 `optimize_battery()` received a hardcoded **50% SoC** every cycle (it read a top-level `soc_pct`; `energy_agent.py` nests it under `state["battery"]`). **All three-way divergence analysis before 2026-07-22 is void.** Fixed; `_require_soc_pct()` now raises rather than defaulting. Phase 4 divergence clock restarted 2026-07-22.
