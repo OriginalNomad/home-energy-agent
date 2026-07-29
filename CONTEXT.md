@@ -37,8 +37,8 @@ The Pi is **dual-homed** on two separate networks:
 
 | Interface | IP | Network | Role |
 |-----------|-----|---------|------|
-| `eth0` (wired) | 192.168.0.67/24 | 192.168.0.x | **Default route.** Energy segment — Powerwall gateway etc. |
-| `wlan0` (WiFi) | 192.168.68.80/22 | 192.168.68.x | Home LAN — Sonos speakers, Meross plugs, general devices |
+| `eth0` (wired) | 192.168.0.67/24 | 192.168.0.x | **Default route.** Energy-side segment (Powerwall/inverter system side). |
+| `wlan0` (WiFi) | 192.168.68.80/22 | 192.168.68.x | Home LAN — **the Tesla/Powerwall Gateway (`192.168.68.51`)**, Sonos speakers, Meross plugs, general devices |
 
 HA runs in the `homeassistant` Docker container in **`host`** network mode. Because the
 **default route is eth0**, any integration relying on multicast/SSDP/mDNS discovery (Sonos,
@@ -49,6 +49,17 @@ block in `configuration.yaml` (`hosts:` + `advertise_addr`). Speakers/plugs on 6
 **reserved DHCP leases** or the hardcoded IPs go stale (Hallway already drifted once — see
 energy_log 2026-07-24). None of this touches the battery agent, which talks to HA at
 `localhost:8123`.
+
+**The Powerwall's HA-facing gateway is on the WiFi LAN, not the energy segment (corrected 2026-07-29).**
+HA's `tesla_powerwall` integration reaches the Tesla Backup Gateway 2 at **`192.168.68.51`** on the WiFi
+(68.x) side — *not* `192.168.0.x`. Assuming otherwise cost real diagnosis time on 2026-07-29. Like every
+68.x device it needs a **reserved DHCP lease**: after a full Powerwall+gateway power-down that day it
+drifted `.65 → .51`, and HA (hardcoded to `.65`) lost all `sensor.tesla_powerwall_2_*` — which *also*
+crashed the 2:55 demand-window reset (a bare `| int` on the now-`unavailable` sensor). Now DHCP-reserved
+on the Deco (gateway MAC `28:0f:eb:91:6d:f0` → `.51`), and the demand-window automations were hardened
+(every `| int`/`| float` defaulted; SoC refs switched to the cloud `sensor.tessie_powerwall_charge`). The
+gateway's local API (`https://192.168.68.51`, login user `customer`) is healthy on fw 26.18.3. The battery
+**agent** was never affected — it uses the Tessie cloud API + HA at `localhost`, not the local gateway.
 
 ---
 
