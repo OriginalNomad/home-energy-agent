@@ -94,18 +94,18 @@
         mode: self_consumption
     - action: rest_command.powerwall_set_backup_reserve
       data:
-        percent: "{{ [[states('sensor.battery_grid_charge_target') | int, 5] | max, 95] | min }}"
+        percent: "{{ [[states('sensor.battery_grid_charge_target') | int(0), 5] | max, 95] | min }}"
     - action: script.log_battery_decision
       data:
         automation_name: "morning_charge_trigger"
-        action_taken: "reserve set to {{ states('sensor.battery_grid_charge_target') | int }}% (grid charge target)"
-        reserve_set: "{{ [[states('sensor.battery_grid_charge_target') | int, 5] | max, 95] | min }}"
+        action_taken: "reserve set to {{ states('sensor.battery_grid_charge_target') | int(0) }}% (grid charge target)"
+        reserve_set: "{{ [[states('sensor.battery_grid_charge_target') | int(0), 5] | max, 95] | min }}"
     - action: persistent_notification.create
       data:
         title: "⚡ Battery Charging"
         message: >
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}% at 9:30am.
-          Grid charge target: {{ states('sensor.battery_grid_charge_target') | int }}%
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% at 9:30am.
+          Grid charge target: {{ states('sensor.battery_grid_charge_target') | int(0) }}%
           (solar forecast covers the rest to 95%).
           Current price {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
           {% if now().month in [11, 12, 1, 2, 3, 6, 7, 8] %}Peak month — charging regardless of price.
@@ -173,20 +173,20 @@
                 mode: self_consumption
             - action: rest_command.powerwall_set_backup_reserve
               data:
-                percent: "{{ [[states('sensor.battery_grid_charge_target') | int, 5] | max, 95] | min }}"
+                percent: "{{ [[states('sensor.battery_grid_charge_target') | int(0), 5] | max, 95] | min }}"
             - action: script.log_battery_decision
               data:
                 automation_name: "solar_sponge_mode_check"
-                action_taken: "reserve set to {{ states('sensor.battery_grid_charge_target') | int }}% (solar deficit or inverter lag)"
-                reserve_set: "{{ [[states('sensor.battery_grid_charge_target') | int, 5] | max, 95] | min }}"
+                action_taken: "reserve set to {{ states('sensor.battery_grid_charge_target') | int(0) }}% (solar deficit or inverter lag)"
+                reserve_set: "{{ [[states('sensor.battery_grid_charge_target') | int(0), 5] | max, 95] | min }}"
             - action: persistent_notification.create
               data:
                 title: "⚡ Autonomous Mode — Grid Charging"
                 message: >
                   {{ now().strftime('%H:%M') }}: Solar forecast remaining today:
-                  {{ states('sensor.solcast_pv_forecast_forecast_remaining_today') | float | round(1) }} kWh.
-                  Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}% —
-                  grid charge target {{ states('sensor.battery_grid_charge_target') | int }}%
+                  {{ states('sensor.solcast_pv_forecast_forecast_remaining_today') | float(0) | round(1) }} kWh.
+                  Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% —
+                  grid charge target {{ states('sensor.battery_grid_charge_target') | int(0) }}%
                   (solar covers the rest to 95%).
                   Charging at {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
       # Solar sufficient OR cheap window closed → self_consumption, release reserve
@@ -240,8 +240,8 @@
     # Meaningful shortfall remains (target > current SoC + 5%)
     - condition: template
       value_template: >
-        {{ states('sensor.battery_grid_charge_target') | int >
-           states('sensor.tessie_powerwall_charge') | int + 5 }}
+        {{ states('sensor.battery_grid_charge_target') | int(0) >
+           states('sensor.tessie_powerwall_charge') | int(0) + 5 }}
     - condition: state
       entity_id: binary_sensor.1a_wigram_road_glebe_demand_window
       state: "off"
@@ -263,8 +263,8 @@
         message: >
           Autonomous mode, reserve=100% — charging hard from grid.
           Price: {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh ·
-          Battery: {{ states('sensor.tessie_powerwall_charge') | int }}% ·
-          Target: {{ states('sensor.battery_grid_charge_target') | int }}%
+          Battery: {{ states('sensor.tessie_powerwall_charge') | int(0) }}% ·
+          Target: {{ states('sensor.battery_grid_charge_target') | int(0) }}%
 
 # ─────────────────────────────────────────────────────────────
 # RULE 1: Revert from autonomous when cheap window closes
@@ -298,7 +298,7 @@
         title: "⏸ Grid Charge Stopped — Price Rose"
         message: >
           Cheap window closed — reverting to self_consumption + reserve=5%.
-          Battery: {{ states('sensor.tessie_powerwall_charge') | int }}% ·
+          Battery: {{ states('sensor.tessie_powerwall_charge') | int(0) }}% ·
           Price: {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh
 
 # ─────────────────────────────────────────────────────────────
@@ -312,8 +312,8 @@
     # causes premature revert when reserve=100% (gateway immediately reads 100%).
     - trigger: template
       value_template: >
-        {{ states('sensor.tessie_powerwall_charge') | int >=
-           states('sensor.battery_grid_charge_target') | int }}
+        {{ states('sensor.tessie_powerwall_charge') | int(0) >=
+           states('sensor.battery_grid_charge_target') | int(0) }}
       for: "00:00:30"
   conditions:
     - condition: state
@@ -335,8 +335,8 @@
       data:
         title: "✅ Grid Target Reached — Solar Takes Over"
         message: >
-          Battery {{ states('sensor.tessie_powerwall_charge') | int }}% —
-          grid target {{ states('sensor.battery_grid_charge_target') | int }}% reached.
+          Battery {{ states('sensor.tessie_powerwall_charge') | int(0) }}% —
+          grid target {{ states('sensor.battery_grid_charge_target') | int(0) }}% reached.
           Reverting to self_consumption, solar covers the rest to 95%.
 
 # ─────────────────────────────────────────────────────────────
@@ -375,7 +375,7 @@
         message: >
           Battery was exporting to grid in autonomous mode — reverted immediately.
           Grid: {{ (states('sensor.tesla_powerwall_2_site_power') | float(0) * 1000) | round(0) }}W ·
-          Battery: {{ states('sensor.tessie_powerwall_charge') | int }}% ·
+          Battery: {{ states('sensor.tessie_powerwall_charge') | int(0) }}% ·
           Price: {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh
 
 # ─────────────────────────────────────────────────────────────
@@ -394,8 +394,8 @@
   triggers:
     - trigger: template
       value_template: >
-        {% set target = states('sensor.battery_grid_charge_target') | int %}
-        {% set reserve = states('sensor.powerwall_backup_reserve') | int %}
+        {% set target = states('sensor.battery_grid_charge_target') | int(0) %}
+        {% set reserve = states('sensor.powerwall_backup_reserve') | int(0) %}
         {{ target > reserve + 5 }}
       for: "00:02:00"
   conditions:
@@ -416,20 +416,20 @@
   actions:
     - action: rest_command.powerwall_set_backup_reserve
       data:
-        percent: "{{ [[states('sensor.battery_grid_charge_target') | int, 5] | max, 95] | min }}"
+        percent: "{{ [[states('sensor.battery_grid_charge_target') | int(0), 5] | max, 95] | min }}"
     - action: script.log_battery_decision
       data:
         automation_name: "target_exceeds_reserve"
-        action_taken: "reserve updated to {{ states('sensor.battery_grid_charge_target') | int }}% (target rose above reserve by 5%+)"
-        reserve_set: "{{ [[states('sensor.battery_grid_charge_target') | int, 5] | max, 95] | min }}"
+        action_taken: "reserve updated to {{ states('sensor.battery_grid_charge_target') | int(0) }}% (target rose above reserve by 5%+)"
+        reserve_set: "{{ [[states('sensor.battery_grid_charge_target') | int(0), 5] | max, 95] | min }}"
     - action: persistent_notification.create
       data:
         title: "⚡ Reserve Updated — Grid Target Rose"
         message: >
-          Grid charge target is now {{ states('sensor.battery_grid_charge_target') | int }}%
+          Grid charge target is now {{ states('sensor.battery_grid_charge_target') | int(0) }}%
           (5%+ above previous reserve).
           Reserve updated immediately — not waiting for next 30-min tick.
-          Battery {{ states('sensor.tessie_powerwall_charge') | int }}%,
+          Battery {{ states('sensor.tessie_powerwall_charge') | int(0) }}%,
           price {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
 
 # ─────────────────────────────────────────────────────────────
@@ -466,7 +466,7 @@
         message: >
           Price {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh
           has risen above today's cheapest-quarter threshold.
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}% — pausing forced charge.
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% — pausing forced charge.
 
 # ─────────────────────────────────────────────────────────────
 # RULE 1: Reset reserve when battery reaches target (95%+)
@@ -493,7 +493,7 @@
       data:
         title: "✅ Battery Charged"
         message: >
-          Battery reached {{ states('sensor.tesla_powerwall_2_charge') | int }}%.
+          Battery reached {{ states('sensor.tessie_powerwall_charge') | int(0) }}%.
           Backup reserve reset to 5% floor.
 
 # ─────────────────────────────────────────────────────────────
@@ -529,8 +529,8 @@
                 message: >
                   2:55pm — Mode set to self_consumption, reserve set to 5% for demand window.
                   Battery will discharge to near-zero to avoid grid import 3-9pm.
-                  Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}%.
-                  {% if states('sensor.tesla_powerwall_2_charge') | int < 80 %}
+                  Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%.
+                  {% if states('sensor.tessie_powerwall_charge') | int(0) < 80 %}
                   ⚠️ Battery below 80% — may not cover full demand window!
                   {% else %}
                   Battery level looks OK for 3-9pm window.
@@ -548,7 +548,7 @@
             title: "🔋 Afternoon Reset (Off-Peak Month)"
             message: >
               2:55pm — Mode set to self_consumption, reserve reset to 5% floor (off-peak month, no demand charge).
-              Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}%.
+              Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%.
 
 # ─────────────────────────────────────────────────────────────
 # RULE 2: Post-demand window restore (peak months only)
@@ -573,7 +573,7 @@
         title: "✅ Demand Window Over"
         message: >
           9pm — Demand window ended. Reserve floor restored to 5%.
-          Battery at {{ states('sensor.tessie_powerwall_charge') | int }}%.
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%.
 
 # ─────────────────────────────────────────────────────────────
 # RULE 2: Demand window low battery warning (peak months only)
@@ -600,7 +600,7 @@
       data:
         title: "⚠️ Demand Window — Battery Getting Low"
         message: >
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}% during demand window.
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% during demand window.
           If it hits 5%, grid import will begin and a demand charge will appear on this month's bill.
           Consider turning off non-essential loads (dishwasher, EV charger, etc).
           Grid currently importing {{ (states('sensor.tesla_powerwall_2_site_power') | float(0) * 1000) | round(0) }}W.
@@ -624,7 +624,7 @@
       data:
         title: "🚨 Demand Charge Likely — Battery Critical"
         message: >
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}% — grid import starting now.
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% — grid import starting now.
           A demand charge WILL appear on this month's bill.
           Turn off all non-essential loads immediately to minimise the import level.
           Current grid import: {{ (states('sensor.tesla_powerwall_2_site_power') | float(0) * 1000) | round(0) }}W.
@@ -662,7 +662,7 @@
       data:
         title: "🌙 Overnight Top-Up"
         message: >
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}% at 10pm —
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% at 10pm —
           may drop below 5% before solar arrives.
           Charging to 26% safety level at
           {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
@@ -718,7 +718,7 @@
         message: >
           Grid price is {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh
           — charging Powerwall to 100% for free!
-          Battery currently at {{ states('sensor.tesla_powerwall_2_charge') | int }}%.
+          Battery currently at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%.
 
 # ─────────────────────────────────────────────────────────────
 # RULE 8: Reset after negative price ends
@@ -748,7 +748,7 @@
         title: "⚡ Negative Price Ended"
         message: >
           Price returned to {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}%.
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%.
           Backup reserve reset to 5% floor.
 
 # ─────────────────────────────────────────────────────────────
@@ -791,7 +791,7 @@
       data:
         title: "🌙 Winter Overnight Pre-Charge"
         message: >
-          Winter overnight: battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}%,
+          Winter overnight: battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%,
           price is {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
           Pre-charging to 80% — last 20% reserved for solar.
 
@@ -836,9 +836,9 @@
       data:
         title: "☁️ Cloudy Day — Early Top-Up"
         message: >
-          Solcast forecast for today: {{ states('sensor.solcast_pv_forecast_forecast_today') | float | round(1) }} kWh
+          Solcast forecast for today: {{ states('sensor.solcast_pv_forecast_forecast_today') | float(0) | round(1) }} kWh
           (below 10 kWh threshold — cloudy day).
-          Battery at {{ states('sensor.tesla_powerwall_2_charge') | int }}% —
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% —
           charging to 80% now at {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
           Last 20% reserved for solar.
 
@@ -875,9 +875,9 @@
         notification_id: "solar_underperformance"
         title: "⚠️ Solar Underperforming vs Solcast"
         message: >
-          Solcast expects {{ states('sensor.solcast_pv_forecast_power_now') | int }}W right now,
-          inverter showing {{ states('sensor.solar_power_w') | int }}W.
-          Battery at {{ states('sensor.tessie_powerwall_charge') | int }}%,
+          Solcast expects {{ states('sensor.solcast_pv_forecast_power_now') | int(0) }}W right now,
+          inverter showing {{ states('sensor.solar_power_w') | int(0) }}W.
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%,
           price {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
           Agent will handle charging strategy at next 30-min cycle.
 
@@ -949,7 +949,7 @@
           {% if is_peak and now_h < 15 %}
             85
           {% else %}
-            {{ [states('sensor.battery_grid_charge_target') | int, 5] | max }}
+            {{ [states('sensor.battery_grid_charge_target') | int(0), 5] | max }}
           {% endif %}
     - action: script.log_battery_decision
       data:
@@ -958,13 +958,13 @@
           {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
           {% set is_peak = now().month in peak_months %}
           {% set now_h = now().hour + now().minute / 60 %}
-          {% set target = 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int, 5] | max %}
+          {% set target = 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int(0), 5] | max %}
           reserve set to {{ target }}% (SoC below 20%, {% if is_peak and now_h < 15 %}peak-month 85% floor{% else %}grid charge target{% endif %})
         reserve_set: >
           {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
           {% set is_peak = now().month in peak_months %}
           {% set now_h = now().hour + now().minute / 60 %}
-          {{ 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int, 5] | max }}
+          {{ 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int(0), 5] | max }}
     - action: persistent_notification.create
       data:
         notification_id: "battery_low_soc_charge"
@@ -973,8 +973,8 @@
           {% set peak_months = [1, 2, 3, 6, 7, 8, 11, 12] %}
           {% set is_peak = now().month in peak_months %}
           {% set now_h = now().hour + now().minute / 60 %}
-          {% set target = 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int, 5] | max %}
-          Battery at {{ states('sensor.tessie_powerwall_charge') | int }}% — below 10%.
+          {% set target = 85 if (is_peak and now_h < 15) else [states('sensor.battery_grid_charge_target') | int(0), 5] | max %}
+          Battery at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% — below 10%.
           Price {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh
           — self_consumption, reserve set to {{ target }}%
           ({% if is_peak and now_h < 15 %}peak-month 85% floor{% else %}grid charge target{% endif %}).
@@ -1094,7 +1094,7 @@
                 notification_id: ev_charge_mode
                 title: "🔋 EV — Low Battery, Charging"
                 message: >
-                  Zappi → Fast. EV at {{ states('sensor.polestar_7853_battery_charge_level') | int }}% —
+                  Zappi → Fast. EV at {{ states('sensor.polestar_7853_battery_charge_level') | int(0) }}% —
                   charging alongside Powerwall at {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
 
         # ── 3b. Pre-solar gate (10pm–9:30am) — block Fast unless price < 10¢ ──
@@ -1137,8 +1137,8 @@
               state: "True"
             - condition: template
               value_template: >
-                {{ states('sensor.tessie_powerwall_charge') | int >=
-                   states('sensor.powerwall_backup_reserve') | int - 5 }}
+                {{ states('sensor.tessie_powerwall_charge') | int(0) >=
+                   states('sensor.powerwall_backup_reserve') | int(0) - 5 }}
             - condition: or
               conditions:
                 - condition: state
@@ -1157,8 +1157,8 @@
                 notification_id: ev_charge_mode
                 title: "⚡ EV — Charging (Battery Satisfied)"
                 message: >
-                  Zappi → Fast. EV at {{ states('sensor.polestar_7853_battery_charge_level') | int }}%,
-                  Powerwall at {{ states('sensor.tessie_powerwall_charge') | int }}% (reserve {{ states('sensor.powerwall_backup_reserve') | int }}% met).
+                  Zappi → Fast. EV at {{ states('sensor.polestar_7853_battery_charge_level') | int(0) }}%,
+                  Powerwall at {{ states('sensor.tessie_powerwall_charge') | int(0) }}% (reserve {{ states('sensor.powerwall_backup_reserve') | int(0) }}% met).
                   Cheap window: {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
 
         # ── 5. SoC <60% + cheap window + battery below reserve (actively charging) → Fast
@@ -1174,8 +1174,8 @@
               state: "True"
             - condition: template
               value_template: >
-                {{ states('sensor.tessie_powerwall_charge') | int <
-                   states('sensor.powerwall_backup_reserve') | int }}
+                {{ states('sensor.tessie_powerwall_charge') | int(0) <
+                   states('sensor.powerwall_backup_reserve') | int(0) }}
             - condition: or
               conditions:
                 - condition: state
@@ -1194,8 +1194,8 @@
                 notification_id: ev_charge_mode
                 title: "⚡ EV — Charging (Battery Charging from Grid)"
                 message: >
-                  Zappi → Fast. EV at {{ states('sensor.polestar_7853_battery_charge_level') | int }}% —
-                  Powerwall at {{ states('sensor.tessie_powerwall_charge') | int }}%, charging to reserve {{ states('sensor.powerwall_backup_reserve') | int }}%.
+                  Zappi → Fast. EV at {{ states('sensor.polestar_7853_battery_charge_level') | int(0) }}% —
+                  Powerwall at {{ states('sensor.tessie_powerwall_charge') | int(0) }}%, charging to reserve {{ states('sensor.powerwall_backup_reserve') | int(0) }}%.
                   Battery cannot discharge — safe to charge EV from grid simultaneously.
 
       # ── 6. Default — export surplus only, battery protected ───────────────
@@ -1271,8 +1271,8 @@
         title: "🔌 EV Plugged In"
         message: >
           Polestar connected at {{ now().strftime('%H:%M') }}.
-          EV battery: {{ states('sensor.polestar_7853_battery_charge_level') | int }}% ·
-          Powerwall: {{ states('sensor.tessie_powerwall_charge') | int }}% ·
+          EV battery: {{ states('sensor.polestar_7853_battery_charge_level') | int(0) }}% ·
+          Powerwall: {{ states('sensor.tessie_powerwall_charge') | int(0) }}% ·
           Price: {{ (states('sensor.1a_wigram_road_glebe_general_price') | float(0) * 100) | round(1) }}¢/kWh.
 
 # ─────────────────────────────────────────────────────────────

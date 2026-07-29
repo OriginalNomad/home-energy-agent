@@ -4,6 +4,30 @@
 
 ### Immediate
 
+- [x] 🔴 **HIGH — harden the demand-window automations against an unavailable local Powerwall sensor —
+  DONE 2026-07-29.** Defaulted **every** bare `| int`/`| float` in `config/automations.yaml` (30 int + 2
+  float → all `int(0)`/`float(0)`), and switched the demand-window notification SoC refs from the local
+  `sensor.tesla_powerwall_2_charge` to the cloud `sensor.tessie_powerwall_charge`. No template can now
+  raise on `unavailable`/`unknown`. Deployed via `./deploy_ha_config.sh` (validated + reloaded, zero
+  drift). **Proven** by rendering a forced-unavailable sensor through HA's `/api/template` → returned
+  "0% and below 80" instead of crashing. The critical `set_mode`/`set_backup_reserve` actions already ran
+  before the notify, so the reset is now fully robust. *(Remaining, lower priority: switch the two
+  demand-window WARNING triggers from `tesla_powerwall_2_charge` to Tessie so they still fire when the
+  local integration is down — they don't crash today, just go blind; and the condition-context
+  `battery_grid_charge_target` refs are on a reliable sensor. Neither is urgent.)*
+
+- [x] **MEDIUM — repoint HA `tesla_powerwall` integration host .65 → .51 — DONE 2026-07-29.** Gateway
+  drifted DHCP IP after the full power-down; HA hardcoded to .65 → all local Powerwall sensors
+  `unavailable`. User set a Deco DHCP reservation (`28:0f:eb:91:6d:f0` → 192.168.68.51, plus Mac Studio +
+  Arlo) and re-added the integration via the HA UI (Delete + Add device at 192.168.68.51). **Gateway local
+  login note:** the HA integration logs in as user `customer` with the password = **last 5 chars of the
+  label `PASSWORD` field** (physical label inside the gateway), *not* the full label password (that's the
+  WiFi/AP password) and *not* the serial. Actual value is in the user's password manager, not recorded
+  here. Gateway: Backup Gateway 2, TPN `1152100-14-J`, TSN `CN322110G4J00I`, fw 26.18.3, local API
+  https://192.168.68.51 (healthy).
+  *(Follow-up, lower priority: switch the two demand-window WARNING triggers off the local sensor to
+  Tessie so they still fire if the gateway ever drops again — they go blind, not crash. Not urgent.)*
+
 - [x] **#3 — the 5-minute price problem — DONE 2026-07-25 (Rule 32).** `compute_decision_context()`
   now anchors `price` on `price_forecast[0]` (the current 30-min slot, averaged) instead of the raw
   5-min `duration:5` sample, fixing every threshold at once (spread, forward_min, deferral/sliding,

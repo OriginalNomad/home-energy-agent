@@ -2555,3 +2555,74 @@ LP is right (07-28 07:30 charged at 34¢ vs LP pre-charge at 07:00) and (b) robu
 where the rule layer's insurance charge is right (07-28 solar delivered 45% of forecast). Recommendation
 unchanged: not ready for LP-to-control until the LP has a conservative solar quantile / risk knob; the
 incremental win is making Rule 30 forward-price-aware.
+
+---
+
+## 2026-07-29 (PM) — Powerwall went inert on a peak day; full power-down fixed it; gateway IP drift broke HA
+
+**Incident (peak demand-charge day).** Early afternoon the Powerwall stopped participating: at ~52% SoC
+it sat **idle (battery_power ≈ 0), neither charging nor discharging, exporting surplus solar to grid**
+(briefly at negative FIT), and was **unresponsive to mode/reserve commands from both Tessie *and* the
+Tesla app**. This was NOT an agent/mode-logic problem — commands returned HTTP 200 at Tesla's cloud but
+the battery never acted. Escalating reboots: Powerwall restart (no effect) → Gateway restart (no effect)
+→ **full power-down of Powerwall + Gateway CLEARED it** (gateway `start_time` 14:26; came back grid-
+charging at 5 kW in autonomous/reserve 100).
+
+**Diagnosis red herrings (mine, corrected):** (1) I misread HA `last_updated` (UTC) against the Pi's
+local clock and wrongly called all sensors "frozen since 03:43" — they were fresh. (2) `binary_sensor.
+tesla_powerwall_2_connected_to_tesla=off` is a stuck/unreliable local sensor (Tessie was streaming live
+data throughout) — do not trust it. Ground truth all afternoon was the **live Tessie cloud API** (changing
+values, current timestamps, physics balanced).
+
+**Root cause of the HA/console blackout — gateway DHCP drift.** After the full power-down the Tesla
+Energy Gateway rejoined WiFi with a **new IP: 192.168.68.51** (was **.65**). HA's `tesla_powerwall`
+integration is hardcoded to .65 → "Cannot connect to host 192.168.68.65:443" → all `sensor.
+tesla_powerwall_2_*` went `unavailable`. Confirmed .51 is the gateway: `https://192.168.68.51/api/status`
+→ 200, `device_type:teg`, DIN `1152100-14-J--…`, serial `TG1220430036SJ`, fw 26.18.3, MAC
+**28:0f:eb:91:6d:f0** (Tesla OUI). The gateway's local API is healthy — HA was just pointed at the stale
+IP. Auto-rediscovery didn't catch it (dual-homing: discovery broadcasts go out eth0, never reaching the
+68.x WiFi side — the documented CONTEXT issue). **The .65 that still pinged is a *different* device
+(MAC c4:e7:ae:…) that took the freed lease — that's what threw my earlier "not a DHCP drift" call.**
+
+**Why the 2:55 demand-window reset failed (REAL BUG, root-caused from HA log).**
+`automation.battery_reset_reserve_at_2_55pm_before_demand_window` **errored before setting reserve/mode**:
+its notification data template does `{{ states('sensor.tesla_powerwall_2_charge') | int }}` (and a
+`| int < 80` check) with **no default**, and that local sensor was `unavailable`, so `int('unavailable')`
+raised → whole automation aborted. Same fragile pattern is used across **many** automations (most are
+disabled/agent-handled, so they didn't fire; the active demand-window warnings and the **9pm
+`battery_post_demand_window_restore`** are exposed to the same crash while the local integration is down).
+
+**How the window was saved.** My Pi-side guardian (`/tmp/dw_backstop.py`) checked at 14:56:34, found
+still autonomous/reserve 100, and applied **self_consumption + reserve 5** (the user's manual "stop" also
+contributed). Confirmed at 15:02: self_consumption, reserve 5, **discharging, grid import 0**. Battery
+entered the window at ~67% (≈8 kWh usable) — comfortably covers the peak-30-min metric. Also noted a
+persistent **gateway command-lag** (~1–2 min between a Tessie command and the battery acting).
+
+**Done today (user):** Deco **DHCP reservations** — gateway `28:0f:eb:91:6d:f0` → 192.168.68.51 (the
+permanent fix), plus Mac Studio and Arlo hub. Manual override was ON for the window.
+
+**QUEUED (after 9pm / next session — not yet done):**
+1. **Repoint HA `tesla_powerwall` host .65 → .51.** No UI "Reconfigure" in this version → either
+   Delete + Add device at 192.168.68.51 (+ gateway password), or edit the stored host + restart HA
+   (preserves creds; needs write access to `.storage/core.config_entries` — may be root-owned).
+2. **Harden the automation class (HIGH).** Switch `sensor.tesla_powerwall_2_charge` refs in notification
+   templates to `sensor.tessie_powerwall_charge` with `| int(0)` defaults so an unavailable local sensor
+   can never again crash the 2:55 reset (or the 9pm restore). Cloud Tessie sensor is the reliable source.
+3. Overnight handled by turning **manual override OFF** — the agent runs off the Tessie SoC (unaffected by
+   the dead local integration) and manages reserve-restore + overnight charging itself, so the flaky 9pm
+   automation is moot. (Unrelated: `simonhome.ddns.net` No-IP redemption email is NOT part of this system —
+   HA external access is Cloudflare `agent.sol.io`; the DDNS name was ad-hoc travel access, being let expire.)
+
+**RESOLVED same session (~22:30).**
+- **HA repoint DONE.** User set Deco DHCP reservations (gateway `28:0f:eb:91:6d:f0` → .51, + Mac Studio +
+  Arlo) and re-added the `tesla_powerwall` integration at 192.168.68.51 via the UI. **Gateway `customer`
+  login = last 5 chars of the label `PASSWORD` field** (physical label inside the gateway) — not the full
+  label password (that's the WiFi/AP password) and not the serial. Actual value is in the user's password
+  manager, deliberately NOT recorded here (global secrets rule). Local sensors back.
+- **Automation hardening DONE + deployed.** Defaulted **every** bare `| int` (30) and `| float` (2) in
+  `config/automations.yaml` → `int(0)`/`float(0)`, and switched demand-window notification SoC refs from
+  the local `sensor.tesla_powerwall_2_charge` to cloud `sensor.tessie_powerwall_charge`. `deploy_ha_config.sh`
+  validated + reloaded, **zero drift**. Proven via HA `/api/template`: a forced-unavailable sensor rendered
+  `0% and below 80` instead of raising. The 2:55 reset's `set_mode`/`set_backup_reserve` already run before
+  the (now crash-proof) notify, so the reset is fully robust. Follow-up (not urgent): move the two
+  demand-window WARNING triggers off the local sensor to Tessie so they still fire if the gateway drops again.
