@@ -2,7 +2,23 @@
 description: Morning (Energy Agent)
 ---
 
-Read the following files in order:
+## ⚠️ Data source — the agent runs on the Pi, not this Mac
+
+This command is normally run from the local desktop, but **the live agent data lives on the
+Raspberry Pi (`energypi.local`), not in the local checkout.** The local copies of the agent's
+data files are stale dev snapshots (the Mac's `decisions.jsonl` / `daily_energy.jsonl` stop in
+early June; `energy_log.db` and `model_params.json` are gitignored and machine-local). **Always
+read these four from the Pi over SSH — never from the local repo:**
+
+- `agent/decisions.jsonl`  → `ssh energypi.local "cat ~/home-energy-agent/agent/decisions.jsonl"` (large — filter/parse remotely, e.g. pipe into `python3 -` over SSH)
+- `agent/daily_energy.jsonl` → `ssh energypi.local "tail -n 3 ~/home-energy-agent/agent/daily_energy.jsonl"`
+- `agent/energy_log.db` (data-logger health) → `ssh energypi.local "cd ~/home-energy-agent/agent && python3 data_logger.py"`
+- `agent/model_params.json` (live calibration) → `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"`
+
+The **doc files** below (CLAUDE.md, CONTEXT.md, todo.md, energy_log.md, ARCHITECTURE.md,
+energy_rules.md) are git-tracked and synced, so reading them from the **local** checkout is fine.
+
+Read the following files in order (local checkout):
 1. CLAUDE.md
 2. CONTEXT.md
 3. app/CONTEXT.md
@@ -29,10 +45,12 @@ here.** Compare only the two layers that can actually disagree:
 2. **LP optimiser** — `optimizer.py`, the receding-horizon linear program (shadow, added
    2026-06-01). Fields appear only on cycles run after wire-in; older records lack them.
 
-Read recent records from `agent/decisions.jsonl` (skip `daily_accuracy` rows; focus on roughly
-the last day or two of cycles that carry `optimizer_verdict`) and report:
+Read recent records from `agent/decisions.jsonl` **on the Pi** (see the Data source block at the
+top — the local copy is stale; parse it remotely over SSH). Skip `daily_accuracy` rows; focus on
+roughly the last day or two of cycles that carry `optimizer_verdict`) and report:
 
 **Key JSONL field names** (use these exactly — wrong names silently return null):
+- Timestamp: **`ts`** (ISO 8601, e.g. `2026-07-29T10:00:21+10:00`) — there is **no** `timestamp` field
 - State: `soc` (not `soc_pct`), `price_c` (not `price_now_c`), `mode_before`
 - Deterministic (the control action): `computed_verdict` (dict with `action/mode/rule_fired`), `computed_context` (dict with `spread_c`, `forward_min_c`, `hours_to_cheap_end`, `hours_to_deadline`, `deferral_detected`)
 - LP optimiser: `optimizer_verdict` (dict with `action/target_pct/mode/rule_fired`), `optimizer_context` (dict with `grid_charge_now_kw`, `projected_import_kwh`, `soc_trajectory_pct`, `projected_cost_c`, `horizon_slots`), and `optimizer_vs_deterministic` (optimiser agrees with the rule layer — the one agreement flag that matters now)

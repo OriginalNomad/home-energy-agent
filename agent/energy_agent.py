@@ -361,7 +361,13 @@ def get_current_state() -> dict:
     in_sponge    = 10 <= hour < 15          # Solar Sponge window
 
     ev_plug_state   = ha_state(ENTITIES["ev_plug"])
-    ev_plugged      = ev_plug_state != "EV Disconnected"
+    # Fail-safe: only "EV Connected"/"Charging" count as plugged in. The old
+    # `!= "EV Disconnected"` test treated an *unavailable* Zappi (integration
+    # offline → "unavailable"/"unknown") as plugged in, which on 2026-07-29 10:00
+    # made the agent narrate the EV as plugged-in-and-Fast-charging and emit a
+    # set_zappi(Fast) action while the car was neither connected nor charging.
+    # Unknown state ⇒ not plugged ⇒ EV verdict short-circuits to ev_disconnected.
+    ev_plugged      = ev_plug_state in ("EV Connected", "Charging")
     _solar_raw      = ha_state(ENTITIES["solar_power"])
     _solar_unavail  = _solar_raw in ("unavailable", "unknown")
     if _solar_unavail:

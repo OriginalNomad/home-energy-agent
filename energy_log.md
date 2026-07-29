@@ -2520,3 +2520,38 @@ cycle; the monitor alerts when the pings STOP. Monitor: **Healthchecks.io** (use
 Verified: py_compile OK; `HEALTHCHECK_URL` unset → true no-op (no network); a bad URL is caught (prints
 non-fatal warning, no raise); 222 decision tests pass. **User setup pending:** create the Healthchecks
 check + add `HEALTHCHECK_URL` to the Pi's `agent/.env`. Not committed yet (awaiting go-ahead).
+
+---
+
+## 2026-07-29 — EV false-plugged bug fixed + `/morning` repointed at the Pi
+
+**EV bug (user-reported):** the 10:00 cycle narrative said the EV was "plugged in at 74% SoC …
+Zappi set to Fast (6.0¢ ≤ ultra-cheap 10¢)" while the car was neither connected nor charging
+(user confirmed via HA sensors). Root-caused to `get_current_state()`:
+`ev_plugged = ev_plug_state != "EV Disconnected"`. At 10:00 the **whole Zappi integration was
+`unavailable`** (the decision record carries `ev_zappi_mode_before: 'unavailable'`), so the plug
+sensor read `"unavailable"`, which is `!= "EV Disconnected"` → `ev_plugged = True`. The `ev_soc=74`
+came from the Polestar (independent, fine), and the false plug state cascaded into a `set_zappi(Fast)`
+action + misleading narrative. Confirmed live at ~10:30: plug sensor `EV Disconnected`, Polestar
+`charger_connection_status=Disconnected` / `charging_status=Idle` — the bug only bites when the Zappi
+drops offline. **Fix:** `ev_plugged = ev_plug_state in ("EV Connected", "Charging")` (fail-safe;
+CONTEXT confirms those are the only two connected states). Unknown/unavailable ⇒ not plugged ⇒ the EV
+verdict short-circuits to `ev_disconnected` (line ~1750) and issues no Zappi command. `py_compile` OK.
+**Not deployed yet** — agent code, reaches the Pi via `git push` (30-min cron pull); stacked behind the
+already-unpushed Rules 31/30/32/33 + robustness #1/#2. Suggested one deploy covers all.
+
+**`/morning` command repointed at the Pi.** The command is run from the Mac but the agent's data
+lives on `energypi.local`; the Mac's `decisions.jsonl` / `daily_energy.jsonl` are stale dev snapshots
+(stop early June) and `energy_log.db` / `model_params.json` are gitignored/machine-local. Added a
+"Data source" block instructing it to read those four files from the Pi over SSH, while keeping the
+git-tracked doc files local. Also corrected the field-name note: the decision timestamp field is
+**`ts`**, not `timestamp` (this cost a debugging round this morning).
+
+**Morning brief (data live from Pi):** peak day, 4th consecutive low-overnight peak morning (rode
+11–20%, `survival_floor_defend` at 06:30/08:30, Rule 30 floor held, emergency automation did not fire),
+poor solar, gentle-leading to 85%. Det↔LP agreement 83.5% since the 07-22 clean restart (78.6% over the
+last ~2.5d). Divergences separate cleanly into (a) the `survival_floor_defend`-buys-at-a-spike bug where
+LP is right (07-28 07:30 charged at 34¢ vs LP pre-charge at 07:00) and (b) robust-MPC poor-solar days
+where the rule layer's insurance charge is right (07-28 solar delivered 45% of forecast). Recommendation
+unchanged: not ready for LP-to-control until the LP has a conservative solar quantile / risk knob; the
+incremental win is making Rule 30 forward-price-aware.
