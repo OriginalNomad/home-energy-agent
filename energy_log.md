@@ -1,5 +1,131 @@
 # Energy System Control Log
 
+## 2026-07-31 (session — EV threshold bands widened; LP risk-knob/entry-floor replay = negative result)
+
+### EV threshold bands were tighter than the dashboard sliders (control fault, fixed + deployed)
+
+User set `ev_ultra_cheap_c` (Fast-charge threshold) to **15¢** — the top of its HA slider — and got a
+"1 control input out of band" notification: the agent substituted 11¢ for the cycle and left the helper
+at 15. Root cause: Rule 28's `SETTINGS_SPEC` band for that helper was `(0.0, 12.0)`, **tighter than the
+slider's own `max: 15`**. So the dashboard offered a value the agent silently rejected — the exact
+opposite of the dashboard's purpose.
+
+Audit of all seven helpers (`SETTINGS_SPEC` band vs `configuration.yaml` slider max): **four were too
+tight** — ultra_cheap 12<15, standard 25<30, min_charge 45<60, min_soc 50<80 (charge_target/departure/
+insurance_floor were fine). New **invariant** (documented in Rule 28 + a code comment): *a band and the
+helper's slider min/max must agree* — the slider range IS the engineering limit; a second, tighter number
+in code is the very anti-pattern Rule 28 exists to prevent. **Resolve each mismatch in the direction that
+matches intent** — widen the band where the higher values are wanted, lower the slider where they're
+pathological.
+
+**Fix (per user's request):** the two EV price thresholds retargeted to the user's willingness-to-pay —
+**Fast ≤ 30¢, Eco/slow ≤ 50¢** (both above the old slider maxes, so sliders widened too):
+- `SETTINGS_SPEC` (energy_agent.py): ultra_cheap 12→30, standard 25→50, min_charge 45→60.
+- `configuration.yaml` sliders: ultra_cheap max 15→30, standard max 30→50.
+- **Staged deploy (peak-day timing):** the CODE (bands) was pushed at ~14:40 (Pi pulls on the 15:00
+  cron) — this alone stops the out-of-band rejection (agent now honours the current 15/19 helper values).
+  The **HA config deploy** (`deploy_ha_config.sh` + `input_number.reload`) and **setting the 30/50 values**
+  were deliberately **held until after the 3–9pm demand window** — no HA-config changes near the 14:55
+  pre-window reset on a peak day, and the EV thresholds are inert during the window (EV forced Eco+). Do
+  post-21:00: deploy config, reload input_number, set `ev_ultra_cheap_threshold_c`=30 + `ev_standard_price_c`=50, verify.
+
+This is a legitimate willingness-to-pay control (the EV has exogenous value — "I'll pay up to X¢ to
+charge the car"), exactly the class Rule 28 says the user should own. Note the 3–9pm demand-window guard
+still forces the Zappi to Eco+ (solar-only) regardless of these thresholds.
+
+**Held back — `ev_min_soc_pct` (band 0–50, slider 0–80):** widening its band to 80 would silently
+re-enable the 2026-07-23 failure (min_soc drifted to 80 → forced the EV to Fast at 60% SoC), which five
+tests guard against — including `test_settings_drifted_ev_min_soc_no_longer_forces_fast`. The correct fix
+is to **lower its slider to 50**, not widen the band. Left as a pending user decision (slider still 80),
+so that one mismatch is knowingly outstanding. Band reverted to 50; no test changes needed.
+
+### LP replay — risk knob, entry-SoC floor, conservative rate all FAIL to flip the dangerous holds
+
+Ran an offline, non-invasive replay (`/tmp/lp_replay.py` on the Pi; imports the live optimizer read-only,
+reconstructs inputs from `energy_log.db` price_forecasts + `decisions.jsonl` state). Reproduction of the
+logged `risk=0` verdicts: 90% (solar-unreliable cycles) / 94% (trusted) — harness is faithful.
+
+Swept the 10 dangerous daytime det-charge/LP-hold divergences (07-30 09:00–12:30, 07-31 09:30–10:00):
+- **Entry-SoC floor @ window-start (30→85%): 0 flips.** Non-binding — the LP meets any window-entry
+  target by charging *later* at the cheap sponge; the slot-0 verdict stays hold. The divergence is charge
+  *timing*, not window-entry SoC (both layers reach ~85% by 3pm in-plan).
+- **Risk knob (load inflation, 0→0.8): 0 flips.** Solar is already zeroed on these cycles
+  (`solar_unreliable=True`), so lever 1 is structurally inert; load inflation alone doesn't tip them.
+- **Conservative charge-rate cap: only 2 flips**, and only at ≤2 kW *and* late-morning (11:00, 12:30) —
+  i.e. only when the slow fill genuinely no longer fits before 3pm.
+
+**Interpretation (pending user agreement):** on this evidence the LP's deferral to genuinely-cheaper
+sponge slots is *defensible* — its plan reaches the window target; the deterministic layer's early charge
+is insurance the LP rationally declines on expected cost. The real lever is the **charge-rate assumption**
+(what rate will the fill actually run at), and the deeper gap is that the current `risk` knob models
+*forecast* risk (solar/price), not the *plan-execution* risk (rate / cheap-slot arrival) that actually
+drives these divergences. Redirects the "LP to control path" roadmap away from a conservative-solar term.
+Also: per-slot solar forecast is not logged anywhere, so lever 1's one relevant class (solar *trusted* on
+a marginal day) can't be replayed on existing data — would need input-logging added to the shadow block.
+
+## 2026-07-31 (morning — 23:00 overnight autonomous-slam diagnosed; root cause = peak block time-gated to before 2:55pm)
+
+User asked why the agent slammed hard grid charging at **23:00 on 2026-07-30** (a peak day) with
+SoC only ~23%, then stopped one cycle later. Reconstructed from `decisions.jsonl` on the Pi:
+
+| time | SoC | price | rule fired | LP shadow |
+|---|---:|---:|---|---|
+| 22:00 | 32% | 29¢ | `overnight_hold_wait_for_sponge` (hold) | `mpc_hold` |
+| 22:30 | 26% | 22¢ | `overnight_hold_wait_for_sponge` (hold) | `mpc_hold` |
+| **23:00** | **23%** | 19¢ | **`nonpeak_solar_unreliable_autonomous`** → autonomous, target 50% | `mpc_hold` |
+| 23:30 | 38% | 24¢ | `overnight_hold_wait_for_sponge` (hold) | `mpc_hold` |
+| 00:00 | 40% | 20¢ | `wait_for_cheap_go_hard` (hold) | `mpc_hold` |
+
+**What triggered the slam (23:00):** SoC dipped **26→23%**, below the `overnight_hold` SoC>25 gate,
+so the wait-for-sponge hold dropped out. On the 07-30 zero-solar washout (`solar_unreliable=True`,
+`zero_solar_day=True`) with the price forecast at that one cycle showing the cheap window ending in
+**2.5 h** (`hours_to_cheap_end`), self_consumption couldn't refill to the 50% cost-target in time, so
+the solar-unreliable branch escalated to **autonomous (~5 kW)**. (The ~8 kW the user saw at the meter
+= the ~5 kW pack slam + overnight house load served from grid simultaneously.)
+
+**Why it stopped (23:30):** the slam pushed SoC 23→38% (back over 25, `overnight_hold` re-qualified)
+**and** the Amber forecast refreshed — `hours_to_cheap_end` jumped **2.5→7.0 h**, a fresh cheap window
+reappeared → `overnight_hold_wait_for_sponge` re-fired. A single-cycle whipsaw off a transient
+sliding forecast (`sliding_forecast=True` throughout; the real cheap slot `go_hard_slot` was 12¢ @
+~11:30am the whole time).
+
+### ROOT CAUSE — not a peak-detection bug; the peak block is time-gated to `now_h < 2:55pm`
+
+`is_peak_month` was correctly **True**. The `nonpeak_*` rule name is a **misnomer** — those rules run
+in peak months every evening/overnight. The decision-tree peak branch is gated (line ~1798):
+
+```python
+elif is_peak and now_h < DEMAND_DEADLINE and soc < 85:   # DEMAND_DEADLINE = 14:55
+```
+
+At 23:00 `now_h = 23.0`, not `< 14.92`, so the **peak block is switched off after 2:55pm for the rest
+of the calendar day**, and the cycle falls through to the shared escalation chain (`overnight_hold`,
+`wait_for_cheap_go_hard`, `nonpeak_solar_unreliable_autonomous`). Correct in that "reach 85% by 2:55pm
+*today*" is moot once today's window has passed — but it means the **overnight run-up to the *next*
+peak day runs a chain written for genuinely non-peak days**, which lacks two peak-block protections:
+1. **No cheapest-go-hard-slot check** — the peak block calls `_cheapest_go_hard_slot()` *first*
+   (`wait_for_cheap_go_hard`); the overnight `nonpeak_solar_unreliable_autonomous` (line ~1907)
+   escalates straight to autonomous with no such check, even though `go_hard_slot` (12¢ @ 11.5 h) was
+   in-context.
+2. **No Rule 26 / Rule 33 damping** (`peak_early_morning_hold`, gentle-lead) — those live only inside
+   the peak block, so nothing absorbs a transient sliding forecast overnight.
+
+Combined with the hard `overnight_hold` SoC>25 cliff, that's the whole whipsaw. **Fix direction (not
+yet built): extend the peak block's go-hard-slot check + damping to the peak-day-eve overnight run-up,
+rather than only `now_h < 2:55pm`.** More surgical than touching the 25% gate.
+
+### What the LP would have done
+
+The **LP held (`mpc_hold`) on every one of these cycles** — `grid_charge_now_kw = 0.0` throughout. Its
+`soc_trajectory` shows it planned to **sit at the current SoC and defer the charge to the cheap morning
+slot** (at 08:30, SoC 11%, it held with a trajectory of 11→28→45% starting ~2.5 h out). So the LP would
+**not** have fired the 23:00 autonomous slam, and in hindsight — overnight prices 19–29¢, morning sponge
+12–14¢ — that was the cheaper play (the slam bought ~2 kWh at ~19–24¢ that the morning delivered at ~12¢,
+≈30¢ wasted). **Caveat (unchanged):** the LP achieves this by riding to its 5% floor with **no
+demand-charge insurance margin** — it only looks good here because the sponge arrived; on the 07-30
+washout an LP-in-control would have been dangerously late to 85%. This is the same reason the LP isn't
+yet trusted for control (needs the conservative solar quantile / `risk` knob first).
+
 ## 2026-07-24 (session 19 — 8am over-charge diagnosed; solar-accuracy + asymmetric-rate fixes)
 
 ### The 8am over-charge, dissected

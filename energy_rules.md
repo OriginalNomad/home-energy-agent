@@ -787,6 +787,25 @@ where `.get`'s default can never fire.
 not values that merely differ from a preference. If a value genuinely is wanted, widen the
 band — e.g. set `max_insurance_floor_pct`'s `lo` to 0 to allow disabling Rule 15.
 
+**INVARIANT (2026-07-31): a band and the helper's own HA slider `min`/`max` must agree.**
+If the dashboard slider lets you pick a value, the agent must honour it — otherwise the
+dashboard is lying about what it accepts. On 2026-07-31 four of the seven bands were below
+their slider max (ultra_cheap 12<15, standard 25<30, min_charge 45<60, min_soc 50<80), so a
+value set at the top of the slider (`ev_ultra_cheap_c`=15) was silently overridden to the
+last in-band value. **Resolve a mismatch in the direction that matches intent:**
+- Where the higher values are genuinely wanted → **widen the band** (and the slider if
+  needed). Done for the two EV price thresholds at the user's willingness-to-pay —
+  ultra_cheap band 12→30 + slider 15→30 (**Fast ≤30¢**), standard band 25→50 + slider 30→50
+  (**Eco/slow ≤50¢**) — and min_charge band 45→60 to match its existing slider.
+- Where the higher values are **pathological** → **lower the slider**, not the band.
+  `ev_min_soc_pct`'s band stays 0–50 deliberately: a value >50 forces the EV to Fast
+  whenever its SoC is below that (the 2026-07-23 min_soc=80 bug, guarded by
+  `test_settings_drifted_ev_min_soc_no_longer_forces_fast`). Its slider (max 80) should be
+  lowered to 50 — **pending user decision**, so the 51–80 mismatch is knowingly left for now.
+
+The slider range IS the engineering limit; a second, tighter number in code is the
+anti-pattern this rule exists to avoid.
+
 **To read what is actually in force**, look at `settings_used` in the most recent
 `agent/decisions.jsonl` record — the values the agent decided with, logged every cycle.
 

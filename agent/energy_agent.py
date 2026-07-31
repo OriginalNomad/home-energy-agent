@@ -175,14 +175,27 @@ DEFAULT_MAX_INSURANCE_FLOOR = 70   # %
 #
 # Widen a band if a value is genuinely wanted — e.g. set max_insurance_floor_pct's
 # `lo` to 0 to allow disabling Rule 15's floor.
+#
+# INVARIANT (added 2026-07-31): a band and its helper's HA slider `min`/`max` in
+# configuration.yaml must agree — otherwise the dashboard offers values the agent silently
+# rejects. On 2026-07-31 four of the seven bands were below their slider max (ultra_cheap
+# 12<15, standard 25<30, min_charge 45<60, min_soc 50<80); a value set at the top of the
+# slider (ev_ultra_cheap_c=15) was overridden. Resolve a mismatch in the direction that
+# matches intent: where the higher values are wanted, WIDEN the band (ultra_cheap→30,
+# standard→50, min_charge→60, plus the two price sliders widened to match); where they are
+# pathological, LOWER the slider instead (ev_min_soc — see its note below).
 SETTINGS_SPEC = {
     # settings key                 entity alias                    lo     hi
-    "ev_ultra_cheap_c":           ("ev_ultra_cheap_c",             0.0,   12.0),
-    "ev_standard_price_c":        ("ev_standard_price_c",          0.0,   25.0),
-    "ev_min_charge_price_c":      ("ev_min_charge_price_c",        5.0,   45.0),
+    "ev_ultra_cheap_c":           ("ev_ultra_cheap_c",             0.0,   30.0),
+    "ev_standard_price_c":        ("ev_standard_price_c",          0.0,   50.0),
+    "ev_min_charge_price_c":      ("ev_min_charge_price_c",        5.0,   60.0),
     "max_insurance_floor_pct":    ("battery_max_insurance_floor", 20.0,   95.0),
     # EV helpers — these live under state["ev"], not state["settings"], but are
     # validated by the same machinery because they are read by the same layer.
+    # ev_min_soc's band stays 0–50 DELIBERATELY (slider max is 80): a value >50 forces the
+    # EV to Fast whenever its SoC is below that (the 2026-07-23 min_soc=80 bug — see tests
+    # test_settings_drifted_ev_min_soc_no_longer_forces_fast). The invariant fix here is to
+    # LOWER the slider to 50, not widen the band. Pending user decision (2026-07-31).
     "ev_min_soc_pct":             ("ev_min_soc",                   0.0,   50.0),
     "ev_charge_target_pct":       ("ev_charge_target",            50.0,  100.0),
     "ev_departure_target_pct":    ("ev_departure_target",         50.0,  100.0),

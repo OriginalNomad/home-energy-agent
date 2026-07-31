@@ -148,6 +148,19 @@
   than riding the floor. Check the `wait_for_cheap_go_hard` overnight cycles against the actual morning
   charge cost before changing anything.
 
+  ▶️ **ROOT CAUSE FOUND 2026-07-31 (do this before the two fixes below).** The overnight cycles do NOT
+  run the peak-deadline branch at all: it is gated `is_peak and now_h < DEMAND_DEADLINE (2:55pm)`
+  (energy_agent.py ~line 1798), so **after 2:55pm each peak day the agent falls through to a shared
+  escalation chain written for genuinely non-peak days** (`overnight_hold`, `wait_for_cheap_go_hard`,
+  the misleadingly-named `nonpeak_solar_unreliable_autonomous`). `is_peak_month` was correctly True —
+  this is a *time-gate*, not a peak-detection bug. That chain lacks two peak-block protections: (1) the
+  cheapest-go-hard-slot check (`_cheapest_go_hard_slot()`), and (2) Rule 26/33 damping — which is why
+  the 2026-07-30 23:00 cycle slammed autonomous off a transient sliding forecast when SoC dipped below
+  the `overnight_hold` SoC>25 cliff (see energy_log 2026-07-31). **Fix direction: extend the peak
+  block's go-hard-slot check + damping to the peak-day-eve overnight run-up (i.e. don't switch the peak
+  logic off at 2:55pm on a peak-day eve), rather than patching the 25% gate.** The LP held correctly on
+  every one of those cycles.
+
 - [ ] **MEDIUM — `survival_floor_defend` is price-blind; the LP handles the spike better**
   (surfaced 2026-07-28). On 07-28 the battery rode to ~10% and a morning price spike hit (34¢ realised
   at 07:30, forecast **36¢** at the 07:00 cycle). Rule 30's `survival_floor_defend` is *reactive and
@@ -164,6 +177,11 @@
   forward-price-aware (defend the floor at the cheapest look-ahead slot before the projected breach; don't
   top up *at* a spike if the floor won't breach before a cheaper slot); (b) *structural* — hand
   survival/spike timing to the LP (the Phase-5 / LP-to-control direction). See energy_log 2026-07-28.
+  **NEW DATA POINT 2026-07-30/31:** the `nonpeak_solar_unreliable_autonomous` slam at 23:00 07-30 (SoC
+  23%, 19¢) is the same family — a price-blind escalation the LP avoided (`mpc_hold`, deferring to the
+  12¢ morning slot). Same root cause as the overnight-strategy item above: after 2:55pm the peak block is
+  time-gated off, so this escalation has no cheapest-slot check. The incremental fix (a) should apply to
+  *both* `survival_floor_defend` and the overnight `nonpeak_*` escalations.
 
 - [x] **#2 (from the incident) — a `hold` must revert autonomous mode — DONE 2026-07-26.** The hold
   branch of `_execute_deterministic_verdict` now commands `self_consumption` if the current mode isn't
@@ -323,6 +341,21 @@
      actually pay, but adds a history call per cycle.
   3. Add hysteresis to threshold comparisons so the mode doesn't flip on noise (worth doing
      regardless of 1 or 2, since Zappi mode changes have their own cost).
+
+  **UPDATE 2026-07-31 — the *decision* side is DONE (Rule 32 chose option 1): the agent anchors every
+  threshold on the 30-min slot (`price_used_c`), not the 5-min spot. Two consistency gaps remain, both
+  cosmetic-but-confusing:**
+  - 🐛 **LLM notification narrates the 5-min spot, not `price_used_c` (narrate-the-wrong-number bug).**
+    On 2026-07-31 11:00 the EV notification said *"current import price (11¢) sits at or below the
+    standard_price threshold (15¢)"* → Eco, while the agent actually decided on **`price_used_c` =
+    13.8¢** (the 30-min slot); the 11¢ was a single 5-min print. So the narrative cites a number the
+    decision didn't use, which makes a correct Eco look like a bug under a "Fast ≤ 11¢" rule (this is
+    what prompted the user's question). **Fix: make the EV/battery narrative quote `price_used_c` (and
+    ideally show both, e.g. "13.8¢ 30-min slot; 11¢ spot"), not the raw spot.** One-line prompt/format
+    fix next time we touch the narrative. Low effort, removes a recurring "why did it do that" class.
+  - **Dashboard EV/price card shows the 5-min spot too**, so card-vs-agent disagree at the boundary
+    (card implies Fast at 11¢-spot while the agent holds Eco on the 13.8¢ slot). Surface `price_used_c`
+    on the card, or add the hysteresis in option 3. Same root as the slider "displayed ≠ acted-on" note.
 
   Note this also explains why the dashboard and the agent can disagree about "the price" at any
   instant — same class of problem as the sliders: what is displayed is not what was acted on.
