@@ -161,6 +161,39 @@
   logic off at 2:55pm on a peak-day eve), rather than patching the 25% gate.** The LP held correctly on
   every one of those cycles.
 
+- [ ] **DOC/VERIFY — the EV/Zappi is on a separate circuit the Powerwall CT does NOT see** (established
+  2026-07-31 ~14:47, live; **corrects an earlier wrong "EV drains battery" reading**). Reconciled CTs:
+  Powerwall grid CT ≈ 0 W and Powerwall `load_power` 0.57 kW (**house only**), while the myenergi **Harvi**
+  grid CT (main incomer) read **7.68 kW** — the EV. EV was Fast-charging **7.09 kW** (Polestar: 6989 W,
+  29 A, 1-phase) straight from the grid; the battery was **charging** ~1 kW from solar (SoC climbing
+  82→86%, `battery_power` −1.02 = charging in this integration — the sign I misread earlier). **So the EV
+  is wired upstream of the Powerwall CT → it physically cannot draw from the battery ("EV never from
+  battery" is satisfied by the wiring), and the Powerwall dashboard understates true grid import by the EV
+  load.** Two follow-ups: (1) **document this topology in CONTEXT.md** (electrical, not just network) — it
+  was undocumented and it's why the earlier analysis went wrong; (2) 🔴 **VERIFY the demand-window
+  pass/fail measurement uses the TRUE meter, not the Powerwall CT** — `daily_energy` peak-30min-import
+  reads ~0.06–0.18 kW; if that's sourced from the Powerwall grid sensor it is **blind to the EV**, so any
+  EV draw during 3–9pm (e.g. if the guard ever failed) would be invisible and a demand breach could read
+  as a "pass." The `ev_demand_window_guard` (verified **on**, trigger armed) prevents EV grid draw in the
+  window, so this is a measurement-integrity check, not a live breach.
+
+- [ ] **NEW FEATURE — manual EV control, mirroring the Powerwall's manual override** (user requested
+  2026-07-31). Today exposed there's no clean "agent, hands off the Zappi" switch like the battery's
+  Rule 27. Build: (1) `input_boolean.ev_manual_override` — while ON the agent skips setting the Zappi
+  mode (logs the cycle, like the battery override); (2) a dashboard card — the Zappi mode `select`
+  (Fast/Eco/Eco+/Stop) already exists, add it + the override toggle + live status (charging kW, plug);
+  (3) **the 3pm demand-window guard MUST stay un-overridable** (like Rule 2) so a manual Fast can't bleed
+  into the demand window. **Open question for user:** 12h auto-expire (mirror the battery override) vs
+  persist-until-toggled-off. Code (`energy_agent.py` EV path) + config helper + dashboard card (storage-
+  mode → supply YAML to paste). New rule number (Rule 34?) in energy_rules.md.
+
+- [x] **EV threshold bands aligned to sliders + Fast/Eco widened to 30/50 — DONE 2026-08-01.** Rule 28
+  bands were tighter than the HA sliders, silently rejecting values the dashboard offered. Widened
+  ultra_cheap 12→30, standard 25→50, min_charge 45→60; sliders ultra_cheap max 15→30, standard 30→50;
+  values set **Fast ≤30¢ / Eco ≤50¢**. Code pushed 07-31 (`094c17f`); config deployed + values set +
+  verified 2026-08-01 09:18. `ev_min_soc_pct` deliberately NOT widened (band 50 guards the 2026-07-23
+  force-Fast bug) — **pending user decision**: lower its slider 80→50, or keep the mismatch.
+
 - [ ] **MEDIUM — `survival_floor_defend` is price-blind; the LP handles the spike better**
   (surfaced 2026-07-28). On 07-28 the battery rode to ~10% and a morning price spike hit (34¢ realised
   at 07:30, forecast **36¢** at the 07:00 cycle). Rule 30's `survival_floor_defend` is *reactive and

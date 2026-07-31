@@ -142,7 +142,7 @@ input_number:
   ev_ultra_cheap_threshold_c:
     name: "EV — Ultra-cheap threshold (Fast charge)"
     min: 0
-    max: 15
+    max: 30
     step: 1
     unit_of_measurement: "¢/kWh"
     mode: slider
@@ -150,7 +150,7 @@ input_number:
   ev_standard_price_c:
     name: "EV — Standard charge threshold (Eco)"
     min: 0
-    max: 30
+    max: 50
     step: 1
     unit_of_measurement: "¢/kWh"
     mode: slider

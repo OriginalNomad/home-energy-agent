@@ -22,12 +22,13 @@ pathological.
 **Fast ≤ 30¢, Eco/slow ≤ 50¢** (both above the old slider maxes, so sliders widened too):
 - `SETTINGS_SPEC` (energy_agent.py): ultra_cheap 12→30, standard 25→50, min_charge 45→60.
 - `configuration.yaml` sliders: ultra_cheap max 15→30, standard max 30→50.
-- **Staged deploy (peak-day timing):** the CODE (bands) was pushed at ~14:40 (Pi pulls on the 15:00
-  cron) — this alone stops the out-of-band rejection (agent now honours the current 15/19 helper values).
-  The **HA config deploy** (`deploy_ha_config.sh` + `input_number.reload`) and **setting the 30/50 values**
-  were deliberately **held until after the 3–9pm demand window** — no HA-config changes near the 14:55
-  pre-window reset on a peak day, and the EV thresholds are inert during the window (EV forced Eco+). Do
-  post-21:00: deploy config, reload input_number, set `ev_ultra_cheap_threshold_c`=30 + `ev_standard_price_c`=50, verify.
+- **Staged deploy (peak-day timing):** the CODE (bands) was pushed at ~14:40 07-31 (Pi pulled on the
+  15:00 cron) — this alone stopped the out-of-band rejection. The **HA config deploy** + **setting the
+  30/50 values** were held until after the 3–9pm demand window (no HA-config changes near the 14:55
+  pre-window reset on a peak day). **DONE 2026-08-01 09:18:** `deploy_ha_config.sh` deployed the two
+  slider maxes (drift was exactly those 2 lines, zero else), reloaded input_number; values set via HA API.
+  Verified live: `ev_ultra_cheap_threshold_c`=30 (max 30, **Fast ≤30¢**), `ev_standard_price_c`=50
+  (max 50, **Eco/slow ≤50¢**).
 
 This is a legitimate willingness-to-pay control (the EV has exogenous value — "I'll pay up to X¢ to
 charge the car"), exactly the class Rule 28 says the user should own. Note the 3–9pm demand-window guard
@@ -38,6 +39,45 @@ re-enable the 2026-07-23 failure (min_soc drifted to 80 → forced the EV to Fas
 tests guard against — including `test_settings_drifted_ev_min_soc_no_longer_forces_fast`. The correct fix
 is to **lower its slider to 50**, not widen the band. Left as a pending user decision (slider still 80),
 so that one mismatch is knowingly outstanding. Band reverted to 50; no test changes needed.
+
+### EV energy-flow investigation — topology corrected + demand-window guard verified live
+
+User questioned an apparent "battery discharging while EV charging" read (my earlier analysis). Pulled
+live CTs and **corrected two of my errors**:
+1. **Battery was CHARGING, not discharging** — SoC climbing 82→88% is the proof; `battery_power` −1.0 kW
+   = charging in this integration (I'd read the sign backwards). Solar was going into the battery, as the
+   user thought.
+2. **The EV/Zappi is on a SEPARATE circuit the Powerwall CT does not see.** Powerwall grid CT ≈ 0 W and
+   `load_power` 0.57 kW (house only), while the myenergi **Harvi** CT (main incomer) read **7.68 kW** —
+   the EV Fast-charging **7.09 kW** (Polestar: 6989 W / 29 A / 1-phase) straight from grid. So the EV is
+   wired **upstream of the Powerwall CT** → it physically cannot draw from the battery ("EV never from
+   battery" holds by the wiring), and **the Powerwall dashboard understates true grid import by the EV
+   load.** My earlier "EV drains the battery" conclusion was wrong and is retracted (todo item corrected).
+
+**Demand-window guard VERIFIED working live (the user's real worry).** The EV was Fast-charging 7 kW at
+14:56; `automation.ev_demand_window_guard_instant_eco_at_3pm` (entity_id slugified from its alias — a 404
+on the id was a red herring) is enabled and armed on `binary_sensor.…_demand_window → on`. At 15:00 it
+fired: Zappi → **Eco+**; EV wound down 7 kW → **0 W by 15:02**; Harvi grid 34 W (~0). Demand window
+protected. Belt-and-suspenders: the 15:00 agent cron also sets Eco+.
+
+**Consequence flagged (todo):** the demand-window pass/fail metric records peak-30min-import of only
+~0.06–0.18 kW — **verify that figure comes from the true meter (Harvi/utility), not the Powerwall CT**,
+which is blind to the EV circuit. Guard prevents EV-in-window in practice, so it's a measurement-integrity
+check, not a live breach.
+
+### User request — a manual EV control, mirroring the Powerwall's manual override (TO BUILD)
+
+Today exposed that there's no clean "agent, hands off the Zappi" switch like the battery's Rule 27
+override. Designed (not yet built): `input_boolean.ev_manual_override` (agent stops setting Zappi mode
+while ON; 12h auto-expire like the battery override, TBC with user) + a dashboard card (the Zappi mode
+`select` already exists + the toggle + live status). **Hard rule: the 3pm demand-window guard stays
+un-overridable** (like Rule 2) so a manual Fast can't bleed into the window. Open question to user: 12h
+auto-expire vs persist-until-off. Deploy with a future config change.
+
+### Close-out note (2026-08-01 09:18): battery at 12% this morning
+
+`sensor.tessie_powerwall_charge` = 12% at 09:17 — rode the overnight floor again (the "revisit overnight
+strategy" item). Not acted on; noted as another data point for that todo.
 
 ### LP replay — risk knob, entry-SoC floor, conservative rate all FAIL to flip the dangerous holds
 

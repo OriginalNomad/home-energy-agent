@@ -29,6 +29,17 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 - Solar Sponge window: **10am–3pm** (cheapest grid import)
 - Export penalty if export during 10am–3pm exceeds threshold
 
+**⚠️ Electrical topology — the EV/Zappi is on a SEPARATE circuit the Powerwall CT does NOT see
+(established 2026-07-31, live):** the Zappi is wired **upstream of the Powerwall's grid CT**. Consequences:
+(1) the EV physically **cannot draw from the battery** — "EV never from battery" holds by the wiring, not
+by control; (2) the **Powerwall dashboard/`grid_power` sensor understates true grid import by the EV load**
+— when the EV Fast-charges at 7 kW, `sensor.grid_power_w` still reads ~0 while the myenergi **Harvi** CT
+(on the main incomer) reads the real 7 kW. The Harvi (`sensor.harvi_..._power_ct_grid`) ≈ the utility
+meter and is the true grid-import reference; `sensor.…_zappi_power_charging` is the EV draw. **The demand
+charge is measured at the utility meter, so a 3–9pm EV draw WOULD count** — this is why the `ev_demand_
+window_guard` (Zappi → Eco+ at 3pm) is load-bearing. Do not reconcile whole-site energy balance from the
+Powerwall sensors alone; they see the house branch only (`load_power` excludes the EV).
+
 ---
 
 ## Network topology (matters for any non-energy integration)
