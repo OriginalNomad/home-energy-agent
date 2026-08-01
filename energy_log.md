@@ -42,6 +42,46 @@ effective solar under `solar_unreliable`, the derate flip, and the derate=1.0 no
 setting, and once input-logging accumulates some solar-*trusted* marginal days, test a conservative solar
 quantile on the class that only now becomes replayable.
 
+### `exec_charge_derate` sweep result — the rate lever is weak, and it mostly VINDICATES the LP
+
+Ran the offline sweep on the Pi (`/tmp/lp_derate_sweep.py`, non-invasive; energy_log.db PF +
+decisions.jsonl state; solar zeroed via `solar_unreliable`). **Reproduction 41/41** (derate=1.0 matches
+every logged `optimizer_verdict` — harness faithful). Swept derate ∈ [1.0…0.25] over **29 Family-A**
+(det-charge/LP-hold, 07-29→08-01) cycles and a **12-cycle control** (both-hold, peak daytime):
+
+| derate | assumed rate | Family-A flips hold→charge | Control spurious flips |
+|---|---|---:|---:|
+| 1.0–0.7 | 5.0–3.5 kW | 0/29 | 0/12 |
+| 0.6 | 3.0 kW | 1/29 | 0/12 |
+| 0.5 | 2.5 kW | 1/29 | 0/12 |
+| 0.4 | 2.0 kW | 2/29 | 0/12 |
+| 0.35 | 1.75 kW | 5/29 | 1/12 |
+| 0.3 | 1.5 kW | 10/29 | 1/12 |
+| 0.25 | 1.25 kW | 16/29 | 1/12 |
+
+**Findings.** (1) At *realistic* derates (0.6–0.7, i.e. planning against 3–3.5 kW instead of 5 kW) the
+lever flips essentially **nothing** — the LP's Family-A deferrals are, on this data, genuinely defensible:
+it defers to the cheap sponge and reaches the window target in time (07-30 passed at min-SoC 38%, 07-31 at
+53%). To flip a meaningful fraction you need derate ≤0.3 (pretend autonomous charges at self_consumption
+speed) — physically unrealistic, and it starts causing spurious control flips. (2) The cycles that DO flip
+first are the **late-morning/midday** ones nearest the deadline (07-29 13:00 flips at 0.6; 07-30 12:30 at
+0.35), while early-morning cycles never flip even at 0.25 — i.e. the derate correctly bites only when the
+slow fill genuinely stops fitting, and leaves ample-time holds alone. That's the receding-horizon property
+working as intended, not a bug. (3) The lone control flip is 07-30 14:00 (SoC 85%, 1h pre-window) → C100 —
+a mild over-charge, not dangerous.
+
+**Conclusion — a negative-ish result that redirects effort.** The conservative charge-rate derate is a
+*weak, correctly-late* lever; the data says the LP's daytime Family-A holds are mostly RIGHT (the det
+layer's early insurance was cost-suboptimal), so there is **no case for adopting a standing derate as a
+control setting.** A mild 0.6–0.7 could be kept purely as crater-tail insurance (costs nothing here) but
+its value isn't demonstrated on this data. The real remaining Family-A levers are **not** the rate: (a) the
+**solar-*trusted* marginal-day class** (LP trusts corrected-Solcast, det zeroes it) — the only place solar
+trust actually differs, and the class the new `LOG_LP_INPUTS` will finally make replayable going forward;
+and (b) **cheap-slot-arrival / sliding-forecast risk** (the deferred sponge slot never materialises).
+NB the auto-selected Family-A set also swept in early-morning `survival_floor_defend` cycles (e.g. 08-01
+04:30 @8%) — the derate correctly leaves those untouched; they belong to the separate survival-floor
+price-blindness item, not the deadline-fill class.
+
 ## 2026-08-01 (session — Rule 35: peak-eve run-up fixes the 9pm–midnight time-gate hole)
 
 Implemented the fix for the root cause diagnosed on 2026-07-31 (below): on a peak-month day the

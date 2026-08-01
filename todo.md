@@ -489,10 +489,20 @@
   where solar *trust* differs (solar trusted on a marginal day) becomes replayable; (2)
   **`OptParams.exec_charge_derate`** (default 1.0=off) — the plan-execution-margin knob, an LP analogue of
   `FAST_ESCALATE_BUFFER_H`, verified to flip a genuinely-tight peak deferral hold→charge. 9 tests (25
-  optimizer total). **Next:** (a) offline-replay `exec_charge_derate` sweep vs 07-30/07-31 to pick a
-  setting; (b) once input-logging accumulates solar-*trusted* marginal days, test a conservative solar
-  quantile (`model_params solar_correction` already carries per-hour `uncertainty`) on the now-replayable
-  class; (c) consider dual-shadow logging a margin-on verdict to collect go-forward divergence data.
+  optimizer total).
+
+  ▶️ **DERATE SWEEP DONE 2026-08-01 — NEGATIVE result (`/tmp/lp_derate_sweep.py` on the Pi; repro 41/41).**
+  Swept `exec_charge_derate` over 29 Family-A + 12 control cycles. At realistic derates (0.6–0.7 ≈ plan
+  against 3–3.5 kW) it flips **0/29** — the LP's daytime deferrals are genuinely defensible (both days
+  passed the window); only unrealistic ≤0.3 flips a meaningful share, and then it spuriously flips control
+  cycles too. It correctly bites only near-deadline cycles and leaves ample-time/early-morning holds alone.
+  **So: do NOT adopt a standing derate as control.** (A mild 0.6–0.7 could be kept as crater-tail insurance
+  but is unproven on this data.) See energy_log 2026-08-01 for the table. **Redirects the remaining
+  Family-A work to the levers the rate ISN'T:** (a) the solar-*trusted* marginal-day class — the only place
+  solar trust differs, now made replayable by `LOG_LP_INPUTS` (collect a few such days, then test a
+  conservative quantile using `solar_correction`'s per-hour `uncertainty`); (b) cheap-slot-arrival /
+  sliding-forecast risk (the deferred sponge slot never lands). Dual-shadow logging a margin-on verdict is
+  moot now the derate is shown weak.
 - [ ] **Analyst agent** — weekly agent that reads `decisions.jsonl` + `daily_energy.jsonl` and surfaces systematic patterns: "cloudy mornings consistently start charging 1h late", "sponge threshold too tight 3 weeks in a row". Outputs proposed rule changes in plain English for human review. This is the feedback loop that makes the system self-improving rather than just self-executing.
 - [ ] **Savings dashboard** — daily/weekly $ saved vs naive baseline (flat-rate charging, no demand management, no solar optimisation). Broken down by: demand charge avoided, cheap-window differential, solar self-consumption. Core product metric; also the first Sol feature users need to see.
 
