@@ -1,5 +1,37 @@
 # Energy System Control Log
 
+## 2026-08-01 (session — Amber/SolarEdge export-script keys moved out of source; .env + gitignore)
+
+Spotted while reviewing secrets: the Mac-side data-export tools in `Amber Electric Data/` **hardcoded
+their API keys inline** (`fetch_amber_data.command`, `probe_amber_history{,2,3}.command` — Amber `psk_`;
+`fetch_solaredge_data.command` — SolarEdge). The dir was untracked (never committed) but also **not
+gitignored**, so a stray `git add .` would have committed the keys + the 99 MB usage CSV. During review two
+key *values* were also surfaced in session tool output (an over-broad grep), so both need rotating.
+
+**Architecture clarified first (important):** a hash-compare proved the exposed Amber `psk_` token is the
+**same token HA's `amberelectric` integration uses for the live price feed** — i.e. it is load-bearing for
+the whole control path, not just billing. So Amber-key rotation is a *coordinated* change: revoking the old
+token without updating HA kills the price feed, and because the agent then falls back to
+`insufficient_forecast`/hold (doesn't crash), the **Healthcheck heartbeat would NOT catch it** — a silent
+blind-into-the-demand-window failure. The token is read-scoped (usage/prices/site, no control), so low
+severity and no emergency.
+
+**Done this session:**
+- Created gitignored `Amber Electric Data/.env` (`AMBER_API_KEY`, `SOLAREDGE_API_KEY`); added
+  `Amber Electric Data/` to `.gitignore` (keys + bills + bulk CSVs can never be committed now).
+- Rewired all 5 `.command` scripts to read the keys from that `.env` (shell sources it + validates;
+  Python reads `os.environ`). No key literal remains in any script (grep clean).
+- User generated a **new Amber token "Amber-Billing-Key-2026"** for the scripts and pasted it into `.env`;
+  verified live: `GET /v1/sites` → **HTTP 200**.
+
+**Outstanding (user actions):**
+1. **Close the Amber exposure fully** — the OLD exposed token still powers HA's live feed. Safe sequence:
+   generate a *second* new token ("home-assistant"), switch HA's Amber integration to it and confirm
+   `sensor.…_general_price` goes fresh, **then** revoke the old exposed token. (Separate tokens per consumer
+   going forward, so an exposed export key never touches the control path again.)
+2. **Rotate the SolarEdge key** (also surfaced) and paste into `.env` `SOLAREDGE_API_KEY` — currently blank,
+   so the SolarEdge script errors until filled (intentional, forces the rotation).
+
 ## 2026-08-01 (session — Family-A: LP input-logging + plan-execution derate knob)
 
 Addressed the **Family-A** divergences (deterministic charges as insurance / LP holds `mpc_hold`)

@@ -4,6 +4,17 @@
 
 ### Immediate
 
+- [ ] 🔐 **HIGH — finish the Amber/SolarEdge key rotation (2026-08-01).** The export-script keys were moved
+  out of source into a gitignored `Amber Electric Data/.env` and all 5 `.command` scripts rewired to read
+  it; the new Amber "Amber-Billing-Key-2026" is set + verified (HTTP 200). **Two rotations still owed
+  (both keys were surfaced in-session):**
+  1. **Amber — the OLD exposed token still powers HA's live price feed** (hash-confirmed same token). Do
+     NOT just revoke it. Generate a 2nd new token ("home-assistant"), switch HA's Amber integration to it,
+     confirm `sensor.…_general_price` goes fresh, **then** revoke the old one. Note a broken Amber feed is
+     *silent* — the agent falls back to hold, the Healthcheck heartbeat stays green (see energy_log
+     2026-08-01). Read-scoped token → low severity, but close it.
+  2. **SolarEdge** — rotate + paste into `.env` `SOLAREDGE_API_KEY` (blank now → script errors until filled).
+
 - [x] 🔴 **HIGH — harden the demand-window automations against an unavailable local Powerwall sensor —
   DONE 2026-07-29.** Defaulted **every** bare `| int`/`| float` in `config/automations.yaml` (30 int + 2
   float → all `int(0)`/`float(0)`), and switched the demand-window notification SoC refs from the local

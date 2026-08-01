@@ -24,6 +24,10 @@ config/image/
 # Secrets — move API keys here eventually
 config/secrets.yaml
 
+# Amber Electric Data — local secrets (.env), bills, and bulk CSV exports.
+# Contains API keys + personal billing data; never belongs in the repo.
+Amber Electric Data/
+
 # OS
 .DS_Store
 
