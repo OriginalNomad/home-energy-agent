@@ -1212,6 +1212,19 @@ PRICE_USE_30MIN_SLOT = True
 DEADLINE_GENTLE_LEAD   = True
 FAST_ESCALATE_BUFFER_H = 1.5   # go autonomous when hours_to_2_55 <= fill_fast_85 + this
 
+# Rule 35 — peak-eve run-up. The peak-deadline block (Rule 13) is gated `now_h < DEMAND_DEADLINE`,
+# so on a peak-month day the 9pm–midnight window (after the demand window closes at 9pm, before the
+# clock wraps back under the deadline at midnight) fell through to the NON-peak escalation chain —
+# which lacks the two peak protections: the _cheapest_go_hard_slot() check and Rule 33 gentle-lead
+# damping. On 2026-07-30 23:00 that chain slammed 5 kW autonomous at 19¢ (nonpeak_solar_unreliable_
+# autonomous) when the LP correctly held for the 12¢ morning sponge slot. Fix: run the peak block
+# through the peak-eve evening too, relying on the existing hours_to_2_55 day-wrap (line ~1708) to
+# target tomorrow's 2:55pm. The demand window itself (3–9pm) is still handled first by the
+# `in_demand` branch, and the afternoon-only peak_deadline_quickcheck heuristic is guarded to the
+# real run-up so it can't fire at 11pm. Kill-switch: PEAK_EVE_RUNUP = False reverts to the old
+# fall-through (peak block off after 2:55pm).
+PEAK_EVE_RUNUP = True
+
 # Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
 # Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
 MODEL_PARAMS_FILE = Path(__file__).parent / "model_params.json"
@@ -1806,9 +1819,14 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     def verdict(action, target, mode, rule):
         return {"action": action, "target_pct": target, "mode": mode, "rule_fired": rule}
 
+    # Peak-eve (Rule 35): the 9pm–midnight window on a peak-month day. `in_demand` (3–9pm) is
+    # handled first above; the 14:55–15:00 sliver is harmless. When PEAK_EVE_RUNUP is off this is
+    # always False, so the gate below collapses to the old `now_h < DEMAND_DEADLINE` behaviour.
+    peak_eve = is_peak and PEAK_EVE_RUNUP and now_h >= DEMAND_DEADLINE
+
     if in_demand:
         rec = verdict("hold", None, None, "demand_window_active")
-    elif is_peak and now_h < DEMAND_DEADLINE and soc < 85:
+    elif is_peak and soc < 85 and (now_h < DEMAND_DEADLINE or peak_eve):
         # Peak-month hard deadline escalation (Rule 13)
         if kwh_needed_85 <= 0:
             # net solar (after home load) covers the remaining gap — no grid charge needed yet.
@@ -1818,7 +1836,17 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                 # Survival check: will the battery reach Solar Sponge (10am) without hitting the
                 # 5% backup floor? If not, the grid covers home load at the expensive current price
                 # anyway — charging now at self_consumption is strictly cheaper than that outcome.
-                hours_to_sponge = max(10.0 - now_h, 0.0)
+                # Hours until the next Solar Sponge start (10am). Same-day before 10am; 0 while in
+                # the 10am–3pm window (sponge is now); tomorrow's 10am in the peak-eve evening
+                # (Rule 35) — the old `max(10 - now_h, 0)` read 0 after 3pm, which would wrongly
+                # project no overnight drain. Only reachable when net solar already covers the gap,
+                # so it never fires at night in practice, but kept correct for the day boundary.
+                if now_h < 10.0:
+                    hours_to_sponge = 10.0 - now_h
+                elif now_h < DEMAND_DEADLINE:
+                    hours_to_sponge = 0.0
+                else:
+                    hours_to_sponge = (24.0 - now_h) + 10.0
                 projected_soc_at_sponge = soc - (home_load_kw * hours_to_sponge / USABLE_KWH * 100)
                 if projected_soc_at_sponge <= 5.0:
                     # Battery hits floor before Solar Sponge. But if Solar Sponge is close
@@ -1854,7 +1882,11 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             # Kill-switch path: old straight-to-autonomous behaviour (escalate the instant
             # self_consumption can't fill the whole gap in time).
             rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
-        elif (now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70):
+        elif now_h < DEMAND_DEADLINE and ((now_h >= 12.5 and soc < 40) or (now_h >= 13.5 and soc < 70)):
+            # Afternoon-only backstop: absolute-hour thresholds assume we're in the real run-up to
+            # 2:55pm. Guarded off in the peak-eve window (Rule 35) so it can't slam autonomous at
+            # 11pm when hours_to_2_55 is ~16h — the go-hard-slot / gentle-lead branches below handle
+            # the evening, deferring to the cheap morning slot instead.
             rec = verdict("charge", 100, "autonomous", "peak_deadline_quickcheck")
         elif in_sponge and now_h < 13 and soc < 50:
             rec = verdict("charge", max(50, cost_target), "self_consumption", "solar_sponge_floor")

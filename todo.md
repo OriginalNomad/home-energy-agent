@@ -161,6 +161,17 @@
   logic off at 2:55pm on a peak-day eve), rather than patching the 25% gate.** The LP held correctly on
   every one of those cycles.
 
+  ✅ **GATE FIX DONE 2026-08-01 (Rule 35, `PEAK_EVE_RUNUP`).** Extended the peak-deadline block through
+  the **9pm–midnight** peak-eve window (the exact hole — the demand window handles 3–9pm, and
+  midnight→2:55pm already ran the peak block via the `hours_to_2_55` day-wrap). The evening now fires
+  `wait_for_cheap_go_hard` and defers to the cheap morning sponge slot, matching the LP's `mpc_hold`.
+  Guarded `peak_deadline_quickcheck` to `now_h < 2:55pm` (its absolute-hour thresholds would else slam
+  autonomous at 11pm) and made `hours_to_sponge` day-boundary-aware. 3 tests; 108 decision total. See
+  energy_rules Rule 35 + energy_log 2026-08-01. **⏳ Not deployed — needs `git push`** (Pi auto-pulls on
+  the 30-min cron). **Still open (separate change):** the `survival_floor_defend` price-blindness on the
+  midnight–2:55pm cycles — the item below covers it; the 07-31 LP replay argues the lever there is the
+  charge-*rate*/cheap-slot-arrival assumption, not conservative-solar.
+
 - [ ] **DOC/VERIFY — the EV/Zappi is on a separate circuit the Powerwall CT does NOT see** (established
   2026-07-31 ~14:47, live; **corrects an earlier wrong "EV drains battery" reading**). Reconciled CTs:
   Powerwall grid CT ≈ 0 W and Powerwall `load_power` 0.57 kW (**house only**), while the myenergi **Harvi**

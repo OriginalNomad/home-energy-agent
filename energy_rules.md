@@ -1040,6 +1040,46 @@ flip; add hysteresis only if `price_used_c` shows residual boundary oscillation.
 
 ---
 
+### Rule 35 — Peak-Eve Run-Up: Keep the Peak Logic On Overnight (9pm–midnight)
+
+**Added 2026-08-01.** The peak-deadline block (Rule 13) is gated `is_peak and now_h < DEMAND_DEADLINE
+(2:55pm) and soc < 85`. On a peak-month day the demand window (3–9pm) is handled by the `in_demand`
+branch, and the early hours (midnight → 2:55pm) already run the peak block because `hours_to_2_55`
+wraps the day boundary. But the **9pm–midnight** window — after the demand window closes, before the
+clock wraps back under the deadline — fell through to the **non-peak escalation chain**, which lacks
+the two peak protections: the `_cheapest_go_hard_slot()` look-ahead (Rule 22) and the Rule 33
+gentle-lead damping. On **2026-07-30 23:00** (SoC 23%, 19¢, solar flagged unreliable) that chain
+fired `nonpeak_solar_unreliable_autonomous` and slammed 5 kW at 19¢, when the LP correctly held
+(`mpc_hold`) deferring to the 12¢ morning Solar Sponge slot. This is a **time-gate bug, not a
+peak-detection bug** — `is_peak_month` was correctly True the whole time.
+
+**Fix (`PEAK_EVE_RUNUP`).** The peak block now also runs in the peak-eve evening: the gate becomes
+`is_peak and soc < 85 and (now_h < DEMAND_DEADLINE or peak_eve)`, where
+`peak_eve = is_peak and PEAK_EVE_RUNUP and now_h >= DEMAND_DEADLINE`. The existing `hours_to_2_55`
+day-wrap targets *tomorrow's* 2:55pm (≈15.9h at 11pm), so the go-hard-slot and gentle-lead branches
+compute correctly and the evening now **holds for the cheap morning slot** (`wait_for_cheap_go_hard`)
+instead of buying expensive insurance — matching the LP. Rule 30 survival-floor defense still
+backstops a genuinely low battery.
+
+**Two guards that make the extension safe:**
+1. **`peak_deadline_quickcheck` is now afternoon-only** — guarded `now_h < DEMAND_DEADLINE`. Its
+   absolute-hour thresholds (`now_h ≥ 12.5 and soc < 40`, etc.) assume the real run-up to 2:55pm; at
+   11pm `now_h ≥ 12.5` is trivially true and would have slammed autonomous. Guarded off in the
+   peak-eve window, so the go-hard-slot / gentle-lead / `peak_early_morning_hold` branches handle the
+   evening instead.
+2. **`hours_to_sponge` is day-boundary-aware** — the survival-projection helper (Rule 24) read
+   `max(10 - now_h, 0)`, which is 0 after 3pm and would wrongly project no overnight drain. Now it
+   returns hours to the *next* 10am (0 while in the 10am–3pm sponge, tomorrow's 10am in the evening).
+   Only reachable when net solar already covers the gap, so it never fires at night in practice, but
+   kept correct for the boundary.
+
+**Kill-switch:** `PEAK_EVE_RUNUP = False` reverts to the old fall-through (peak block off after
+2:55pm). **Does not fix** the related `survival_floor_defend` price-blindness (the midnight–2:55pm
+cycles) — that is a separate change (make the survival floor forward-price-aware / hand spike timing
+to the LP). 3 tests (`test_peak_eve_*`), 108 decision total.
+
+---
+
 ## Decision Priority Order
 When multiple rules conflict, apply in this order:
 

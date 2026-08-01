@@ -1,5 +1,40 @@
 # Energy System Control Log
 
+## 2026-08-01 (session — Rule 35: peak-eve run-up fixes the 9pm–midnight time-gate hole)
+
+Implemented the fix for the root cause diagnosed on 2026-07-31 (below): on a peak-month day the
+peak-deadline block was gated `now_h < DEMAND_DEADLINE (2:55pm)`, so the **9pm–midnight** window fell
+through to the non-peak escalation chain (no `_cheapest_go_hard_slot()` look-ahead, no Rule 33
+damping) — the chain that slammed 5 kW autonomous at 19¢ on 2026-07-30 23:00 while the LP correctly
+held for the 12¢ morning sponge. (The demand window 3–9pm is handled first by `in_demand`; the early
+hours midnight→2:55pm already ran the peak block via the `hours_to_2_55` day-wrap. So the exposed hole
+was precisely **9pm–midnight**, narrower than "overnight.")
+
+**Changes (`energy_agent.py`, all behind `PEAK_EVE_RUNUP = True`):**
+1. **Gate extended.** `peak_eve = is_peak and PEAK_EVE_RUNUP and now_h >= DEMAND_DEADLINE`; the block
+   gate is now `is_peak and soc < 85 and (now_h < DEMAND_DEADLINE or peak_eve)`. With the flag off it
+   collapses to the exact old condition. The evening now holds for the cheap morning slot
+   (`wait_for_cheap_go_hard`), matching the LP's `mpc_hold`.
+2. **`peak_deadline_quickcheck` guarded `now_h < DEMAND_DEADLINE`.** Its absolute-hour thresholds
+   (`now_h ≥ 12.5 and soc < 40`, etc.) are trivially true at 11pm and would have re-created the same
+   autonomous slam under a different rule name. Guarded to the real afternoon run-up only.
+3. **`hours_to_sponge` made day-boundary-aware** (Rule 24 survival projection): hours to the *next*
+   10am (0 while in the 10am–3pm sponge, tomorrow's 10am in the evening) instead of `max(10−now_h, 0)`
+   which read 0 after 3pm. Only reachable when net solar already covers the gap — never at night in
+   practice — but kept correct for the boundary.
+
+**Tests:** 3 new (`test_peak_eve_holds_for_cheap_morning_slot` reproduces the 07-30 23:00 shape and
+asserts `wait_for_cheap_go_hard`; `test_peak_eve_killswitch_off_reverts`; `test_peak_eve_no_quickcheck_
+slam_at_low_soc`). Full suite green: **108 decision + 16 optimizer + 11 build_models**.
+
+**Not deployed yet** — needs `git push`; the Pi's agent cron auto-pulls on the next 30-min cycle.
+Verified against the standing `PEAK_EVE_RUNUP` kill-switch pattern. **Does not fix** the related
+`survival_floor_defend` price-blindness on the midnight–2:55pm cycles — that's a separate change
+(forward-price-aware survival, or hand spike timing to the LP), and the 07-31 LP replay (below)
+argues the deeper lever there is the charge-*rate* / cheap-slot-arrival assumption, not a
+conservative-solar term. Rule 35 written up in `energy_rules.md`; todo overnight-strategy item's
+gate-fix portion marked done.
+
 ## 2026-07-31 (session — EV threshold bands widened; LP risk-knob/entry-floor replay = negative result)
 
 ### EV threshold bands were tighter than the dashboard sliders (control fault, fixed + deployed)

@@ -262,6 +262,47 @@ def test_peak_early_morning_hold_fires_at_low_soc():
     check("action is hold", r["action"] == "hold", r)
 
 
+def test_peak_eve_holds_for_cheap_morning_slot():
+    # Rule 35 — 11pm on a peak-month day, SoC=23%, current price 19¢, a 12¢ Solar Sponge slot
+    # ~8h out. Before the fix the peak block was gated `now_h < 2:55pm`, so this fell through to
+    # the non-peak chain and slammed 5 kW autonomous (nonpeak_solar_unreliable_autonomous — the
+    # 2026-07-30 23:00 incident). Now the peak block runs through the peak-eve window and defers to
+    # the cheap morning slot, matching the LP's mpc_hold.
+    state = mk_state(23, 23, "na", 0.0, 0.0, price=19.0)
+    prices = [19.0] * 16 + [12.0] * 8   # 12¢ Solar Sponge slot ~8h ahead
+    ctx = ea.compute_decision_context(state, fc(prices), [], now_at(23, 0))
+    r = ctx["recommended"]
+    check("peak-eve defers to cheap morning slot", r["rule_fired"] == "wait_for_cheap_go_hard", r)
+    check("peak-eve action is hold", r["action"] == "hold", r)
+
+
+def test_peak_eve_killswitch_off_reverts():
+    # PEAK_EVE_RUNUP=False → the peak block stays gated off after 2:55pm, so the same inputs no
+    # longer produce the peak-block wait_for_cheap_go_hard (old fall-through restored). Saves and
+    # restores the module global so both pytest and the __main__ runner stay clean.
+    state = mk_state(23, 23, "na", 0.0, 0.0, price=19.0)
+    prices = [19.0] * 16 + [12.0] * 8
+    _saved = ea.PEAK_EVE_RUNUP
+    ea.PEAK_EVE_RUNUP = False
+    try:
+        ctx = ea.compute_decision_context(state, fc(prices), [], now_at(23, 0))
+    finally:
+        ea.PEAK_EVE_RUNUP = _saved
+    r = ctx["recommended"]
+    check("kill-switch off bypasses the peak block", r["rule_fired"] != "wait_for_cheap_go_hard", r)
+
+
+def test_peak_eve_no_quickcheck_slam_at_low_soc():
+    # SoC=30% (<40) at 11pm would trip the afternoon-only peak_deadline_quickcheck if that heuristic
+    # weren't guarded to now_h < 2:55pm. With a flat 19¢ forecast (no cheaper slot) the peak-eve
+    # window must HOLD (peak_early_morning_hold), never slam autonomous at 11pm.
+    state = mk_state(30, 23, "na", 0.0, 0.0, price=19.0)
+    ctx = ea.compute_decision_context(state, flat(19), [], now_at(23, 0))
+    r = ctx["recommended"]
+    check("peak-eve does not fire peak_deadline_quickcheck", r["rule_fired"] != "peak_deadline_quickcheck", r)
+    check("peak-eve holds at low SoC on flat expensive price", r["action"] == "hold", r)
+
+
 def test_peak_sponge_go_hard():
     # SoC=40%, 10:30am (in Solar Sponge), poor solar → solar_unreliable=True → expected_solar=0.
     # kwh_needed_85 = (0.85-0.4)*13.5 = 6.075, fill_slow=3.57h, deadline=4.42h, buffer=0.85h < 1h.
@@ -1595,6 +1636,9 @@ if __name__ == "__main__":
                test_peak_early_morning_hold_on_price_spike,
                test_peak_early_morning_hold_not_fired_when_cheap,
                test_peak_early_morning_hold_fires_at_low_soc,
+               test_peak_eve_holds_for_cheap_morning_slot,
+               test_peak_eve_killswitch_off_reverts,
+               test_peak_eve_no_quickcheck_slam_at_low_soc,
                test_peak_sponge_go_hard, test_peak_sponge_selfcons_then_escalates,
                test_peak_sponge_solar_improves_to_hold,
                test_corrected_solar_is_preferred_when_present,

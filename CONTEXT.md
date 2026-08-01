@@ -298,6 +298,17 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capability added 2026-08-01:
+- **Rule 35 — peak-eve run-up** (`PEAK_EVE_RUNUP`). The peak-deadline block was gated
+  `now_h < 2:55pm`, so on a peak-month day the **9pm–midnight** window fell through to the non-peak
+  escalation chain (no cheap-slot look-ahead, no Rule 33 damping) — which slammed 5 kW autonomous at
+  19¢ on 2026-07-30 23:00 while the LP correctly held for the 12¢ morning sponge. The block now runs
+  through the peak-eve evening (the `hours_to_2_55` day-wrap targets tomorrow's 2:55pm), so the evening
+  holds for the cheap morning slot (`wait_for_cheap_go_hard`). `peak_deadline_quickcheck` guarded to
+  the real afternoon so it can't slam at 11pm; `hours_to_sponge` made day-boundary-aware. **Control-path
+  change**, kill-switch reverts to the old fall-through. **⏳ pending `git push` to reach the Pi.**
+  Does *not* fix the `survival_floor_defend` price-blindness on the midnight–2:55pm cycles (separate).
+
 Key agent capabilities added 2026-07-26 (session 21):
 - **Rule 33 — receding-horizon deadline escalation** (`DEADLINE_GENTLE_LEAD`,
   `FAST_ESCALATE_BUFFER_H=1.5`). The peak deadline branch used to jump straight to autonomous (5 kW)
