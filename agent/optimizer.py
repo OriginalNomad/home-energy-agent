@@ -59,7 +59,20 @@ class OptParams:
     # robustness knob — the elicited risk tolerance maps to this (PRODUCT.md):
     # scale the solar forecast down (plan against a conservative quantile) and the
     # load up. 0.0 = trust the point forecast; higher = more conservative.
+    # NB this is *forecast* risk (solar/load). It is structurally inert on cloudy
+    # mornings where solar is already zeroed (solar_unreliable) — which is exactly
+    # the Family-A det-charge/LP-hold divergence class. See exec_charge_derate.
     risk: float = 0.0
+
+    # plan-execution risk knob — SEPARATE from `risk` (forecast risk). Derates the
+    # charge rate the plan assumes (multiplier on p_charge_max_kw), so a deferred fill
+    # must start early enough to still finish before the demand window even if the real
+    # rate runs slower or a cheap slot is short. This is the LP analogue of the
+    # deterministic FAST_ESCALATE_BUFFER_H safety margin, and the lever the 2026-07-31
+    # replay identified: a conservative charge-rate cap flipped exactly the genuinely-
+    # tight Family-A deferrals (and nothing else). 1.0 = off (trust the point rate) →
+    # no behaviour change, so live shadow is unaffected until this is deliberately swept.
+    exec_charge_derate: float = 1.0
 
     # action-mapping thresholds (verdict translation)
     grid_charge_threshold_kw: float = 0.3   # grid-sourced charge above this ⇒ "charge"
@@ -67,6 +80,16 @@ class OptParams:
 
     demand_window_start_h: int = 15         # 3pm
     demand_window_end_h: int = 21           # 9pm
+
+
+# When True, optimize_battery() attaches the per-slot INPUT series it solved on
+# (raw + effective solar, price, load) to its result under "inputs". This is the
+# unblocker the 2026-07-31 replay named: the per-slot solar forecast the LP consumed
+# was never logged, so the one Family-A class where solar *trust* actually differs
+# (solar trusted on a marginal day) could not be replayed. The shadow block copies all
+# non-verdict keys into decisions.jsonl `optimizer_context`, so this alone starts the
+# collection. Set False to suppress the arrays if record size becomes a concern.
+LOG_LP_INPUTS = True
 
 
 # ───────────────────────────── helpers ─────────────────────────────
@@ -202,13 +225,39 @@ def optimize_battery(state: dict,
                                        min_samples=_min_samples)
         p = OptParams(**{**asdict(p), "p_charge_max_kw": _eff_rate})
 
-    # forecasts on the price grid, with the robustness knob applied
+    # Plan-execution margin (separate from forecast `risk`): derate the assumed charge
+    # rate so a deferred fill must start early enough to finish before the demand window
+    # even if the real rate runs slow. 1.0 = off → identical to prior behaviour.
+    if p.exec_charge_derate != 1.0:
+        p = OptParams(**{**asdict(p),
+                         "p_charge_max_kw": p.p_charge_max_kw * p.exec_charge_derate})
+
+    # forecasts on the price grid. solar_raw = pre-correction Solcast aligned to the grid
+    # (kept so an offline replay can re-apply ANY quantile: raw × (ratio − k·uncertainty));
+    # solar = the effective series the LP actually solves on (corrected + risk-scaled +
+    # zeroed when the morning is flagged unreliable).
+    solar_raw = _build_solar_series(price_forecast, solar_forecast, H, fallback_kw=0.0,
+                                    solar_correction=None)
     solar = _build_solar_series(price_forecast, solar_forecast, H, fallback_kw=0.0,
                                 solar_correction=_solar_corr, min_samples=_min_samples)
     solar = [s * (1.0 - 0.5 * p.risk) for s in solar]            # conservative solar
     if bool(state.get("solar_unreliable", False)):
         solar = [0.0] * H                                         # cloudy morning — no solar credit
     load = [home_load * (1.0 + 0.3 * p.risk)] * H                # conservative load
+
+    # Per-slot input series for offline replay / analysis (see LOG_LP_INPUTS). Attached to
+    # every post-solve return via _finish(); the generic optimizer_context copy logs it.
+    _inputs = {
+        "slot_times":       [_norm_time(f.get("time", "")) for f in price_forecast[:H]],
+        "price_c":          [round(pr, 2) for pr in prices],
+        "solar_eff_kw":     [round(s, 3) for s in solar],
+        "solar_raw_kw":     [round(s, 3) for s in solar_raw],
+        "load_kw":          round(load[0], 3),
+        "risk":             p.risk,
+        "exec_charge_derate": p.exec_charge_derate,
+        "p_charge_max_kw":  round(p.p_charge_max_kw, 3),
+        "solar_unreliable": bool(state.get("solar_unreliable", False)),
+    } if LOG_LP_INPUTS else None
     if feedin_forecast and len(feedin_forecast) >= H:
         feedin = [float(x) for x in feedin_forecast[:H]]
     else:
@@ -270,8 +319,10 @@ def optimize_battery(state: dict,
 
     if not res.success:
         # should be rare (import is never hard-blocked) — fail safe toward protection
-        return _verdict_only("charge", 85, "autonomous", "mpc_infeasible_fallback",
-                             H, soc0_pct)
+        _r = _verdict_only("charge", 85, "autonomous", "mpc_infeasible_fallback",
+                           H, soc0_pct)
+        _r["inputs"] = _inputs
+        return _r
 
     x = res.x
     c0, d0, gi0, ge0 = x[nC], x[nD], x[nGI], x[nGE]
@@ -291,14 +342,14 @@ def optimize_battery(state: dict,
         # charging, but only from solar surplus — no reserve change needed
         mode, target, rule = None, None, "mpc_solar_only"
         return _finish("hold", target, mode, rule, p, prices, feedin, solar, load,
-                       soc_traj_pct, res.fun, x, H, soc0_pct, grid_charge0)
+                       soc_traj_pct, res.fun, x, H, soc0_pct, grid_charge0, _inputs)
     else:
         mode, target, rule = None, None, "mpc_hold"
         return _finish("hold", target, mode, rule, p, prices, feedin, solar, load,
-                       soc_traj_pct, res.fun, x, H, soc0_pct, grid_charge0)
+                       soc_traj_pct, res.fun, x, H, soc0_pct, grid_charge0, _inputs)
 
     return _finish("charge", target, mode, rule, p, prices, feedin, solar, load,
-                   soc_traj_pct, res.fun, x, H, soc0_pct, grid_charge0)
+                   soc_traj_pct, res.fun, x, H, soc0_pct, grid_charge0, _inputs)
 
 
 # ───────────────────────────── result packing ─────────────────────────────
@@ -321,7 +372,7 @@ def _verdict_only(action, target, mode, rule, H, soc0_pct):
 
 
 def _finish(action, target, mode, rule, p, prices, feedin, solar, load,
-            soc_traj_pct, objective_c, x, H, soc0_pct, grid_charge0):
+            soc_traj_pct, objective_c, x, H, soc0_pct, grid_charge0, inputs=None):
     nGI = 2 * H
     total_import_kwh = round(float(sum(x[nGI:nGI + H])) * p.slot_h, 2)
     return {
@@ -335,6 +386,7 @@ def _finish(action, target, mode, rule, p, prices, feedin, solar, load,
         "grid_charge_now_kw": round(float(grid_charge0), 2),
         "min_price_c": round(min(prices), 1),
         "max_price_c": round(max(prices), 1),
+        "inputs": inputs,
     }
 
 

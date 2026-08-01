@@ -308,6 +308,15 @@ Key agent capability added 2026-08-01:
   the real afternoon so it can't slam at 11pm; `hours_to_sponge` made day-boundary-aware. **Control-path
   change**, kill-switch reverts to the old fall-through. **⏳ pending `git push` to reach the Pi.**
   Does *not* fix the `survival_floor_defend` price-blindness on the midnight–2:55pm cycles (separate).
+- **LP Family-A instrumentation + plan-execution knob** (`optimizer.py`, **shadow-only, off/additive
+  by default**). (1) `LOG_LP_INPUTS` — `optimize_battery()` now logs the per-slot series it solved on
+  (`solar_raw_kw` + `solar_eff_kw` + price/load) into `decisions.jsonl` `optimizer_context.inputs`,
+  the unblocker for replaying the solar-*trusted* marginal-day divergence class (per-slot solar was
+  never logged before). (2) `OptParams.exec_charge_derate` (default 1.0=off) — a plan-execution-margin
+  knob (charge-rate derate, the LP analogue of `FAST_ESCALATE_BUFFER_H`) for the Family-A det-charge/
+  LP-hold class, which the 07-31 replay showed is a plan-execution (rate) problem, not a forecast/solar
+  one. Both default-off → **no live shadow change**; for offline replay + a future cutover decision.
+  25 optimizer tests. **⏳ pending `git push`.**
 
 Key agent capabilities added 2026-07-26 (session 21):
 - **Rule 33 — receding-horizon deadline escalation** (`DEADLINE_GENTLE_LEAD`,

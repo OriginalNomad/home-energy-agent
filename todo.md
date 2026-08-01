@@ -476,7 +476,23 @@
 ### Architecture roadmap (in order)
 
 - [x] **Phase 2.5-B — solar corrector — ACTIVATED 2026-07-22.** `optimizer.py` applies per-hour Solcast correction from `model_params.json["solar_correction"]`, now populated (ratios 0.14 at 08:00 → 0.74 at 13:00, n=24–90/hour). Autonomous rates populated too. Also surfaced on the dashboard via `sensor.solar_forecast_corrected`. **Remaining for this phase**: cron the rebuild nightly (see Immediate) — it is still run by hand.
-- [ ] **LP to control path** — **divergence clock restarted 2026-07-22.** The LP ran on a hardcoded 50% SoC from its Jun 1 wire-in until Jul 22 (see energy_log), so *no* prior divergence analysis is valid — including the previously recorded blocker ("LP defers to cheapest slot; det charges at first acceptable slot"), which was never actually measured. Fixed and 4 regression tests added. **Next: collect a fresh week of clean three-way data (from 2026-07-22) before reassessing.** First clean signal to watch: under flat prices the LP defers charging to the last feasible slot with no error margin — likely needs the `risk` knob or a conservative solar quantile. Plan unchanged: LP-authoritative with deterministic layer as hard-constraint backstop (Rule 2, survival floor, reserve guard). Kill-switch already in place.
+- [ ] **LP to control path** — **divergence clock restarted 2026-07-22.** The LP ran on a hardcoded 50% SoC from its Jun 1 wire-in until Jul 22 (see energy_log), so *no* prior divergence analysis is valid — including the previously recorded blocker ("LP defers to cheapest slot; det charges at first acceptable slot"), which was never actually measured. Fixed and 4 regression tests added. Plan unchanged: LP-authoritative with deterministic layer as hard-constraint backstop (Rule 2, survival floor, reserve guard). Kill-switch already in place.
+
+  ▶️ **FAMILY-A REFRAMED + INSTRUMENTED 2026-08-01.** The "LP holds while det charges" (Family A)
+  divergences are **not** a solar-trust problem on the replayable cycles: the shadow block passes
+  `solar_unreliable` into the LP, which zeroes solar (`optimizer.py:209`), so on 07-30 daytime *both*
+  layers had solar zeroed and the LP simply deferred to the cheaper sponge (its plan reached target). The
+  07-31 replay confirmed the lever is a conservative **charge-rate** cap (plan-execution risk), not the
+  forecast-`risk` knob. Two changes landed (both **off/additive by default → no live effect**, need
+  `git push`): (1) **`LOG_LP_INPUTS`** — the LP now logs its per-slot input series (`solar_raw_kw` +
+  `solar_eff_kw` + price/load) to `optimizer_context`, the unblocker the replay named so the one class
+  where solar *trust* differs (solar trusted on a marginal day) becomes replayable; (2)
+  **`OptParams.exec_charge_derate`** (default 1.0=off) — the plan-execution-margin knob, an LP analogue of
+  `FAST_ESCALATE_BUFFER_H`, verified to flip a genuinely-tight peak deferral hold→charge. 9 tests (25
+  optimizer total). **Next:** (a) offline-replay `exec_charge_derate` sweep vs 07-30/07-31 to pick a
+  setting; (b) once input-logging accumulates solar-*trusted* marginal days, test a conservative solar
+  quantile (`model_params solar_correction` already carries per-hour `uncertainty`) on the now-replayable
+  class; (c) consider dual-shadow logging a margin-on verdict to collect go-forward divergence data.
 - [ ] **Analyst agent** — weekly agent that reads `decisions.jsonl` + `daily_energy.jsonl` and surfaces systematic patterns: "cloudy mornings consistently start charging 1h late", "sponge threshold too tight 3 weeks in a row". Outputs proposed rule changes in plain English for human review. This is the feedback loop that makes the system self-improving rather than just self-executing.
 - [ ] **Savings dashboard** — daily/weekly $ saved vs naive baseline (flat-rate charging, no demand management, no solar optimisation). Broken down by: demand charge avoided, cheap-window differential, solar self-consumption. Core product metric; also the first Sol feature users need to see.
 

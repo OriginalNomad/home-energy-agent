@@ -188,5 +188,48 @@ check("  ...and reports the real SoC, not 50%",
       low.get("soc_now_pct") == 8 and high.get("soc_now_pct") == 95,
       f"low={low.get('soc_now_pct')} high={high.get('soc_now_pct')}")
 
+# ── Family-A instrumentation: the LP's per-slot INPUT series are logged (2026-08-01) ──
+# The 2026-07-31 replay was blocked because the solar forecast the LP consumed was never
+# recorded. These pin that the inputs are now attached and that solar_unreliable zeroes the
+# EFFECTIVE series while the RAW Solcast is preserved for offline quantile replay.
+pf_in = _prices([10, 10, 10, 12, 14, 15])
+solar_in = [{"time": f["time"], "kw_est": 3.0} for f in pf_in]   # 3 kW raw Solcast each slot
+st_ok = {"soc_pct": 50, "is_peak_month": False, "home_load_kw": 0.5}
+r_ok = optimize_battery(st_ok, pf_in, solar_in, now)
+_inp = r_ok.get("inputs") or {}
+check("LP result carries an inputs dict", isinstance(r_ok.get("inputs"), dict), r_ok.get("inputs"))
+check("  inputs carry per-slot solar_raw_kw aligned to the horizon",
+      len(_inp.get("solar_raw_kw", [])) == r_ok["horizon_slots"], _inp.get("solar_raw_kw"))
+check("  inputs carry per-slot price_c + scalar load_kw",
+      len(_inp.get("price_c", [])) == r_ok["horizon_slots"] and "load_kw" in _inp, _inp)
+
+st_bad = {"soc_pct": 50, "is_peak_month": False, "home_load_kw": 0.5, "solar_unreliable": True}
+r_bad = optimize_battery(st_bad, pf_in, solar_in, now)
+_inb = r_bad.get("inputs") or {}
+check("solar_unreliable zeroes the EFFECTIVE solar the LP solved on",
+      bool(_inb.get("solar_eff_kw")) and all(s == 0.0 for s in _inb["solar_eff_kw"]),
+      _inb.get("solar_eff_kw"))
+check("  ...but RAW Solcast is preserved for offline quantile replay",
+      any(s > 0.0 for s in _inb.get("solar_raw_kw", [])), _inb.get("solar_raw_kw"))
+
+# ── Plan-execution margin (2026-08-01): a conservative charge-rate derate flips a genuinely
+#    tight peak deferral hold → charge — the exact Family-A lever the 2026-07-31 replay found.
+#    Solar is zeroed (unreliable), so forecast-risk is inert and only the rate matters. ──
+pf_tight = _prices([15, 15, 15, 15, 6, 6, 21, 21, 21, 21, 21, 21], start="2026-06-01 12:00")
+solar_z = [{"time": f["time"], "kw_est": 0.0} for f in pf_tight]
+st_tight = {"soc_pct": 50, "is_peak_month": True, "home_load_kw": 3.5, "solar_unreliable": True}
+r_base = optimize_battery(st_tight, pf_tight, solar_z, now, params=OptParams(exec_charge_derate=1.0))
+r_der = optimize_battery(st_tight, pf_tight, solar_z, now, params=OptParams(exec_charge_derate=0.3))
+check("plan-execution: point-rate LP defers (holds) the tight peak fill",
+      r_base["verdict"]["action"] == "hold", r_base["verdict"])
+check("  ...conservative charge-rate derate flips it to charge now",
+      r_der["verdict"]["action"] == "charge", r_der["verdict"])
+check("  ...derate=1.0 is a no-op vs default (shadow unaffected until swept)",
+      optimize_battery(st_tight, pf_tight, solar_z, now)["verdict"]["action"]
+      == r_base["verdict"]["action"], "default should equal exec_charge_derate=1.0")
+check("  ...the derated assumed rate is logged, below the point rate",
+      r_der["inputs"]["p_charge_max_kw"] < r_base["inputs"]["p_charge_max_kw"],
+      (r_der["inputs"]["p_charge_max_kw"], r_base["inputs"]["p_charge_max_kw"]))
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

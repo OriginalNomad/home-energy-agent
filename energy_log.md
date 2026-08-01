@@ -1,5 +1,47 @@
 # Energy System Control Log
 
+## 2026-08-01 (session — Family-A: LP input-logging + plan-execution derate knob)
+
+Addressed the **Family-A** divergences (deterministic charges as insurance / LP holds `mpc_hold`)
+after Rule 35. Re-examining the code + the 2026-07-31 replay corrected the naive framing: on the
+replayable Family-A cycles (07-30 daytime) **both layers had solar zeroed** — the shadow block passes
+`solar_unreliable` into the LP ([energy_agent.py:2714]) and the optimizer zeroes solar on it
+([optimizer.py:209-210]). So the LP wasn't trusting a solar forecast that cratered; it rationally
+**deferred grid-charging to the cheaper 10am–3pm sponge** and its plan *did* reach ~85% by 3pm. The
+replay confirmed: risk knob → 0 flips (solar already zeroed, so the *forecast*-risk knob is inert),
+entry-SoC floor → 0 flips, only a conservative **charge-rate** cap flipped the genuinely-tight cycles.
+So Family-A is a **plan-execution-margin** problem (rate / cheap-slot arrival), not a solar-trust one —
+for the cases we can replay.
+
+Two changes, both in `optimizer.py`, both **off/additive by default so live shadow is unchanged**:
+
+1. **LP input-logging (`LOG_LP_INPUTS`, default on).** `optimize_battery()` now attaches the per-slot
+   series it solved on to its result under `inputs`: `slot_times`, `price_c`, `solar_eff_kw` (the
+   corrected + risk-scaled + unreliable-zeroed series the LP actually used), `solar_raw_kw` (raw Solcast
+   aligned to the grid — so an offline replay can re-apply *any* quantile: `raw × (ratio − k·uncertainty)`
+   from `model_params` `solar_correction`, which already carries per-hour `uncertainty`), plus `load_kw`,
+   `risk`, `exec_charge_derate`, `p_charge_max_kw`, `solar_unreliable`. This is the exact unblocker the
+   07-31 replay named — the per-slot solar the LP consumed was never logged, so the one class where solar
+   *trust* differs (solar trusted on a marginal day) couldn't be replayed. The shadow block's generic
+   `optimizer_context` copy logs it automatically — **no agent change needed.** Starts collecting on the
+   next Pi cron pull. (Set `LOG_LP_INPUTS=False` if record size becomes a concern.)
+
+2. **Plan-execution margin knob (`OptParams.exec_charge_derate`, default 1.0 = off).** A multiplier on the
+   assumed charge rate, **separate from the existing forecast-`risk` knob** — the "risk models forecast
+   risk, not plan-execution risk" gap the replay named. Derating the rate forces a deferred fill to start
+   early enough to finish before the demand window even if the real rate runs slow. Prototype for offline
+   replay against the existing 07-30 cratered-day data (the replayable Family-A class); default-off means
+   **zero live effect** until deliberately swept. Verified it flips a genuinely-tight peak deferral
+   hold→charge (SoC 50%, load 3.5 kW, solar zeroed: base holds, derate 0.3 charges to 82%), and is a
+   no-op at 1.0.
+
+Tests: 9 new checks in `test_optimizer.py` (**25 total**), covering the logged input series, raw-vs-
+effective solar under `solar_unreliable`, the derate flip, and the derate=1.0 no-op. Full suites green:
+108 decision + 25 optimizer + 11 build_models. **Not deployed — needs `git push`** (Pi auto-pulls on the
+30-min cron). Next: run the offline replay with `exec_charge_derate` swept against 07-30/07-31 to pick a
+setting, and once input-logging accumulates some solar-*trusted* marginal days, test a conservative solar
+quantile on the class that only now becomes replayable.
+
 ## 2026-08-01 (session — Rule 35: peak-eve run-up fixes the 9pm–midnight time-gate hole)
 
 Implemented the fix for the root cause diagnosed on 2026-07-31 (below): on a peak-month day the
