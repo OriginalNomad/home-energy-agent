@@ -78,18 +78,19 @@ input_boolean:
     name: "Agent — Manual override"
     icon: mdi:hand-back-right
   agent_narrative_disable:
-    # While ON the agent SKIPS the LLM narrative call to save API cost. Control
-    # is unaffected (the deterministic layer + demand-window guard run earlier);
-    # the cycle is still logged via the deterministic auto-summary, so
-    # decisions.jsonl / dashboard helpers / notifications / heartbeat and the
-    # shadow+optimizer divergence fields all keep getting written — just terse
-    # "[auto]" text instead of LLM prose, and no API spend.
-    # Inverted sense on purpose: default OFF = narrate (current behaviour). A
-    # fresh input_boolean with no initial: defaults OFF, and the unresolved
-    # overnight helper-reset gremlin would also land OFF — both on the SAFE
-    # side (keep narrating) rather than silently killing narration.
-    name: "Agent — Pause LLM narration (save API $)"
-    icon: mdi:message-off
+    # Quiet mode. While ON the agent (1) SKIPS the paid LLM narrative call to save
+    # API cost, and (2) MUTES the per-cycle 🔋 Battery / 🚗 EV persistent
+    # notifications (and dismisses any already on screen). Control is unaffected —
+    # the deterministic layer + demand-window guard run earlier. Everything else
+    # still writes: decisions.jsonl, dashboard helper sensors, the logbook, the
+    # heartbeat, and the shadow+optimizer divergence fields — so the audit trail
+    # and Phase-4 data are intact; only the popups + the LLM prose go quiet.
+    # Does NOT mute the demand-window / safety automations (Layer 3) — those stay.
+    # Inverted sense on purpose: default OFF = narrate + notify (current behaviour).
+    # A fresh input_boolean with no initial: defaults OFF, and the unresolved
+    # overnight helper-reset gremlin would also land OFF — both on the SAFE side.
+    name: "Agent — Quiet mode (mute notifications + save API $)"
+    icon: mdi:bell-off
 
 input_datetime:
   ev_departure_time:

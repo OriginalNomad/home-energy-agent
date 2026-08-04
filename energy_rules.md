@@ -1080,22 +1080,28 @@ to the LP). 3 tests (`test_peak_eve_*`), 108 decision total.
 
 ---
 
-### Rule 36 — Pause LLM Narration to Save API Cost (control-neutral)
+### Rule 36 — Quiet Mode: Mute Notifications + Pause LLM Narration (control-neutral)
 
-**Added 2026-08-05.** A dashboard toggle, `input_boolean.agent_narrative_disable`, lets the user turn
-off the per-cycle LLM narrative call when they don't need the prose — the narrative is the only paid
-Anthropic API call in the loop, so this directly cuts cost. **It does not touch control.** The
-deterministic rule layer and the demand-window reserve guard (Rule 2) both run *earlier* in
-`run_agent()`; this governs only the narrative/logging step that comes after.
+**Added 2026-08-05.** A dashboard toggle, `input_boolean.agent_narrative_disable` ("Quiet mode"), does
+two things when ON: (1) **skips the per-cycle LLM narrative call** — the only paid Anthropic call in the
+loop, so this directly cuts cost; and (2) **mutes the per-cycle `🔋 Battery` / `🚗 EV` persistent
+notifications** (and dismisses any already on screen). **It does not touch control.** The deterministic
+rule layer and the demand-window reserve guard (Rule 2) both run *earlier* in `run_agent()`; this
+governs only the narrative + notification step that comes after.
+
+**Why both:** the notifications are created by `log_decision()` with fixed `notification_id`s, so they
+reappear every cycle regardless of whether the LLM ran — pausing the LLM alone leaves them firing. The
+user's ask was to *stop the notification display*, so the toggle gates the two `persistent_notification.
+create` calls (and dismisses the lingering pair) as well as skipping the LLM.
 
 **Behaviour when ON:** the agent skips the LLM entirely and logs the cycle with the deterministic
-`_build_auto_summary()` (the same path Phase 7 already uses for routine holds). So `decisions.jsonl`,
-the dashboard helper sensors, the HA notifications, the liveness heartbeat, and the
-shadow/optimizer divergence fields (`computed_verdict`, `optimizer_verdict`, `optimizer_vs_deterministic`)
-**all keep getting written** — Phase-4 divergence data collection is uninterrupted. Notifications still
-appear, as terse `[auto]` lines rather than LLM prose. On a paused cycle where the rule layer actually
-acted (e.g. a charge), the logged actions reflect what was executed, not a false "hold"
-(`_build_auto_summary` now renders the verdict's `action`, not a hardcoded "hold").
+`_build_auto_summary()` (the same path Phase 7 already uses for routine holds). `decisions.jsonl`, the
+dashboard helper sensors, the **logbook**, the liveness heartbeat, and the shadow/optimizer divergence
+fields (`computed_verdict`, `optimizer_verdict`, `optimizer_vs_deterministic`) **all keep getting
+written** — Phase-4 divergence data collection and the audit trail are uninterrupted; only the popups and
+the LLM prose go quiet. The demand-window / safety automations (Layer 3) are independent and are **not**
+muted. On a paused cycle where the rule layer actually acted (e.g. a charge), the logged actions reflect
+what was executed, not a false "hold" (`_build_auto_summary` now renders the verdict's `action`).
 
 **Inverted sense (default OFF = narrate) on purpose.** A fresh `input_boolean` with no `initial:`
 defaults OFF, and the unresolved overnight helper-reset gremlin (see `todo.md`) would also reset it

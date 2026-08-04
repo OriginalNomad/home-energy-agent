@@ -1005,24 +1005,39 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
     except Exception as exc:
         print(f"  Warning: daily cost push failed: {exc}", file=sys.stderr)
 
+    # Per-cycle battery/EV notifications. Muted when the user has enabled quiet mode
+    # (input_boolean.agent_narrative_disable, Rule 36) — they reappear every cycle via
+    # fixed notification_id, which is the "notifications still firing" the toggle is meant
+    # to stop. Everything else below (logbook, dashboard helpers, JSONL, heartbeat) still
+    # runs so the audit trail and Phase-4 data are unaffected — only the popups go quiet.
+    _quiet = bool(_cycle_context.get("narrative_disabled"))
+    if _quiet:
+        # Clear any popups already on screen so quiet mode actually goes quiet — they
+        # persist until dismissed, so without this the last pair would linger. They are
+        # transient UI, recreated the instant the toggle goes back off; nothing is lost.
+        for _nid in ("energy_agent_battery", "energy_agent_ev"):
+            ha_service("persistent_notification", "dismiss", {"notification_id": _nid})
+
     # Battery notification
     battery_actions = [a for a in actions_taken if not a.startswith("set_zappi")]
     battery_actions_str = ", ".join(battery_actions) if battery_actions else "hold"
-    ha_service("persistent_notification", "create", {
-        "notification_id": "energy_agent_battery",
-        "title": f"🔋 Battery — {now.strftime('%H:%M')}",
-        "message": f"{summary}\n\n**Actions:** {battery_actions_str}",
-    })
+    if not _quiet:
+        ha_service("persistent_notification", "create", {
+            "notification_id": "energy_agent_battery",
+            "title": f"🔋 Battery — {now.strftime('%H:%M')}",
+            "message": f"{summary}\n\n**Actions:** {battery_actions_str}",
+        })
 
-    # EV notification — always sent; ev_summary carries EV SoC from sensor.polestar_7853_battery_charge_level
+    # EV notification — always sent (unless quiet); ev_summary carries EV SoC from sensor.polestar_7853_battery_charge_level
     ev_actions = [a for a in actions_taken if a.startswith("set_zappi")]
     ev_msg = ev_summary if ev_summary else summary
     ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
-    ha_service("persistent_notification", "create", {
-        "notification_id": "energy_agent_ev",
-        "title": f"🚗 EV — {now.strftime('%H:%M')}",
-        "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
-    })
+    if not _quiet:
+        ha_service("persistent_notification", "create", {
+            "notification_id": "energy_agent_ev",
+            "title": f"🚗 EV — {now.strftime('%H:%M')}",
+            "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
+        })
 
     # Write a logbook entry — sequential history in HA History panel
     ha_service("logbook", "log", {
@@ -2782,6 +2797,10 @@ def run_agent(dry_run: bool = False):
     if DETERMINISTIC_AUTHORITATIVE and not dry_run:
         try:
             _narr_off, _narr_msg = _narrative_disabled()
+            # Let log_decision() see the toggle without a second HA round-trip, so it
+            # can also MUTE the per-cycle battery/EV notifications when paused (the user
+            # wants quiet, not just cheap). False on the LLM path → notifications fire.
+            _cycle_context["narrative_disabled"] = _narr_off
             _interesting = _is_interesting_cycle(
                 _ctx, _det_executed_actions, _records, _demand_reserve_guard_fired)
             if _narr_off or not _interesting:
