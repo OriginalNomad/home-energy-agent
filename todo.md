@@ -4,16 +4,24 @@
 
 ### Immediate
 
-- [ ] 🔐 **HIGH — finish the Amber/SolarEdge key rotation (2026-08-01).** The export-script keys were moved
-  out of source into a gitignored `Amber Electric Data/.env` and all 5 `.command` scripts rewired to read
-  it; the new Amber "Amber-Billing-Key-2026" is set + verified (HTTP 200). **Two rotations still owed
-  (both keys were surfaced in-session):**
-  1. **Amber — the OLD exposed token still powers HA's live price feed** (hash-confirmed same token). Do
-     NOT just revoke it. Generate a 2nd new token ("home-assistant"), switch HA's Amber integration to it,
-     confirm `sensor.…_general_price` goes fresh, **then** revoke the old one. Note a broken Amber feed is
-     *silent* — the agent falls back to hold, the Healthcheck heartbeat stays green (see energy_log
-     2026-08-01). Read-scoped token → low severity, but close it.
-  2. **SolarEdge** — rotate + paste into `.env` `SOLAREDGE_API_KEY` (blank now → script errors until filled).
+- [ ] 🔐 **MEDIUM — SolarEdge key rotation still owed (Amber DONE 2026-08-05).** The export-script keys
+  live in a gitignored `Amber Electric Data/.env` (`AMBER_API_KEY`, `SOLAREDGE_API_KEY`) read by the 5
+  `.command` scripts.
+  1. ✅ **Amber — DONE 2026-08-05.** New token generated + swapped into **HA's Amber integration** (not a
+     `.env` — the agent reads prices from the HA sensor, there is no Amber var in `agent/.env`). Verified
+     via HA API that `sensor.1a_wigram_road_glebe_general_price` kept the **same entity id** and went
+     **fresh (0.5 min)** on the new key, **then** the OLD exposed token was revoked; feed confirmed still
+     live 1.9 min after revocation. Closes the "old exposed token still powers the live price feed" thread.
+  2. ⏳ **SolarEdge — key present, true rotation deferred.** The *current* SolarEdge key is now in
+     `Amber Electric Data/.env` `SOLAREDGE_API_KEY`, so the export scripts no longer error — but it has
+     **not been rotated**; the user lacks SolarEdge portal admin access to regenerate it yet. Rotate once
+     admin access is granted. Read-only monitoring key → low severity. **Separate** from the SolarEdge
+     telemetry stall (a cloud/inverter upload problem, not a key problem).
+  - **Convention (established 2026-08-05):** one Amber token **per consumer**, named by location not
+     function — `home-assistant` (HA integration → live price feed the agent uses) and the export-scripts
+     token (`Amber Electric Data/.env`). Amber tokens are unscoped (all carry full read access), so the
+     value of separate tokens is independent rotation + contained blast radius, not least-privilege. A
+     future app bill feature (item B) would be a 3rd token. The "billing vs general" framing is retired.
 
 - [x] 🔴 **HIGH — harden the demand-window automations against an unavailable local Powerwall sensor —
   DONE 2026-07-29.** Defaulted **every** bare `| int`/`| float` in `config/automations.yaml` (30 int + 2

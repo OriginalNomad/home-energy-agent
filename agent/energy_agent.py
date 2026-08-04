@@ -229,6 +229,7 @@ ENTITIES = {
     "battery_mode":         "sensor.powerwall_mode",
     "battery_reserve":      "sensor.powerwall_backup_reserve",
     "manual_override":      "input_boolean.agent_manual_override",
+    "narrative_disable":    "input_boolean.agent_narrative_disable",
     "battery_target":       "sensor.battery_grid_charge_target",
     "grid_price":           "sensor.1a_wigram_road_glebe_general_price",
     "grid_forecast":        "sensor.1a_wigram_road_glebe_general_forecast",
@@ -2432,6 +2433,41 @@ def _manual_override_active() -> tuple[bool, str]:
     return True, f"manual override ON ({held_h:.1f}h of {MANUAL_OVERRIDE_MAX_HOURS:.0f}h)"
 
 
+def _narrative_disabled() -> tuple[bool, str]:
+    """True when the user has paused LLM narration to save API cost.
+
+    Toggled via `input_boolean.agent_narrative_disable` (dashboard switch).
+    While on, the agent skips the LLM narrative call entirely and logs the cycle
+    with the deterministic auto-summary instead — decisions.jsonl, dashboard
+    helpers, notifications, the liveness heartbeat and the shadow/optimizer
+    divergence fields all still get written, just without the LLM prose (and
+    without the API spend).
+
+    Control is UNAFFECTED: the deterministic layer and the demand-window reserve
+    guard both run earlier in run_agent(). This governs only the narrative step.
+
+    Inverted sense (default off = narrate) on purpose: a fresh input_boolean with
+    no initial: defaults off, and the unresolved overnight helper-reset gremlin
+    (see todo) would reset it off — both of which land on the SAFE behaviour
+    (keep narrating) rather than silently killing narration.
+
+    Fails toward narrating — if HA is unreachable or the boolean isn't defined we
+    keep the LLM path rather than silently suppressing it.
+    """
+    try:
+        obj = ha_get(ENTITIES["narrative_disable"])
+    except Exception as exc:
+        # 404 = the input_boolean isn't defined in this HA instance yet (the
+        # normal pre-deployment state). Stay quiet for that; warn for anything
+        # else (auth, timeout, HA down) but keep narrating.
+        if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+            return False, ""
+        return False, f"narration-toggle check failed ({exc}) — narrating"
+    if str(obj.get("state") or "").lower() == "on":
+        return True, "narration paused (agent_narrative_disable ON) — LLM skipped to save API cost"
+    return False, ""
+
+
 def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str]:
     """
     Execute battery and EV actions from the deterministic verdict.
@@ -2597,17 +2633,20 @@ def _build_auto_summary(ctx: dict) -> tuple[str, str]:
     Returns (battery_summary, ev_summary). ev_summary is empty string when EV
     not plugged in so log_decision() can suppress the EV notification entirely.
     """
-    rule  = (ctx.get("recommended") or {}).get("rule_fired", "unknown")
+    rec    = ctx.get("recommended") or {}
+    rule   = rec.get("rule_fired", "unknown")
+    action = rec.get("action", "hold")   # was hardcoded "hold" — wrong when narration
+                                         # is paused on a cycle that actually charged
     soc   = ctx.get("soc", "?")
     state = _cycle_context.get("state", {})
     price = (state.get("grid") or {}).get("price_cents_kwh", "?")
     solar = (state.get("solar") or {}).get("current_kw", "?")
     ev    = state.get("ev") or {}
-    battery_summary = f"[auto] {rule} | battery {soc}% | {price}¢/kWh | solar {solar}kW | hold"
+    battery_summary = f"[auto] {rule} | battery {soc}% | {price}¢/kWh | solar {solar}kW | {action}"
     ev_soc = ev.get("ev_soc_pct", "?")
     plug   = "plugged in" if ev.get("plugged_in") else "not plugged in"
     mode   = ev.get("zappi_mode", "?")
-    ev_summary = f"[auto] EV {ev_soc}% ({plug}) | mode {mode} | hold"
+    ev_summary = f"[auto] EV {ev_soc}% ({plug}) | mode {mode} | {action}"
     return battery_summary, ev_summary
 
 
@@ -2731,20 +2770,34 @@ def run_agent(dry_run: bool = False):
         except Exception as exc:
             print(f"  Warning: optimizer shadow failed: {exc}", file=sys.stderr)
 
-    # Phase 7 — skip LLM on routine hold cycles to reduce API cost and latency.
-    # Only fires when DETERMINISTIC_AUTHORITATIVE=True (control path is deterministic).
+    # LLM narration gate. Two independent reasons to skip the paid LLM call, both
+    # of which still log the cycle via the deterministic auto-summary (so
+    # decisions.jsonl / dashboard helpers / notifications / heartbeat and the
+    # shadow+optimizer divergence fields keep getting written — Phase-4 data
+    # collection is uninterrupted):
+    #   (1) Phase 7 — routine (uninteresting) hold cycle. Always active.
+    #   (2) User paused narration via input_boolean.agent_narrative_disable to
+    #       save API cost. Forces the skip even on an "interesting" cycle.
+    # Only when DETERMINISTIC_AUTHORITATIVE=True (control path is deterministic).
     if DETERMINISTIC_AUTHORITATIVE and not dry_run:
         try:
+            _narr_off, _narr_msg = _narrative_disabled()
             _interesting = _is_interesting_cycle(
                 _ctx, _det_executed_actions, _records, _demand_reserve_guard_fired)
-            if not _interesting:
+            if _narr_off or not _interesting:
                 _auto_bat, _auto_ev = _build_auto_summary(_ctx)
-                log_decision(_auto_bat, ["hold — no change needed"], _auto_ev)
-                print(f"Cycle complete (routine — LLM skipped, rule: "
-                      f"{(_ctx.get('recommended') or {}).get('rule_fired', '?')}).")
+                # Routine holds record "hold"; a narration-paused cycle that the rule
+                # layer actually acted on records what it executed, not a false "hold".
+                _skip_actions = (_det_executed_actions
+                                 if (_narr_off and _interesting and _det_executed_actions)
+                                 else ["hold — no change needed"])
+                log_decision(_auto_bat, _skip_actions, _auto_ev)
+                _why = _narr_msg if _narr_off else (
+                    f"routine, rule: {(_ctx.get('recommended') or {}).get('rule_fired', '?')}")
+                print(f"Cycle complete (LLM skipped — {_why}).")
                 return
         except Exception as _exc:
-            print(f"  Warning: Phase 7 routine-check failed ({_exc}) — running LLM", file=sys.stderr)
+            print(f"  Warning: narration-gate check failed ({_exc}) — running LLM", file=sys.stderr)
 
     if DETERMINISTIC_AUTHORITATIVE:
         initial_msg = (

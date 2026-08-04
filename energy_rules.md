@@ -1080,6 +1080,37 @@ to the LP). 3 tests (`test_peak_eve_*`), 108 decision total.
 
 ---
 
+### Rule 36 — Pause LLM Narration to Save API Cost (control-neutral)
+
+**Added 2026-08-05.** A dashboard toggle, `input_boolean.agent_narrative_disable`, lets the user turn
+off the per-cycle LLM narrative call when they don't need the prose — the narrative is the only paid
+Anthropic API call in the loop, so this directly cuts cost. **It does not touch control.** The
+deterministic rule layer and the demand-window reserve guard (Rule 2) both run *earlier* in
+`run_agent()`; this governs only the narrative/logging step that comes after.
+
+**Behaviour when ON:** the agent skips the LLM entirely and logs the cycle with the deterministic
+`_build_auto_summary()` (the same path Phase 7 already uses for routine holds). So `decisions.jsonl`,
+the dashboard helper sensors, the HA notifications, the liveness heartbeat, and the
+shadow/optimizer divergence fields (`computed_verdict`, `optimizer_verdict`, `optimizer_vs_deterministic`)
+**all keep getting written** — Phase-4 divergence data collection is uninterrupted. Notifications still
+appear, as terse `[auto]` lines rather than LLM prose. On a paused cycle where the rule layer actually
+acted (e.g. a charge), the logged actions reflect what was executed, not a false "hold"
+(`_build_auto_summary` now renders the verdict's `action`, not a hardcoded "hold").
+
+**Inverted sense (default OFF = narrate) on purpose.** A fresh `input_boolean` with no `initial:`
+defaults OFF, and the unresolved overnight helper-reset gremlin (see `todo.md`) would also reset it
+OFF — both of which land on the *safe* behaviour (keep narrating) rather than silently killing
+narration. `_narrative_disabled()` also **fails toward narrating** if HA is unreachable or the boolean
+isn't defined (404). There is no kill-switch constant: the toggle *is* the switch, and its absence is
+indistinguishable from "narrate normally".
+
+**Interaction with Phase 7:** the two skip reasons are independent and OR'd — a routine hold skips the
+LLM regardless of the toggle (as before); the toggle additionally forces the skip on *interesting*
+cycles. Compare with Rule 27 (manual override), which suppresses *control commands*; Rule 36 suppresses
+only the *narrative* and never affects control.
+
+---
+
 ## Decision Priority Order
 When multiple rules conflict, apply in this order:
 

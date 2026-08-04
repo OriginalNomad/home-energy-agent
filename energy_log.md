@@ -2941,3 +2941,67 @@ permanent fix), plus Mac Studio and Arlo hub. Manual override was ON for the win
   `0% and below 80` instead of raising. The 2:55 reset's `set_mode`/`set_backup_reserve` already run before
   the (now crash-proof) notify, so the reset is fully robust. Follow-up (not urgent): move the two
   demand-window WARNING triggers off the local sensor to Tessie so they still fire if the gateway drops again.
+
+## 2026-08-04 (evening — morning-ea review + SolarEdge feed stall investigation)
+
+**Morning-ea brief (run 18:30, peak day, in demand window).** System healthy: agent cycling
+normally, `energy_log.db` 2,843 obs + 109k price-forecast rows (updated 18:30), models rebuilt today
+(`obs_days 58`, self_consumption still 1.67 kW — the 07-22/23 5 kW regime did NOT sustain, asymmetric
+window absorbed it). **Both previously "pending git push" fixes are now DEPLOYED on the Pi** — Rule 35
+`PEAK_EVE_RUNUP` (commit bbe86c1) and LP Family-A instrumentation `LOG_LP_INPUTS`/`exec_charge_derate`
+(b794fa6, 176f39f). todo.md still flags these ⏳ pending — stale, correct next session.
+- **det↔LP agreement**: 80% since the 07-22 clean restart (531/667), ~79% last 48h. All 10 recent
+  divergences were today: morning DET-charge/LP-hold (survival_floor_defend at **15¢/18¢** — the
+  price-blind class, recurred; + peak_deadline_gentle_lead, defensible peak-day hedge), afternoon
+  reversed (12:00 & 14:30 LP wanted to charge more/cheaper at 6–11¢ while DET held at target_met/
+  peak_solar_will_cover). Battery rode to **11% overnight again** — overnight-strategy item still live.
+- Slider drift review: **clean**, 0 violations across 29 overnight cycles, all in-band.
+
+**SolarEdge feed stall (user reported "data stuck").** Diagnosed to the **SolarEdge cloud/inverter
+telemetry**, NOT HA and NOT the LAN (user confirmed inverter connected, no local errors).
+- Evidence: `sensor.solaredge_current_power` tracked normally through 03 Aug (→0 at sunset), then
+  recorded no change through all of 04 Aug daylight, and read a stale **1833 W (1.79 kW) after dark**
+  while Solcast independently read 0. HA's SolarEdge entities are a **faithful mirror of the cloud** —
+  they exactly match the mySolarEdge app: energy_today **8609 Wh = app's 8.61 kWh**, solar_power
+  **1.79 kW = app's "1.79 now"**, and the app's own **"last updated 4.18 h ago"** (≈14:40 Sydney) is
+  the real tell: the **inverter stopped uploading telemetry to the SolarEdge cloud mid-afternoon** and
+  everything froze on that last snapshot. Distinct from the 2026-07-30 stall (there the *source* showed
+  0; here the **energy channel stayed healthy while only the current-power channel froze**).
+- Impact: cosmetic + agent solar-**accuracy** check unreliable while stuck (may over-charge from grid);
+  control unaffected (forecasts on Solcast + SoC). ~1–2 kWh of late-afternoon generation likely
+  unrecorded; 8.61 kWh is a normal winter day. **HA reload is pointless** (nothing fresher in the cloud).
+- **Plan (user: "will review tomorrow"):** this "stopped mid-afternoon, frozen on last sample" pattern
+  usually self-clears overnight when the inverter powers down and re-inits monitoring at dawn. Check the
+  app mid-morning tomorrow — if current power tracks the sun and "last updated" reads minutes-ago, fixed.
+  If still frozen through tomorrow's daylight, physical inverter AC restart (isolator off ~30 s, on) to
+  rebuild the monitoring session; check comms S_OK.
+
+## 2026-08-05 (morning — morning-ea brief + Amber key rotation closed)
+
+**Morning-ea brief (peak day).** Agent healthy, cycling to 08:30; `energy_log.db` 2,871 obs rows +
+110k PF rows, current. Models rebuilt today (`obs_days 59`, `self_consumption` still **1.67 kW** — the
+07-22/23 5 kW regime never sustained). Both formerly-pending fixes (Rule 35, LP Family-A instrumentation)
+confirmed deployed. **Battery rode low overnight again** — 11% @ 06:30, 15% @ 08:30 — and defended the
+survival floor by charging `self_consumption` at **19–23¢** (the price-blind `survival_floor_defend`
+class, live again). det↔LP agreement **78%** over last 100 cycles / **16/18 today**; both of today's
+divergences were `survival_floor_defend` (DET charge @ 19–21¢) vs LP `mpc_hold` — **LP right** (buying
+survival power at the morning peak). Slider drift: clean. Journal schema complete bar a suggested **EV
+block** (data exists via Polestar + Zappi sensors). Minor: `data_logger.py` CLI health check needs
+`venv/bin/python` (`pytz` missing from system python3).
+
+**Amber key rotation — DONE (closes todo item 1a).** User rotated HA's Amber integration to a new token.
+- **Verified before revoking the old one** (via HA API over SSH, `/tmp/amber_check.py` on the Pi):
+  `sensor.1a_wigram_road_glebe_general_price` kept the **same entity id** (no `_2` suffix) and read
+  **fresh — 0.5 min ago** (15¢ general, 8¢ feed-in, forecasts 0.5 min) on the new key. Successful
+  sub-minute polling = new key valid (a bad key goes stale/unavailable, not fresh).
+- **After revocation:** re-checked — still live, `general_price` 1.9 min ago, forecasts 0.9 min. Feed
+  confirmed polling on the new token with the old one gone. **The last owed Amber rotation is closed.**
+- **Key-placement clarified (recorded in todo):** the agent reads Amber prices from the **HA sensor**, so
+  the live-feed token belongs in **HA's Amber integration**, *not* `agent/.env` (which has no Amber var).
+  Only the **export-scripts** Amber token lives in a `.env` (`Amber Electric Data/.env` `AMBER_API_KEY`).
+- **Convention established:** one Amber token **per consumer**, named by location (`home-assistant` vs
+  export-scripts), not by function — Amber tokens are unscoped (all full read access), so separate tokens
+  buy independent rotation + contained blast radius, not least-privilege. "Billing vs general" retired.
+- **SolarEdge — still owed.** Current key now in `Amber Electric Data/.env` `SOLAREDGE_API_KEY` (scripts no
+  longer error) but **not rotated** — user lacks portal admin access yet. Deferred; separate from the
+  SolarEdge telemetry stall.
