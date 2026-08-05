@@ -299,16 +299,22 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **118 decision tests + 16 optimizer tests.**
 
 Key agent capability added 2026-08-05:
-- **Rule 36 — Quiet mode** (`input_boolean.agent_narrative_disable`). One dashboard toggle that, when ON,
-  (1) skips the per-cycle **LLM narrative call** — the only paid Anthropic call in the loop, so this cuts
-  API cost — and (2) **mutes notifications**: the agent's own `🔋 Battery` / `🚗 EV` persistent
-  notifications (gated + dismissed inside `log_decision()`) **and** 6 enabled *non-safety* HA automations
-  (a `condition: template` `!= 'on'` placed *after* their control actions, so only the notify is skipped).
-  **Control is never touched** (deterministic layer + demand guard run earlier); logbook / dashboard
-  helpers / JSONL / heartbeat / shadow+optimizer fields all still write. Inverted sense (default OFF =
-  narrate+notify) and **fails toward notifying** so an unavailable toggle can't silence alerts.
-  Safety/demand-window automations always fire. Full gated/kept lists in energy_rules Rule 36. Currently a
-  9th `input_boolean` alongside `agent_manual_override` (Rule 27) and `ev_schedule_active`.
+- **Two agent dashboard toggles, both ON = active / OFF = off, both default ON (`initial: on`).** Renamed +
+  polarity-flipped this day so "ON means on" — no more double negatives. `initial: on` makes ON the safe
+  default (on creation and after every HA restart), which also neutralises the overnight helper-reset
+  gremlin; both read-functions **fail safe toward active/narrate** (only an explicit `off` acts).
+  - **`input_boolean.agent_active`** ("Agent Control", Rule 27) — ON = agent in control, OFF = paused
+    (was `agent_manual_override`, ON = paused). While OFF the agent computes+logs but sends no commands;
+    a pause **auto-resumes after 12h** (agent flips the switch back ON). Does not disable the demand-window
+    guard or HA safety automations. `_agent_paused()`.
+  - **`input_boolean.agent_narrative`** ("Agent Narrative", Rule 36) — ON = narrate + notify, OFF = quiet
+    (was `agent_narrative_disable`, ON = quiet). OFF skips the paid **LLM narrative call** *and* mutes the
+    agent's `🔋/🚗` notifications (gated + dismissed in `log_decision()`) **and** 6 enabled non-safety HA
+    automations (`condition: template` `!= 'off'` after their control actions — only the notify is skipped).
+    Control untouched; JSONL / logbook / dashboard helpers / heartbeat / shadow+optimizer fields all still
+    write. Safety/demand-window automations always fire. Full gated/kept lists in energy_rules Rule 36.
+  - The interim read-only `binary_sensor.agent_active` (earlier same day) was **removed** — superseded by
+    the inverted toggle. Dashboard input_booleans now: `agent_active`, `agent_narrative`, `ev_schedule_active`.
 
 Key agent capability added 2026-08-01:
 - **Rule 35 — peak-eve run-up** (`PEAK_EVE_RUNUP`). The peak-deadline block was gated

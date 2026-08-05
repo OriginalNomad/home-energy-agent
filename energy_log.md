@@ -3041,3 +3041,24 @@ zero drift) + verified live: state `on`, status "Active — in control", overrid
 card pairs a `type: attribute` status row with the toggle relabelled "Manual override — ON pauses the
 agent". energy_rules Rule 27 + todo ⑦ updated. Display-only — no code/control change. **Battery recovered
 to ~79% by 14:00** (solar sponge) after the 11–15% overnight trough.
+
+**⑦ superseded same afternoon — inverted BOTH toggles to "ON = on / OFF = off", default ON.** The user
+found the status-sensor + double-negative toggle still confusing and asked for the clean version: two
+plain switches where ON = active. Implemented properly (this was a control-path change — the Agent Control
+switch gates whether the rule layer commands the battery):
+- **`agent_manual_override` (ON=paused) → `input_boolean.agent_active`** ("Agent Control", ON=active).
+  `_manual_override_active()` → `_agent_paused()`; reads OFF as paused; **fails safe toward active** (only
+  an explicit `off` pauses — `unavailable`/404/error all = active); **12h auto-resume now writes the switch
+  back ON** (`ha_service turn_on`) so the dashboard stays truthful. JSONL field `manual_override` kept
+  (now = "was paused").
+- **`agent_narrative_disable` (ON=quiet) → `input_boolean.agent_narrative`** ("Agent Narrative",
+  ON=narrate). `_narrative_disabled()` reads OFF as quiet; 6 automation conditions flipped to `!= 'off'`.
+- **Both `initial: on`** — defaults ON on creation AND forced ON after every HA restart. This is what makes
+  ON=active *safe* as a default and **defuses the earlier objection** (that a fresh/gremlin-reset boolean
+  defaults OFF, so OFF had to be the safe state): with `initial: on` + fail-safe-active + auto-resume, an
+  accidental OFF self-heals.
+- Removed the interim `binary_sensor.agent_active`. Updated `gap_experiment.py` (pause = turn agent_active
+  OFF). Repointed the deploy-script verify list to `agent_active`. Rewrote `test_manual_override`
+  (now covers `unavailable → active`): **228 decision + 25 + 11 pass**. Deployed (both toggles live, read
+  `on`; zero drift), pushed. energy_rules Rule 27 + 36, CONTEXT, todo ⑦ all updated. **User to paste the
+  new 2-toggle card.**

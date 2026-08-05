@@ -334,7 +334,7 @@
     # Rule 36 quiet mode — skip the notification (only) when the toggle is ON.
     # Control actions above already ran; fails toward notifying if state is unknown.
     - condition: template
-      value_template: "{{ states('input_boolean.agent_narrative_disable') != 'on' }}"
+      value_template: "{{ states('input_boolean.agent_narrative') != 'off' }}"
     - action: persistent_notification.create
       data:
         title: "✅ Grid Target Reached — Solar Takes Over"
@@ -574,7 +574,7 @@
         percent: 5
     # Rule 36 quiet mode — skip the notification (only) when the toggle is ON.
     - condition: template
-      value_template: "{{ states('input_boolean.agent_narrative_disable') != 'on' }}"
+      value_template: "{{ states('input_boolean.agent_narrative') != 'off' }}"
     - action: persistent_notification.create
       data:
         title: "✅ Demand Window Over"
@@ -721,7 +721,7 @@
         reserve_set: 100
     # Rule 36 quiet mode — skip the notification (only) when the toggle is ON.
     - condition: template
-      value_template: "{{ states('input_boolean.agent_narrative_disable') != 'on' }}"
+      value_template: "{{ states('input_boolean.agent_narrative') != 'off' }}"
     - action: persistent_notification.create
       data:
         title: "💸 Free Power! Negative Price"
@@ -755,7 +755,7 @@
         percent: 5
     # Rule 36 quiet mode — skip the notification (only) when the toggle is ON.
     - condition: template
-      value_template: "{{ states('input_boolean.agent_narrative_disable') != 'on' }}"
+      value_template: "{{ states('input_boolean.agent_narrative') != 'off' }}"
     - action: persistent_notification.create
       data:
         title: "⚡ Negative Price Ended"
@@ -885,7 +885,7 @@
   actions:
     # Rule 36 quiet mode — skip this (notify-only) automation when the toggle is ON.
     - condition: template
-      value_template: "{{ states('input_boolean.agent_narrative_disable') != 'on' }}"
+      value_template: "{{ states('input_boolean.agent_narrative') != 'off' }}"
     - action: persistent_notification.create
       data:
         notification_id: "solar_underperformance"
@@ -1283,7 +1283,7 @@
   actions:
     # Rule 36 quiet mode — skip this (notify-only) automation when the toggle is ON.
     - condition: template
-      value_template: "{{ states('input_boolean.agent_narrative_disable') != 'on' }}"
+      value_template: "{{ states('input_boolean.agent_narrative') != 'off' }}"
     - action: persistent_notification.create
       data:
         notification_id: ev_plug_status

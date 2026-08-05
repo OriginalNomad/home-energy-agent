@@ -719,19 +719,30 @@ else
 **Root cause that motivated this rule:** 2026-06-27, battery charged at 5am at 24¢. Realized prices were 19¢ at 4am, 24¢ at 5am, 19¢ at 6am (a transient spike). But Amber's forecast at 5am showed the spike continuing, so `_cheapest_go_hard_slot` found nothing cheaper and `peak_charge_now` fired. The 10am Solar Sponge was outside the ~6h Amber window, or forecast at a similar price to the spike. Rule 26 would have held instead — next cycle would have seen the spike resolve.
 
 
-### Rule 27 — Manual Override: Human Takes the Wheel
+### Rule 27 — Agent Control: Human Can Take the Wheel
 
-**Control:** `input_boolean.agent_manual_override` (toggle on the HA dashboard).
+**Control:** `input_boolean.agent_active` ("Agent Control" toggle on the HA dashboard).
+**ON = agent active (normal); OFF = agent paused.** Reads literally — no double negative.
+(Renamed 2026-08-05 from `agent_manual_override`, which had ON = paused; see the note below
+for why the polarity was flipped safely.)
 
-While ON, the deterministic layer still computes and logs its verdict — shadow and
-divergence data keep accumulating, and cycles are tagged `manual_override` in
-`decisions.jsonl` so they can be excluded from accuracy analysis — but it **sends no
-commands**, leaving whatever reserve and mode the user set in place.
+While **OFF (paused)**, the deterministic layer still computes and logs its verdict — shadow
+and divergence data keep accumulating, and cycles are tagged `manual_override` in
+`decisions.jsonl` (field name kept) so they can be excluded from accuracy analysis — but it
+**sends no commands**, leaving whatever reserve and mode the user set in place.
 
 ```
-override ON  → compute verdict, log it, send nothing
-override OFF → normal control
+Agent Control ON   → normal control
+Agent Control OFF  → compute verdict, log it, send nothing (paused)
 ```
+
+**Defaults ON and auto-resumes.** `initial: on` makes it default ON on creation and forces ON
+after any HA restart — the safe state (agent active), which also neutralises the overnight
+helper-reset gremlin. A pause **auto-resumes after `MANUAL_OVERRIDE_MAX_HOURS` (12h)**: the
+agent flips the switch back ON (so the dashboard stays honest) and resumes control, so a
+forgotten OFF can't strand the battery through a peak day. `_agent_paused()` **fails safe toward
+active** — only an explicit `off` pauses, so an unreachable HA / undefined boolean /
+`unavailable` state during a restart all keep the agent in control.
 
 **Hold verdicts are suppressed too.** This is the non-obvious part: a HOLD verdict
 unconditionally drives reserve to 5%, so without suppressing it the agent would silently
@@ -745,18 +756,15 @@ So the override can cost money; it cannot cause a demand-charge breach. That asy
 is deliberate — the whole point of Layer 0 is that no reasoning layer above it, human or
 machine, can switch it off.
 
-**Dashboard readout — `binary_sensor.agent_active` (added 2026-08-05, display-only).** The card entry
-"Manual override (agent hands off)" was a confusing double-negative (ON = agent OFF). The fix is *not* to
-invert the boolean into an `agent_active` control: `agent_manual_override` is **OFF = agent active on
-purpose**, because a fresh or gremlin-reset `input_boolean` defaults OFF and the *safe* state must be the
-default — an inverted "agent_active" would default to **agent-paused**, i.e. silently disabling the agent
-(possibly through a demand window). Instead a **read-only** template `binary_sensor.agent_active` (in
-`configuration.yaml`) gives the positive "Agent: Active / Paused" readout while the safe control polarity
-stays put. It is **expiry-aware** — it mirrors `_manual_override_active()` (resumes control after
-`MANUAL_OVERRIDE_MAX_HOURS = 12h` but does *not* clear the boolean), so an override held >12h reads
-"Active — override expired, resumed", matching what the agent actually does. It reflects override state,
-not Pi liveness (that's the Healthchecks heartbeat). The recommended card pairs it (as a `type: attribute`
-row showing the `status` text) with the toggle relabelled "Manual override — ON pauses the agent".
+**Why the polarity was flipped (2026-08-05).** The old `agent_manual_override` was OFF = active, ON =
+paused — a double-negative on the dashboard ("Manual override ON" meant the agent was OFF). The original
+reason to keep it that way was safety: a fresh `input_boolean` defaults OFF and the gremlin resets to OFF,
+so OFF had to be the safe state. **`initial: on` removes that constraint** — the toggle now defaults ON on
+creation *and* is forced ON after every HA restart, so ON = active can be the safe default too. Combined
+with the fail-safe-toward-active read and the 12h auto-resume, an accidental or gremlin-induced OFF
+self-heals. A first attempt (a read-only `binary_sensor.agent_active` beside the old toggle) was
+**superseded** by this cleaner inversion — one toggle, ON = on. Rule 36's `agent_narrative` was inverted
+the same way and for the same reasons.
 
 ---
 
@@ -1095,19 +1103,22 @@ to the LP). 3 tests (`test_peak_eve_*`), 108 decision total.
 
 ### Rule 36 — Quiet Mode: Mute Notifications + Pause LLM Narration (control-neutral)
 
-**Added 2026-08-05.** A dashboard toggle, `input_boolean.agent_narrative_disable` ("Quiet mode"), does
-two things when ON: (1) **skips the per-cycle LLM narrative call** — the only paid Anthropic call in the
-loop, so this directly cuts cost; and (2) **mutes the per-cycle `🔋 Battery` / `🚗 EV` persistent
-notifications** (and dismisses any already on screen). **It does not touch control.** The deterministic
-rule layer and the demand-window reserve guard (Rule 2) both run *earlier* in `run_agent()`; this
-governs only the narrative + notification step that comes after.
+**Added 2026-08-05.** A dashboard toggle, `input_boolean.agent_narrative` ("Agent Narrative"),
+**ON = narrate + notify (normal), OFF = quiet**. Reads literally — no double negative. When switched
+**OFF (quiet)** it does two things: (1) **skips the per-cycle LLM narrative call** — the only paid
+Anthropic call in the loop, so this directly cuts cost; and (2) **mutes the per-cycle `🔋 Battery` /
+`🚗 EV` persistent notifications** (and dismisses any already on screen). **It does not touch control.**
+The deterministic rule layer and the demand-window reserve guard (Rule 2) both run *earlier* in
+`run_agent()`; this governs only the narrative + notification step that comes after. (Renamed +
+polarity-flipped 2026-08-05 from `agent_narrative_disable`, which had ON = quiet — see Rule 27's flip note;
+`initial: on` makes ON the safe default.)
 
 **Why both:** the notifications are created by `log_decision()` with fixed `notification_id`s, so they
-reappear every cycle regardless of whether the LLM ran — pausing the LLM alone leaves them firing. The
-user's ask was to *stop the notification display*, so the toggle gates the two `persistent_notification.
+reappear every cycle regardless of whether the LLM ran — skipping the LLM alone leaves them firing. The
+user's ask was to *stop the notification display*, so quiet mode gates the two `persistent_notification.
 create` calls (and dismisses the lingering pair) as well as skipping the LLM.
 
-**Behaviour when ON:** the agent skips the LLM entirely and logs the cycle with the deterministic
+**Behaviour when OFF (quiet):** the agent skips the LLM entirely and logs the cycle with the deterministic
 `_build_auto_summary()` (the same path Phase 7 already uses for routine holds). `decisions.jsonl`, the
 dashboard helper sensors, the **logbook**, the liveness heartbeat, and the shadow/optimizer divergence
 fields (`computed_verdict`, `optimizer_verdict`, `optimizer_vs_deterministic`) **all keep getting
@@ -1116,23 +1127,23 @@ the LLM prose go quiet. The demand-window / safety automations (Layer 3) are ind
 muted. On a paused cycle where the rule layer actually acted (e.g. a charge), the logged actions reflect
 what was executed, not a false "hold" (`_build_auto_summary` now renders the verdict's `action`).
 
-**Inverted sense (default OFF = narrate) on purpose.** A fresh `input_boolean` with no `initial:`
-defaults OFF, and the unresolved overnight helper-reset gremlin (see `todo.md`) would also reset it
-OFF — both of which land on the *safe* behaviour (keep narrating) rather than silently killing
-narration. `_narrative_disabled()` also **fails toward narrating** if HA is unreachable or the boolean
-isn't defined (404). There is no kill-switch constant: the toggle *is* the switch, and its absence is
-indistinguishable from "narrate normally".
+**Default ON, fails toward narrating.** `initial: on` makes it default ON on creation and forces ON after
+any HA restart — the safe state (narrate), which also neutralises the overnight helper-reset gremlin.
+`_narrative_disabled()` treats **only an explicit `off`** as quiet, so an unreachable HA, an undefined
+boolean (404), or an `unavailable` state during a restart all keep narrating. There is no kill-switch
+constant: the toggle *is* the switch.
 
 **Interaction with Phase 7:** the two skip reasons are independent and OR'd — a routine hold skips the
-LLM regardless of the toggle (as before); the toggle additionally forces the skip on *interesting*
-cycles. Compare with Rule 27 (manual override), which suppresses *control commands*; Rule 36 suppresses
-only the *narrative* and never affects control.
+LLM regardless of the toggle (as before); switching Agent Narrative OFF additionally forces the skip on
+*interesting* cycles. Compare with Rule 27 (Agent Control), which suppresses *control commands*; Rule 36
+suppresses only the *narrative + notifications* and never affects control.
 
 **Also mutes the informational HA automations (Layer 3).** The agent is not the only notifier — ~24
 automations in `config/automations.yaml` fire their own `persistent_notification.create` (none of them
 call the LLM, so this is display-only, zero API cost). Six *enabled, non-safety* ones now carry a
-`condition: template` gate — `{{ states('input_boolean.agent_narrative_disable') != 'on' }}` — placed
-**after** their control actions so only the notify is skipped when Quiet mode is ON, never the control:
+`condition: template` gate — `{{ states('input_boolean.agent_narrative') != 'off' }}` (notify unless
+explicitly off, so it fails toward notifying) — placed **after** their control actions so only the notify
+is skipped when quiet mode is on, never the control:
 `battery_autonomous_revert_target_reached`, `battery_post_demand_window_restore`,
 `battery_negative_price_charge`, `battery_negative_price_reset`, `solar_inverter_underperformance_alert`,
 `ev_plugged_in_notify`. The gate **fails toward notifying** (suppresses only on an explicit `on`), so an

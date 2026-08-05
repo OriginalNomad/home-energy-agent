@@ -53,8 +53,8 @@ def mode():  return ha_state("sensor.powerwall_mode")
 try:
     p("=== GAP EXPERIMENT", datetime.now().strftime("%H:%M:%S"), "===")
     p(f"baseline: SoC={soc():.0f} mode={mode()} batt_power={power():.2f}kW grid={grid():.2f}kW")
-    ha_service("input_boolean", "turn_on", "input_boolean.agent_manual_override")
-    p("manual override ON (agent will compute but not command)\n")
+    ha_service("input_boolean", "turn_off", {"entity_id": "input_boolean.agent_active"})
+    p("Agent Control OFF — agent PAUSED (will compute but not command)\n")
 
     for gap in [40, 20, 10, 5, 3]:
         s = soc()
@@ -76,8 +76,8 @@ finally:
     except Exception as e:
         p("!! restore reserve FAILED:", e, "-- SET IT MANUALLY")
     try:
-        ha_service("input_boolean", "turn_off", "input_boolean.agent_manual_override")
-        p("manual override OFF (agent resumes next cycle)")
+        ha_service("input_boolean", "turn_on", {"entity_id": "input_boolean.agent_active"})
+        p("Agent Control ON — agent resumes next cycle")
     except Exception as e:
-        p("!! override-off FAILED:", e, "-- TURN IT OFF MANUALLY")
+        p("!! agent-resume FAILED:", e, "-- TURN Agent Control BACK ON MANUALLY")
     p("=== DONE", datetime.now().strftime("%H:%M:%S"), "===")

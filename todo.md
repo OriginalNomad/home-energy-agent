@@ -35,14 +35,19 @@
    does the bill view live in the **Sol Next.js app** (`app/`) or the **HA dashboard**? Step 1 = a bill data
    model + entry view showing the Amber bill vs the agent's logged `net_cost_c` (EV-aware after ④). Seeds the
    savings dashboard.
-7. ✅ **⑦ UX — "Agent is Active" status readout + relabel the manual-override toggle — DONE 2026-08-05.**
-   Added read-only `binary_sensor.agent_active` template (`configuration.yaml`, `device_class: running`,
-   expiry-aware — mirrors `_manual_override_active()`'s 12h auto-resume) with a `status` attribute
-   ("Active — in control" / "Paused — manual override (Xh of 12h)" / "Active — override expired, resumed").
-   Deployed + verified live (reads `on` / "Active — in control"). Did **not** invert the boolean (OFF =
-   agent active must stay the safe default vs the reset gremlin). Recommended card (in chat) pairs a
-   `type: attribute` status row with the toggle relabelled "Manual override — ON pauses the agent" + Quiet
-   mode. energy_rules Rule 27 updated. **User to paste the updated card.**
+7. ✅ **⑦ UX — both agent toggles reframed to ON = on / OFF = off, default ON — DONE 2026-08-05.**
+   User's final call (cleaner than the interim status-sensor): **invert both booleans** so "ON means on".
+   - `agent_manual_override` (ON=paused) → **`input_boolean.agent_active`** ("Agent Control", ON=active,
+     OFF=paused). `_manual_override_active()` → `_agent_paused()`; 12h auto-resume now flips the switch back
+     ON; fails safe toward active (only explicit `off` pauses).
+   - `agent_narrative_disable` (ON=quiet) → **`input_boolean.agent_narrative`** ("Agent Narrative",
+     ON=narrate, OFF=quiet). 6 automation conditions flipped to `!= 'off'`. Interim `binary_sensor.
+     agent_active` **removed** (superseded).
+   - Both get **`initial: on`** → default ON on creation + forced ON after restart (makes ON the *safe*
+     default, defusing the earlier "must default to the safe state" objection + the reset gremlin).
+   - Deployed + verified live (both read `on`); **228** decision + 25 + 11 tests pass; deploy-script verify
+     list repointed to `agent_active`. energy_rules Rule 27 + 36, CONTEXT updated. Code pushed.
+     **User to paste the updated 2-toggle card (in chat).**
 
 **Also watch this afternoon (from the morning brief):**
 - 🔌 **SolarEdge telemetry stall** (frozen since ~14:40 on 04 Aug) — check mySolarEdge mid-morning; if still

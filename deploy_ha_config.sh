@@ -76,7 +76,7 @@ echo "→ verifying key entities"
 ssh "$PI" "cd \$HOME/home-energy-agent/agent && ../agent/venv/bin/python -c \"
 import energy_agent as ea, time
 time.sleep(5)
-for e in ['sensor.battery_grid_charge_target','input_boolean.agent_manual_override',
+for e in ['sensor.battery_grid_charge_target','input_boolean.agent_active',
           'sensor.tessie_powerwall_charge']:
     try:    print(f'   {e:42s} = ' + ea.ha_get(e)['state'])
     except Exception as ex: print(f'   {e:42s} ! ' + str(ex)[:60])

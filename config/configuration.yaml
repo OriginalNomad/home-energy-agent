@@ -67,30 +67,33 @@ input_boolean:
   ev_schedule_active:
     name: "EV — Schedule active"
     icon: mdi:car-clock
-  agent_manual_override:
-    # While ON the agent computes and logs its verdict but sends no commands,
-    # leaving whatever reserve/mode you set in place. Auto-expires after 12h
-    # (MANUAL_OVERRIDE_MAX_HOURS in energy_agent.py) so a forgotten toggle
-    # can't disable the agent for days.
-    # Does NOT disable: the 3-9pm demand-window reserve guard (Rule 2), or any
-    # HA safety automation. Manual override can cost money; it cannot cause a
-    # demand-charge breach.
-    name: "Agent — Manual override"
-    icon: mdi:hand-back-right
-  agent_narrative_disable:
-    # Quiet mode. While ON the agent (1) SKIPS the paid LLM narrative call to save
-    # API cost, and (2) MUTES the per-cycle 🔋 Battery / 🚗 EV persistent
-    # notifications (and dismisses any already on screen). Control is unaffected —
-    # the deterministic layer + demand-window guard run earlier. Everything else
-    # still writes: decisions.jsonl, dashboard helper sensors, the logbook, the
-    # heartbeat, and the shadow+optimizer divergence fields — so the audit trail
-    # and Phase-4 data are intact; only the popups + the LLM prose go quiet.
-    # Does NOT mute the demand-window / safety automations (Layer 3) — those stay.
-    # Inverted sense on purpose: default OFF = narrate + notify (current behaviour).
-    # A fresh input_boolean with no initial: defaults OFF, and the unresolved
-    # overnight helper-reset gremlin would also land OFF — both on the SAFE side.
-    name: "Agent — Quiet mode (mute notifications + save API $)"
-    icon: mdi:bell-off
+  agent_active:
+    # Agent Control. ON = agent active (normal); OFF = agent paused (you're driving).
+    # Reads literally — ON is on, OFF is off, no double negative.
+    # `initial: on` means it defaults ON on creation AND is forced ON after any HA
+    # restart — the SAFE state (agent active), which also neutralises the overnight
+    # helper-reset gremlin. While OFF the agent still computes+logs its verdict
+    # (shadow/divergence data keeps accruing) but sends no commands. A pause
+    # AUTO-RESUMES after 12h (MANUAL_OVERRIDE_MAX_HOURS in energy_agent.py; the agent
+    # flips this back ON) so a forgotten OFF can't strand the battery through a peak
+    # day. Does NOT disable the 3-9pm demand-window reserve guard (Rule 2) or any HA
+    # safety automation. Agent code fail-safe: unreachable/unknown → treated as ACTIVE.
+    name: "Agent Control"
+    initial: on
+    icon: mdi:robot
+  agent_narrative:
+    # Agent Narrative. ON = narrate + notify (normal); OFF = quiet. Reads literally.
+    # When OFF the agent (1) SKIPS the paid LLM narrative call and (2) MUTES the
+    # per-cycle 🔋/🚗 notifications + 6 informational automations (and dismisses any
+    # on screen). Control unaffected (deterministic layer + demand guard run earlier);
+    # decisions.jsonl / dashboard helpers / logbook / heartbeat / shadow+optimizer
+    # fields all still write — only the LLM prose + popups go quiet, and the API spend.
+    # `initial: on` → defaults ON, forced ON after restart (SAFE: keep narrating).
+    # Does NOT mute the demand-window / safety automations (Layer 3). Fail-safe:
+    # unreachable/unknown → narrate.
+    name: "Agent Narrative"
+    initial: on
+    icon: mdi:message-text
 
 input_datetime:
   ev_departure_time:
@@ -232,45 +235,6 @@ template:
           # for a month. `type: attribute` rows can show this instead.
           yes_no: >
             {{ 'Yes' if now().month in [1, 2, 3, 6, 7, 8, 11, 12] else 'No' }}
-
-      # Read-only positive readout of whether the agent is in control, so the
-      # dashboard can show "Agent: Active / Paused" instead of the confusing
-      # double-negative "Manual override = ON". This is DISPLAY ONLY — it does not
-      # control anything; the control remains input_boolean.agent_manual_override
-      # (OFF = agent active, the safe default). Do NOT invert that boolean: a fresh
-      # or gremlin-reset input_boolean defaults OFF, and OFF must stay the SAFE state
-      # (agent active) — an inverted "agent_active" would default to agent-paused.
-      # Expiry-aware: mirrors _manual_override_active() (energy_agent.py), which
-      # resumes control after MANUAL_OVERRIDE_MAX_HOURS=12h but does NOT clear the
-      # boolean — so an override held >12h reads Active here, matching reality.
-      # Reflects override state, not Pi liveness (that's the Healthchecks heartbeat).
-      - name: "Agent Active"
-        unique_id: agent_active
-        device_class: running
-        icon: >
-          {% set ov = states('input_boolean.agent_manual_override') %}
-          {% set active = ov != 'on' or (now() - states.input_boolean.agent_manual_override.last_changed).total_seconds() > 12*3600 %}
-          {{ 'mdi:robot' if active else 'mdi:robot-off' }}
-        state: >
-          {% set ov = states('input_boolean.agent_manual_override') %}
-          {% if ov != 'on' %}
-            true
-          {% else %}
-            {{ (now() - states.input_boolean.agent_manual_override.last_changed).total_seconds() > 12*3600 }}
-          {% endif %}
-        attributes:
-          status: >
-            {% set ov = states('input_boolean.agent_manual_override') %}
-            {% if ov != 'on' %}
-              Active — in control
-            {% else %}
-              {% set held_h = (now() - states.input_boolean.agent_manual_override.last_changed).total_seconds() / 3600 %}
-              {% if held_h > 12 %}
-                Active — override expired ({{ held_h | round(0) }}h), resumed
-              {% else %}
-                Paused — manual override ({{ held_h | round(1) }}h of 12h)
-              {% endif %}
-            {% endif %}
 
   - sensor:
       - name: "Solar Power W"

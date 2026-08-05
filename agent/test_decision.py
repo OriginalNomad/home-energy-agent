@@ -881,46 +881,54 @@ def _with_override_state(obj):
 
 
 def test_manual_override():
+    # Agent Control switch: input_boolean.agent_active, ON = active / OFF = paused.
     from datetime import timedelta
     real_ha_get = ea.ha_get
     real_set_reserve = ea.set_powerwall_reserve
+    real_service = ea.ha_service
     real_ctx = ea._cycle_context
     try:
         now = ea.datetime.now(ea.SYDNEY_TZ)
+        ea.ha_service = lambda *a, **k: None   # swallow the auto-resume write-back
 
-        ea.ha_get = _with_override_state({"state": "off", "last_changed": now.isoformat()})
-        active, _ = ea._manual_override_active()
-        check("manual override off → agent keeps control", active is False)
-
-        ea.ha_get = _with_override_state({
-            "state": "on", "last_changed": (now - timedelta(hours=1)).isoformat()})
-        active, msg = ea._manual_override_active()
-        check("manual override on (1h) → active", active is True, msg)
+        ea.ha_get = _with_override_state({"state": "on", "last_changed": now.isoformat()})
+        paused, _ = ea._agent_paused()
+        check("Agent Control ON → agent active (not paused)", paused is False)
 
         ea.ha_get = _with_override_state({
-            "state": "on", "last_changed": (now - timedelta(hours=13)).isoformat()})
-        active, msg = ea._manual_override_active()
-        check("manual override expires after 12h", active is False, msg)
+            "state": "off", "last_changed": (now - timedelta(hours=1)).isoformat()})
+        paused, msg = ea._agent_paused()
+        check("Agent Control OFF (1h) → paused", paused is True, msg)
+
+        ea.ha_get = _with_override_state({
+            "state": "off", "last_changed": (now - timedelta(hours=13)).isoformat()})
+        paused, msg = ea._agent_paused()
+        check("pause auto-resumes after 12h", paused is False, msg)
         check("  ...and says why", "EXPIRED" in msg, msg)
 
-        # Fail open — a broken HA must not silently make the agent passive.
-        ea.ha_get = _with_override_state(RuntimeError("HA unreachable"))
-        active, msg = ea._manual_override_active()
-        check("manual override fails open when HA unreachable", active is False, msg)
+        # unavailable during an HA restart must not pause the agent (fail safe → active)
+        ea.ha_get = _with_override_state({"state": "unavailable", "last_changed": now.isoformat()})
+        paused, msg = ea._agent_paused()
+        check("Agent Control unavailable → active (fail safe)", paused is False, msg)
 
-        # End-to-end: an active override must send no commands.
+        # Fail safe — a broken HA must not silently make the agent passive.
+        ea.ha_get = _with_override_state(RuntimeError("HA unreachable"))
+        paused, msg = ea._agent_paused()
+        check("Agent Control fails safe (active) when HA unreachable", paused is False, msg)
+
+        # End-to-end: a paused agent (Agent Control OFF) must send no commands.
         sent = []
         ea.set_powerwall_reserve = lambda pct: sent.append(pct)
         ea._cycle_context = {"state": {"battery": {"soc_pct": 47, "reserve_pct": 85,
                                                    "mode": "self_consumption"}}}
         ea.ha_get = _with_override_state({
-            "state": "on", "last_changed": (now - timedelta(hours=1)).isoformat()})
+            "state": "off", "last_changed": (now - timedelta(hours=1)).isoformat()})
         ctx = {"recommended": {"action": "charge", "target_pct": 85,
                                "mode": "self_consumption", "rule_fired": "solar_sponge_floor"},
                "ev_recommended": {}}
         out = ea._execute_deterministic_verdict(ctx, dry_run=False)
-        check("override blocks a charge verdict", sent == [], f"sent={sent}")
-        check("  ...and reports the suppressed verdict", "MANUAL OVERRIDE" in out[0], out)
+        check("paused agent blocks a charge verdict", sent == [], f"sent={sent}")
+        check("  ...and reports the suppressed verdict", "AGENT PAUSED" in out[0], out)
 
         # A hold verdict must also be suppressed — otherwise the agent would
         # yank reserve back to 5% and undo the user's manual setting.
@@ -928,19 +936,20 @@ def test_manual_override():
         ctx_hold = {"recommended": {"action": "hold", "rule_fired": "target_met"},
                     "ev_recommended": {}}
         ea._execute_deterministic_verdict(ctx_hold, dry_run=False)
-        check("override blocks a hold verdict clearing reserve", sent == [], f"sent={sent}")
+        check("paused agent blocks a hold verdict clearing reserve", sent == [], f"sent={sent}")
 
-        # Control returns the moment it's switched off.
-        ea.ha_get = _with_override_state({"state": "off", "last_changed": now.isoformat()})
+        # Control returns the moment Agent Control is switched back ON.
+        ea.ha_get = _with_override_state({"state": "on", "last_changed": now.isoformat()})
         sent.clear()
         ea._execute_deterministic_verdict(ctx, dry_run=False)
         # Control resumed → a reserve command was sent. Under the Rule 31 controller a
         # self_consumption charge chases SoC+offset (soc 47, target 85 → 53), not a flat 85.
-        check("control resumes when override is off",
+        check("control resumes when Agent Control is on",
               sent == [ea._gentle_charge_reserve(47, 85)], f"sent={sent}")
     finally:
         ea.ha_get = real_ha_get
         ea.set_powerwall_reserve = real_set_reserve
+        ea.ha_service = real_service
         ea._cycle_context = real_ctx
 
 

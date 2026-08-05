@@ -213,7 +213,8 @@ SOLAR_SPONGE_PRICE_THRESHOLD = 10.0   # ¢ — if overnight price > this, wait f
 _cycle_context: dict = {}
 _demand_reserve_guard_fired: bool = False
 
-# Manual override — user takes the wheel. See _manual_override_active().
+# Agent Control (input_boolean.agent_active, ON=active/OFF=paused): OFF pauses the
+# agent. Auto-resumes after this many hours. See _agent_paused().
 MANUAL_OVERRIDE_MAX_HOURS = 12.0
 
 SYDNEY_TZ   = pytz.timezone("Australia/Sydney")
@@ -228,8 +229,8 @@ ENTITIES = {
     "battery_soc_gateway":  "sensor.tesla_powerwall_2_charge",
     "battery_mode":         "sensor.powerwall_mode",
     "battery_reserve":      "sensor.powerwall_backup_reserve",
-    "manual_override":      "input_boolean.agent_manual_override",
-    "narrative_disable":    "input_boolean.agent_narrative_disable",
+    "agent_active":         "input_boolean.agent_active",       # ON = agent active, OFF = paused
+    "agent_narrative":      "input_boolean.agent_narrative",     # ON = narrate + notify, OFF = quiet
     "battery_target":       "sensor.battery_grid_charge_target",
     "grid_price":           "sensor.1a_wigram_road_glebe_general_price",
     "grid_forecast":        "sensor.1a_wigram_road_glebe_general_forecast",
@@ -1006,7 +1007,7 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         print(f"  Warning: daily cost push failed: {exc}", file=sys.stderr)
 
     # Per-cycle battery/EV notifications. Muted when the user has enabled quiet mode
-    # (input_boolean.agent_narrative_disable, Rule 36) — they reappear every cycle via
+    # (quiet mode: input_boolean.agent_narrative OFF, Rule 36) — they reappear every cycle via
     # fixed notification_id, which is the "notifications still firing" the toggle is meant
     # to stop. Everything else below (logbook, dashboard helpers, JSONL, heartbeat) still
     # runs so the audit trail and Phase-4 data are unaffected — only the popups go quiet.
@@ -2402,37 +2403,39 @@ def push_corrected_solar_forecast() -> "float | None":   # quoted: Mac dev pytho
         return None
 
 
-def _manual_override_active() -> tuple[bool, str]:
-    """True when the user has taken manual control of the battery.
+def _agent_paused() -> tuple[bool, str]:
+    """True when the user has paused the agent (taken manual control of the battery).
 
-    Toggled via `input_boolean.agent_manual_override` (dashboard switch). While
-    on, the rule layer still computes and logs its verdict — so shadow/divergence
-    data keeps accumulating — but sends no commands, leaving whatever reserve and
-    mode the user set in place.
+    Controlled by `input_boolean.agent_active` (dashboard switch): **ON = agent
+    active** (normal), **OFF = agent paused**. While paused, the rule layer still
+    computes and logs its verdict — so shadow/divergence data keeps accumulating —
+    but sends no commands, leaving whatever reserve and mode the user set in place.
 
-    Auto-expires after MANUAL_OVERRIDE_MAX_HOURS so a forgotten toggle cannot
-    silently disable the agent for days. On expiry the agent resumes control and
-    says so loudly.
+    Auto-resumes after MANUAL_OVERRIDE_MAX_HOURS so a forgotten OFF cannot silently
+    disable the agent for days (a paused agent can't pre-charge → demand-charge risk
+    on a peak day). On resume the agent flips the switch back ON so the dashboard
+    stays honest, and says so loudly.
 
-    NOT suppressed by this: the demand-window reserve guard (Rule 2 backstop),
+    NOT suppressed by a pause: the demand-window reserve guard (Rule 2 backstop),
     which runs earlier in run_agent(), and the HA safety automations, which are
-    independent of the agent entirely. Manual override can cost money; it cannot
+    independent of the agent entirely. Pausing can cost money; it cannot by itself
     cause a demand-charge breach.
 
-    Fails open — if HA is unreachable the agent keeps control rather than
-    silently going passive on a peak day.
+    Fails safe toward ACTIVE — only an explicit `off` pauses, so an unreachable HA,
+    an undefined boolean, or an `unavailable`/`unknown` state during an HA restart
+    all keep the agent in control rather than silently going passive on a peak day.
     """
     try:
-        obj = ha_get(ENTITIES["manual_override"])
+        obj = ha_get(ENTITIES["agent_active"])
     except Exception as exc:
-        # A 404 just means the input_boolean isn't defined in this HA instance
-        # yet — the normal state before deployment. Stay quiet for that; warn
-        # for anything else (auth, timeout, HA down).
+        # A 404 just means the input_boolean isn't defined in this HA instance yet
+        # — the normal state before deployment. Any error → assume ACTIVE.
         if getattr(getattr(exc, "response", None), "status_code", None) == 404:
             return False, ""
-        return False, f"override check failed ({exc}) — keeping control"
+        return False, f"agent-active check failed ({exc}) — keeping control"
 
-    if str(obj.get("state") or "").lower() != "on":
+    # Anything that isn't an explicit "off" (on / unavailable / unknown) → active.
+    if str(obj.get("state") or "").lower() != "off":
         return False, ""
 
     try:
@@ -2442,44 +2445,45 @@ def _manual_override_active() -> tuple[bool, str]:
         held_h = 0.0
 
     if held_h > MANUAL_OVERRIDE_MAX_HOURS:
-        return False, (f"manual override ON for {held_h:.1f}h "
+        # Auto-resume — flip the switch back ON so the dashboard reflects reality.
+        try:
+            ha_service("input_boolean", "turn_on", {"entity_id": ENTITIES["agent_active"]})
+        except Exception:
+            pass   # never let the write-back stop the agent resuming control
+        return False, (f"agent PAUSED for {held_h:.1f}h "
                        f"(limit {MANUAL_OVERRIDE_MAX_HOURS:.0f}h) — EXPIRED, resuming control")
 
-    return True, f"manual override ON ({held_h:.1f}h of {MANUAL_OVERRIDE_MAX_HOURS:.0f}h)"
+    return True, f"agent PAUSED ({held_h:.1f}h of {MANUAL_OVERRIDE_MAX_HOURS:.0f}h)"
 
 
 def _narrative_disabled() -> tuple[bool, str]:
-    """True when the user has paused LLM narration to save API cost.
+    """True when the user has turned narration/notifications off (quiet mode).
 
-    Toggled via `input_boolean.agent_narrative_disable` (dashboard switch).
-    While on, the agent skips the LLM narrative call entirely and logs the cycle
-    with the deterministic auto-summary instead — decisions.jsonl, dashboard
-    helpers, notifications, the liveness heartbeat and the shadow/optimizer
-    divergence fields all still get written, just without the LLM prose (and
-    without the API spend).
+    Controlled by `input_boolean.agent_narrative` (dashboard switch): **ON = narrate
+    + notify** (normal), **OFF = quiet**. While off, the agent skips the LLM
+    narrative call AND mutes the per-cycle battery/EV notifications — decisions.jsonl,
+    dashboard helpers, the logbook, the liveness heartbeat and the shadow/optimizer
+    divergence fields all still get written, just without the LLM prose or the popups
+    (and without the API spend).
 
     Control is UNAFFECTED: the deterministic layer and the demand-window reserve
-    guard both run earlier in run_agent(). This governs only the narrative step.
+    guard both run earlier in run_agent(). This governs only the narrative +
+    notification step.
 
-    Inverted sense (default off = narrate) on purpose: a fresh input_boolean with
-    no initial: defaults off, and the unresolved overnight helper-reset gremlin
-    (see todo) would reset it off — both of which land on the SAFE behaviour
-    (keep narrating) rather than silently killing narration.
-
-    Fails toward narrating — if HA is unreachable or the boolean isn't defined we
-    keep the LLM path rather than silently suppressing it.
+    Fails toward narrating — only an explicit `off` enables quiet mode, so an
+    unreachable HA, an undefined boolean, or an `unavailable` state during an HA
+    restart all keep the LLM path + notifications rather than silently going quiet.
     """
     try:
-        obj = ha_get(ENTITIES["narrative_disable"])
+        obj = ha_get(ENTITIES["agent_narrative"])
     except Exception as exc:
-        # 404 = the input_boolean isn't defined in this HA instance yet (the
-        # normal pre-deployment state). Stay quiet for that; warn for anything
-        # else (auth, timeout, HA down) but keep narrating.
+        # 404 = the input_boolean isn't defined in this HA instance yet (the normal
+        # pre-deployment state). Any error → keep narrating.
         if getattr(getattr(exc, "response", None), "status_code", None) == 404:
             return False, ""
         return False, f"narration-toggle check failed ({exc}) — narrating"
-    if str(obj.get("state") or "").lower() == "on":
-        return True, "narration paused (agent_narrative_disable ON) — LLM skipped to save API cost"
+    if str(obj.get("state") or "").lower() == "off":
+        return True, "quiet mode (agent_narrative OFF) — LLM skipped + notifications muted"
     return False, ""
 
 
@@ -2494,12 +2498,12 @@ def _execute_deterministic_verdict(ctx: dict, dry_run: bool = False) -> list[str
     state  = _cycle_context.get("state", {})
     executed = []
 
-    _override, _ov_msg = _manual_override_active()
-    _cycle_context["manual_override"] = _override
-    if _ov_msg:
-        print(f"  [det] {_ov_msg}", file=sys.stderr)
-    if _override:
-        _note = (f"MANUAL OVERRIDE — no commands sent (verdict was "
+    _paused, _pause_msg = _agent_paused()
+    _cycle_context["manual_override"] = _paused   # JSONL field name kept: True = agent was paused
+    if _pause_msg:
+        print(f"  [det] {_pause_msg}", file=sys.stderr)
+    if _paused:
+        _note = (f"AGENT PAUSED (Agent Control OFF) — no commands sent (verdict was "
                  f"{rec.get('action')}/{rec.get('rule_fired')}, "
                  f"target={rec.get('target_pct')}, mode={rec.get('mode')})")
         print(f"  [det] {_note}")
@@ -2791,7 +2795,7 @@ def run_agent(dry_run: bool = False):
     # shadow+optimizer divergence fields keep getting written — Phase-4 data
     # collection is uninterrupted):
     #   (1) Phase 7 — routine (uninteresting) hold cycle. Always active.
-    #   (2) User paused narration via input_boolean.agent_narrative_disable to
+    #   (2) User turned narration off (quiet mode) via input_boolean.agent_narrative to
     #       save API cost. Forces the skip even on an "interesting" cycle.
     # Only when DETERMINISTIC_AUTHORITATIVE=True (control path is deterministic).
     if DETERMINISTIC_AUTHORITATIVE and not dry_run:
