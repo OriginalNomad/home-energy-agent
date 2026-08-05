@@ -3077,3 +3077,10 @@ value so it won't wrongly zero solar. Demand window unaffected (SoC + Solcast dr
 (1) mySolarEdge app "last updated" — if ~1pm, it's inverter→cloud (physical); (2) SetApp comms status
 (S_OK); (3) physical inverter AC restart rebuilds the session but is a band-aid given the daily recurrence
 — root cause is the monitoring uplink. Tracked for tomorrow.
+- **CONFIRMED inverter→cloud (user checked mySolarEdge ~14:40):** app "last solar update" reads **12:45pm
+  then stops** — the SolarEdge *cloud itself* has no data past 12:45, so the **inverter stopped uploading at
+  12:45pm**. HA is mirroring a frozen cloud → an HA reload is pointless. **Inverter is still GENERATING
+  normally** (Powerwall CT ~1.8 kW live) — only monitoring/reporting dropped, no solar energy lost. Root
+  cause = the inverter's monitoring comms module (thermal hypothesis: consistent ~1pm timing = peak heat).
+  **Tomorrow:** determine how the inverter connects to SolarEdge (ethernet / SolarEdge Wi-Fi module /
+  cellular) — decides the fix; check SetApp Server Comm. / S_OK; consider inverter ventilation/sun exposure.
