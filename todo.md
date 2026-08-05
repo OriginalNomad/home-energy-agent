@@ -63,8 +63,12 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
      **User to paste the updated 2-toggle card (in chat).**
 
 **Also watch this afternoon (from the morning brief):**
-- 🔌 **SolarEdge telemetry stall** (frozen since ~14:40 on 04 Aug) — check mySolarEdge mid-morning; if still
-  frozen through daylight, physical inverter AC restart. Cosmetic + solar-accuracy only; control unaffected.
+- 🔌 **SolarEdge telemetry stall — now RECURRING DAILY** (04 Aug ~14:40, 05 Aug ~13:00; both channels froze
+  today). Isolated to the SolarEdge feed — Powerwall CT + Solcast stay live, so it's the inverter→cloud
+  uplink / SolarEdge cloud, not HA/network/Pi. Pattern = early afternoon (thermal on the comms module?).
+  **Diagnose (user):** mySolarEdge "last updated" (≈1pm ⇒ inverter→cloud, physical) + SetApp comms S_OK.
+  Physical AC restart is a band-aid given the recurrence — root cause is the monitoring uplink. Cosmetic +
+  solar-accuracy only; control uses Powerwall CT + Solcast, unaffected. See energy_log 2026-08-05.
 - **Battery rode to 11–15% overnight again** on a peak day — the overnight-strategy item is still live (② is
   the first piece of the fix).
 - Slider-drift morning check was clean.

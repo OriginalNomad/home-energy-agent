@@ -3062,3 +3062,18 @@ switch gates whether the rule layer commands the battery):
   (now covers `unavailable → active`): **228 decision + 25 + 11 pass**. Deployed (both toggles live, read
   `on`; zero drift), pushed. energy_rules Rule 27 + 36, CONTEXT, todo ⑦ all updated. **User to paste the
   new 2-toggle card.**
+
+**SolarEdge telemetry stall RECURRED (~13:00 today) — now a daily pattern.** User reported the inverter
+flatlined again at 1pm. Confirmed via HA API at 14:35: `sensor.solaredge_current_power` (2834 W) AND
+`sensor.solaredge_energy_today` (4527 Wh) both frozen **95.6 min ago (~13:00)** — a *fuller* freeze than
+yesterday (04 Aug ~14:40, only current-power froze; energy stayed live). **Isolated to the SolarEdge feed:**
+every other source is fresh — `sensor.solar_power_w` (Powerwall solar CT) live at 1828 W (0.3 min ago),
+Solcast `power_now` 2210 W (0.4 min). So **not HA, not the home network, not the Pi** (Solcast + Tessie,
+both cloud, update fine) — the inverter→SolarEdge-cloud uplink or the SolarEdge cloud specifically. Pattern
+is early-afternoon (yesterday 14:40, today 13:00) → likely the inverter's **monitoring comms module**
+(possibly thermal at peak) or SolarEdge cloud. **Control impact negligible:** agent's real-time solar =
+Powerwall CT (live), forecast = Solcast (live); SolarEdge only feeds the accuracy check, frozen on a *high*
+value so it won't wrongly zero solar. Demand window unaffected (SoC + Solcast drive it). **Next (user):**
+(1) mySolarEdge app "last updated" — if ~1pm, it's inverter→cloud (physical); (2) SetApp comms status
+(S_OK); (3) physical inverter AC restart rebuilds the session but is a band-aid given the daily recurrence
+— root cause is the monitoring uplink. Tracked for tomorrow.
