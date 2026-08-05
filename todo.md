@@ -61,6 +61,15 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
    - Deployed + verified live (both read `on`); **228** decision + 25 + 11 tests pass; deploy-script verify
      list repointed to `agent_active`. energy_rules Rule 27 + 36, CONTEXT updated. Code pushed.
      **User to paste the updated 2-toggle card (in chat).**
+8. **⑧ "Agent last cycled" indicator (user-requested 2026-08-05, quick — batch with ②).** The Agent Control
+   toggle's `last-changed` reads the *switch's* last flip (≈ last HA reload), which the user mistook for
+   agent activity — the agent reads the toggle but never writes it, so it doesn't refresh per cycle. Add a
+   real heartbeat: in `log_decision()` (called on **every** path — LLM, quiet-skip, routine-skip, fallback —
+   so one push covers all cycles) `ha_set_state('sensor.agent_last_run', datetime.now(SYDNEY_TZ).isoformat(),
+   {'device_class': 'timestamp', 'friendly_name': 'Agent last cycled'})`. A `device_class: timestamp` sensor
+   renders as relative time ("5 minutes ago") automatically. Then add a card row `- entity:
+   sensor.agent_last_run / name: Agent last cycled` to the Agent Controls card. No control impact; supply the
+   card YAML to paste (storage-mode). Optional: also surface the Healthchecks heartbeat status.
 
 **Also watch this afternoon (from the morning brief):**
 - 🔌 **SolarEdge telemetry stall — now RECURRING DAILY** (04 Aug ~14:40, 05 Aug ~13:00; both channels froze
