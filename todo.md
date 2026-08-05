@@ -2,10 +2,22 @@
 
 ## Energy Agent — Active
 
-### ▶️ RESUME HERE — afternoon session 2026-08-05
+### ▶️ RESUME HERE — next session (paused 2026-08-05 ~14:30, before the demand window)
 
-**Context:** working through a 5-item plan the user gave this morning, **one at a time**. Item ① is
-**DONE + deployed + pushed**; pick up at **② next**.
+**Where we are:** working through the plan below **one at a time**. **DONE + deployed + pushed today:**
+① Quiet mode, ⑦ toggle inversion (both agent switches now ON = on / OFF = off, default ON — Rules 27+36).
+Everything committed, zero config drift, all tests pass (228+25+11). **Pick up at ② `survival_floor_defend`
+forward-price fix** (details in item 2 below) — it's the first real control-logic change of the plan.
+
+**Naming note for tomorrow:** the two dashboard toggles are now `input_boolean.agent_active` ("Agent
+Control", ON=active) and `input_boolean.agent_narrative` ("Agent Narrative", ON=narrate). The old
+`agent_manual_override` / `agent_narrative_disable` names are gone. User has two updated dashboard cards to
+paste (Agent Controls + Manual Battery Control) — supplied in chat 2026-08-05.
+
+**Verify first thing:** that the ~14:30+ cron cycles read the new entities cleanly (no 404s in
+`/tmp/energy_agent.log`) and that **today's demand window (peak day, 3–9pm) passed** — check
+`daily_energy.jsonl` for 2026-08-05. Battery was ~83% at 14:17, so the 85% target should have been fine;
+the demand-window guard (Rule 2) and Layer-3 safety automations were untouched by today's changes.
 
 **The plan (ordered):**
 1. ✅ **① Quiet-mode toggle (Rule 36) — DONE 2026-08-05.** `input_boolean.agent_narrative_disable`. ON =
