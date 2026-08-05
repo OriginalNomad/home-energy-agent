@@ -1115,6 +1115,22 @@ LLM regardless of the toggle (as before); the toggle additionally forces the ski
 cycles. Compare with Rule 27 (manual override), which suppresses *control commands*; Rule 36 suppresses
 only the *narrative* and never affects control.
 
+**Also mutes the informational HA automations (Layer 3).** The agent is not the only notifier — ~24
+automations in `config/automations.yaml` fire their own `persistent_notification.create` (none of them
+call the LLM, so this is display-only, zero API cost). Six *enabled, non-safety* ones now carry a
+`condition: template` gate — `{{ states('input_boolean.agent_narrative_disable') != 'on' }}` — placed
+**after** their control actions so only the notify is skipped when Quiet mode is ON, never the control:
+`battery_autonomous_revert_target_reached`, `battery_post_demand_window_restore`,
+`battery_negative_price_charge`, `battery_negative_price_reset`, `solar_inverter_underperformance_alert`,
+`ev_plugged_in_notify`. The gate **fails toward notifying** (suppresses only on an explicit `on`), so an
+`unavailable` toggle during an HA restart still shows the alert. The 12 `initial_state: false`
+automations never fire, so they were left alone.
+
+**Never muted (safety/demand-window) — these keep firing regardless of Quiet mode:**
+`battery_pre_demand_window_reset` (2:55pm), `battery_demand_window_low_warning`,
+`battery_demand_window_critical`, `ev_demand_window_guard` (3pm Eco+), `sensor_watchdog_morning`, and the
+export safety-net `battery_autonomous_export_safety_net` (rare + diagnostic).
+
 ---
 
 ## Decision Priority Order
