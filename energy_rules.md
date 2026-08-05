@@ -745,6 +745,19 @@ So the override can cost money; it cannot cause a demand-charge breach. That asy
 is deliberate — the whole point of Layer 0 is that no reasoning layer above it, human or
 machine, can switch it off.
 
+**Dashboard readout — `binary_sensor.agent_active` (added 2026-08-05, display-only).** The card entry
+"Manual override (agent hands off)" was a confusing double-negative (ON = agent OFF). The fix is *not* to
+invert the boolean into an `agent_active` control: `agent_manual_override` is **OFF = agent active on
+purpose**, because a fresh or gremlin-reset `input_boolean` defaults OFF and the *safe* state must be the
+default — an inverted "agent_active" would default to **agent-paused**, i.e. silently disabling the agent
+(possibly through a demand window). Instead a **read-only** template `binary_sensor.agent_active` (in
+`configuration.yaml`) gives the positive "Agent: Active / Paused" readout while the safe control polarity
+stays put. It is **expiry-aware** — it mirrors `_manual_override_active()` (resumes control after
+`MANUAL_OVERRIDE_MAX_HOURS = 12h` but does *not* clear the boolean), so an override held >12h reads
+"Active — override expired, resumed", matching what the agent actually does. It reflects override state,
+not Pi liveness (that's the Healthchecks heartbeat). The recommended card pairs it (as a `type: attribute`
+row showing the `status` text) with the toggle relabelled "Manual override — ON pauses the agent".
+
 ---
 
 ### Rule 28 — Control Inputs Are Range-Checked, Not Trusted

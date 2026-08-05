@@ -3028,3 +3028,16 @@ surface revealed itself:
 
 **Net:** Quiet mode ON = no LLM cost + no chatter (agent 🔋/🚗 + 6 informational automations), while all
 control and every safety/demand-window alert keep working. Toggle currently OFF. Item ① complete.
+
+**Item ⑦ — "Agent Active" status readout + manual-override relabel (afternoon).** User flagged the card
+entry "Manual override (agent hands off)" as a confusing double-negative (ON = agent OFF) and suggested
+flipping it to "Agent is Active". **Declined the flip on safety grounds** and did the safe equivalent:
+`agent_manual_override` is OFF = agent active *on purpose* (a fresh/reset `input_boolean` defaults OFF, and
+the overnight helper-reset gremlin must land on the SAFE state); an inverted `agent_active` would default
+to agent-paused. Instead added a **read-only** `binary_sensor.agent_active` template (`configuration.yaml`,
+`device_class: running`) with a `status` attribute for the positive readout, **expiry-aware** (mirrors
+`_manual_override_active()`'s 12h auto-resume that doesn't clear the boolean). Deployed (template reloaded,
+zero drift) + verified live: state `on`, status "Active — in control", override boolean off. Recommended
+card pairs a `type: attribute` status row with the toggle relabelled "Manual override — ON pauses the
+agent". energy_rules Rule 27 + todo ⑦ updated. Display-only — no code/control change. **Battery recovered
+to ~79% by 14:00** (solar sponge) after the 11–15% overnight trough.

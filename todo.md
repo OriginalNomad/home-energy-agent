@@ -35,17 +35,14 @@
    does the bill view live in the **Sol Next.js app** (`app/`) or the **HA dashboard**? Step 1 = a bill data
    model + entry view showing the Amber bill vs the agent's logged `net_cost_c` (EV-aware after ④). Seeds the
    savings dashboard.
-7. **⑦ UX — "Agent is Active" status readout + relabel the manual-override toggle** (user-flagged
-   2026-08-05, low priority). The card entry "Manual override (agent hands off)" is a confusing double
-   negative — ON means the agent is OFF. **DO NOT invert the boolean** to an `agent_active` (ON = active):
-   `input_boolean.agent_manual_override` is OFF = agent active *on purpose* — a fresh/reset `input_boolean`
-   defaults OFF, and the overnight helper-reset gremlin would then land on OFF = **agent paused** (unsafe,
-   could disable the agent through a demand window). The safe state must stay the boolean's default.
-   **Instead:** (a) relabel the card entry to make ON explicit (e.g. `name: "Manual override — ON pauses the
-   agent"`); and (b) add a **read-only** `binary_sensor.agent_active` template (`device_class: running`,
-   ON when `agent_manual_override` is off) shown as an "Agent: Active / Paused" status line next to the
-   toggle — gives the positive framing without moving the unsafe state onto the default. Config add +
-   deploy; no code/control change. Fold in before ② if quick.
+7. ✅ **⑦ UX — "Agent is Active" status readout + relabel the manual-override toggle — DONE 2026-08-05.**
+   Added read-only `binary_sensor.agent_active` template (`configuration.yaml`, `device_class: running`,
+   expiry-aware — mirrors `_manual_override_active()`'s 12h auto-resume) with a `status` attribute
+   ("Active — in control" / "Paused — manual override (Xh of 12h)" / "Active — override expired, resumed").
+   Deployed + verified live (reads `on` / "Active — in control"). Did **not** invert the boolean (OFF =
+   agent active must stay the safe default vs the reset gremlin). Recommended card (in chat) pairs a
+   `type: attribute` status row with the toggle relabelled "Manual override — ON pauses the agent" + Quiet
+   mode. energy_rules Rule 27 updated. **User to paste the updated card.**
 
 **Also watch this afternoon (from the morning brief):**
 - 🔌 **SolarEdge telemetry stall** (frozen since ~14:40 on 04 Aug) — check mySolarEdge mid-morning; if still
