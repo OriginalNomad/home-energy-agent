@@ -1228,6 +1228,44 @@ def test_survival_floor_not_triggered_above_floor():
     check("  ...still a hold", r["action"] == "hold", r)
 
 
+def test_survival_floor_defers_to_cheaper_slot():
+    # Price-aware (Rule 30, 2026-08-06): 2am, peak, SoC 8%, current slot 27¢ with a 12¢ Solar
+    # Sponge slot ~2h ahead. The rule must NOT buy at 27¢ — it lets SoC ride toward the 5%
+    # reserve and defers the top-up, so the base HOLD stands rather than survival_floor_defend.
+    # (This is the 2026-08-05/06 live incident that the fix targets.)
+    fcast = fc([27, 27, 27, 27, 12, 12, 12, 12, 12, 12, 12, 12])
+    ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0), fcast, [], now_at(2))
+    r = ctx["recommended"]
+    check("survival floor defers to the cheaper 12¢ slot (holds)", r["action"] == "hold", r)
+    check("  ...not force-charged at the 27¢ spike",
+          r["rule_fired"] != "survival_floor_defend", r)
+
+
+def test_survival_floor_charges_when_no_cheaper_slot():
+    # Rising price, no cheaper slot ahead → the current slot is the cheapest we'll see, so the
+    # rule still tops up now (buying later is strictly worse).
+    ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0),
+                                      fc([13, 15, 18, 20, 22, 22, 22, 22]), [], now_at(2))
+    r = ctx["recommended"]
+    check("survival floor charges when nothing cheaper ahead",
+          r["rule_fired"] == "survival_floor_defend" and r["action"] == "charge", r)
+
+
+def test_survival_floor_price_aware_killswitch():
+    # SURVIVAL_FLOOR_PRICE_AWARE = False → revert to the old always-top-up-at-≤12% behaviour
+    # even with a cheaper slot ahead.
+    real = ea.SURVIVAL_FLOOR_PRICE_AWARE
+    try:
+        ea.SURVIVAL_FLOOR_PRICE_AWARE = False
+        fcast = fc([27, 27, 27, 27, 12, 12, 12, 12, 12, 12, 12, 12])
+        ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0), fcast, [], now_at(2))
+        r = ctx["recommended"]
+        check("price-aware off → force-charges despite cheaper slot",
+              r["rule_fired"] == "survival_floor_defend" and r["action"] == "charge", r)
+    finally:
+        ea.SURVIVAL_FLOOR_PRICE_AWARE = real
+
+
 # ---------------------------------------------------------------------------
 # Rule 32 — decide on the 30-min slot, not the 5-min spot (added 2026-07-25)
 #
@@ -1594,6 +1632,9 @@ if __name__ == "__main__":
                test_survival_floor_not_active_in_demand_window,
                test_survival_floor_killswitch_reverts_to_ride_low,
                test_survival_floor_not_triggered_above_floor,
+               test_survival_floor_defers_to_cheaper_slot,
+               test_survival_floor_charges_when_no_cheaper_slot,
+               test_survival_floor_price_aware_killswitch,
                test_price_anchor_uses_30min_slot_not_spot,
                test_price_anchor_falls_back_to_spot_when_forecast_empty,
                test_price_anchor_killswitch_reverts_to_spot,

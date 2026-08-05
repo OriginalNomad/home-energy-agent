@@ -640,6 +640,20 @@ Counts below were read from the live HA, not from the file. To re-verify:
 
 ## What to watch for
 
+**Open from 2026-08-06 — watch these first:**
+
+- **Rule 30 is now price-aware (ride-to-5%).** `survival_floor_defend` no longer force-charges a
+  low-SoC HOLD at the current price — if a cheaper slot exists ahead (`forward_min < price − 1¢`) it
+  keeps holding and lets SoC ride toward the **5% physical reserve** (the reserve is the backstop),
+  buying at the cheaper slot later; it only tops up now when the current slot is already the cheapest
+  ahead. The `battery_low_soc_emergency_charge` automation was neutered in tandem (trigger **10% →
+  5%**). **Watch on the next low-SoC morning:** SoC should ride down toward ~5% and charge at the
+  cheap Solar Sponge slot, **not** at a morning spike (the 08-05/06 bug); the emergency automation
+  should stay silent. If the battery ever parks at 5% and then *misses* the peak-day 85%-by-2:55pm
+  climb, check that the peak-deadline branch is escalating (it protects the demand charge
+  independently of Rule 30). Kill-switches: `SURVIVAL_FLOOR_PRICE_AWARE` (price-awareness only),
+  `SURVIVAL_FLOOR_DEFENSE` (whole rule). **⏳ Live only after `./deploy_ha_config.sh` + `git push`.**
+
 **Open from 2026-07-26 (session 21) — watch these first:**
 
 - **Rule 33 gentle-lead on the next low-SoC peak morning.** On a peak day with a low morning SoC the

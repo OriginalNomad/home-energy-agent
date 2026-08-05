@@ -3084,3 +3084,48 @@ value so it won't wrongly zero solar. Demand window unaffected (SoC + Solcast dr
   cause = the inverter's monitoring comms module (thermal hypothesis: consistent ~1pm timing = peak heat).
   **Tomorrow:** determine how the inverter connects to SolarEdge (ethernet / SolarEdge Wi-Fi module /
   cellular) — decides the fix; check SetApp Server Comm. / S_OK; consider inverter ventilation/sun exposure.
+
+---
+
+## 2026-08-06 — Rule 30 made price-aware; survival floor rescoped to ride-to-5% (item ②)
+
+**Morning brief:** demand window passed all three of 08-03/04/05 (peak days; 3pm SoC 89–90%; cost
+$0.37–$1.11) despite solar running 38–47% of forecast — the rule layer's insurance held. Agent
+healthy (data logger 2,924 rows / 2 months). SolarEdge telemetry stall recurring ~1pm daily
+(cosmetic — control uses Powerwall CT + Solcast). Slider-drift check clean.
+
+**Two-way (det ↔ LP), last ~2 days:** 71 cycles with both verdicts, **55/71 (77%) agree**. The 16
+divergences: (a) price-blind `survival_floor_defend` buying at morning spikes (06:30/08:00 08-05 at
+21¢/19¢; 08:00 08-06 at 27¢) while the LP held — the real bug, fixed today; (b) `peak_deadline_
+gentle_lead` charging while the LP held — robust-solar insurance, vindicated (solar underdelivered,
+windows passed); (c) 14:00 08-05 `peak_solar_will_cover` HOLD vs LP `mpc_charge_grid` — det right,
+solar covered to 90%.
+
+**Item ② — `survival_floor_defend` forward-price fix (DONE, staged; not yet deployed/pushed).**
+
+- **Root of the bug:** the 2026-07-25 revision defended a 12% floor by force-charging any low-SoC
+  HOLD *at the current price*, to keep the battery off the emergency automation's 10% trigger. That
+  reintroduced price-blindness — it bought survival insurance *at the spike*.
+- **Decision (with the user):** battery health is not the constraint (Tesla BMS keeps a hidden
+  buffer below app-0%; low SoC is the gentle end for NMC — high-SoC parking is the aging villain).
+  The **5% physical reserve is the survival backstop** (Powerwall parks, grid covers the house).
+  So **ride to 5%** while waiting for a cheaper slot — matching the LP.
+- **Code (`energy_agent.py`):** Rule 30 block now defers. At a HOLD with SoC ≤ 12%, if
+  `forward_min < price − SURVIVAL_DEFER_MARGIN_C` (1¢) it **keeps the HOLD** (rides toward 5%, buys
+  the cheaper slot later); only when the current slot is already the cheapest ahead does it force
+  the gentle `survival_floor_defend` top-up. New kill-switch `SURVIVAL_FLOOR_PRICE_AWARE` (reverts
+  just the price-awareness); `SURVIVAL_FLOOR_DEFENSE` still disables the whole rule.
+- **Config (`automations.yaml`):** `battery_low_soc_emergency_charge` trigger + condition lowered
+  **10% → 5%** so it can't fight the deliberate ride-down (SoC parks at the 5% reserve and can't
+  fall below it, so it fires only if the reserve itself fails). Dead-agent demand-charge role now
+  covered by the Healthchecks alert + Tesla-app schedule (⑤); future gate on `sensor.agent_last_run`
+  (⑧). `deploy_ha_config.sh --check`: the description + two `below:` values are the ONLY drift.
+- **Tests:** 3 added (`_defers_to_cheaper_slot`, `_charges_when_no_cheaper_slot`,
+  `_price_aware_killswitch`). **232 decision + 25 optimizer + 11 build_models pass, 0 fail.** The
+  existing flat-price survival tests still pass (flat → nothing cheaper ahead → still charges).
+- **energy_rules.md Rule 30** updated (appended a 2026-08-06 revision; history retained).
+- **⏳ Pending:** `./deploy_ha_config.sh` (config → live HA) and `git push` (agent code → Pi cron).
+  Held for the user's go-ahead — both are live control-path changes. Neuter should deploy with/before
+  the code push so the two layers don't briefly fight.
+- **Not fixed by this (still open):** the same price-blind class in the overnight `nonpeak_*`
+  escalations (MEDIUM item) — item ② covered `survival_floor_defend` specifically.

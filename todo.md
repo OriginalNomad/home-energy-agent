@@ -6,8 +6,9 @@
 
 **Where we are:** working through the plan below **one at a time**. **DONE + deployed + pushed today:**
 ① Quiet mode, ⑦ toggle inversion (both agent switches now ON = on / OFF = off, default ON — Rules 27+36).
-Everything committed, zero config drift, all tests pass (228+25+11). **Pick up at ② `survival_floor_defend`
-forward-price fix** (details in item 2 below) — it's the first real control-logic change of the plan.
+Everything committed, zero config drift, all tests pass (228+25+11). **② `survival_floor_defend`
+forward-price fix is DONE 2026-08-06 (staged, ⏳ pending `./deploy_ha_config.sh` + `git push` — held for
+go-ahead; 232+25+11 pass).** Next after ② deploys: **③ agent outage fail-safe** (batches into the same push).
 
 **Naming note for tomorrow:** the two dashboard toggles are now `input_boolean.agent_active` ("Agent
 Control", ON=active) and `input_boolean.agent_narrative` ("Agent Narrative", ON=narrate). The old
@@ -29,18 +30,35 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
    (zero drift), Pi has the code, 227/25/11 tests pass. See energy_rules Rule 36 + energy_log 2026-08-05.
    Toggle is currently **OFF**. **Dashboard card** to paste (storage-mode) is in the chat — relabelled entity +
    optional `sensor.agent_daily_cost` readout.
-2. ⏭️ **② `survival_floor_defend` forward-price fix — DO NEXT.** Make Rule 30's floor defence price-aware:
-   defend the 12% floor at the **cheapest look-ahead slot before the projected breach**, not at the current
-   spike. **Live this morning:** 06:30 & 08:00 cycles charged `self_consumption` at **21¢/19¢** while the LP
-   correctly held (`mpc_hold`). Control-path change → new kill-switch + unit tests + mirror into
-   energy_rules same response. (Same class also affects the overnight `nonpeak_*` escalations — see the
-   MEDIUM `survival_floor_defend` item below and the overnight-strategy item.)
+2. ✅ **② `survival_floor_defend` forward-price fix — DONE 2026-08-06 (staged; ⏳ pending deploy + push).**
+   Rule 30 is now price-aware: at a HOLD with SoC ≤ 12%, if a cheaper slot exists ahead
+   (`forward_min < price − SURVIVAL_DEFER_MARGIN_C`, 1¢) it **keeps the HOLD** and rides toward the 5%
+   reserve, buying the cheaper slot later; only tops up now when the current slot is already the cheapest
+   ahead. **User decision:** ride all the way to the 5% physical reserve (the reserve is the survival
+   backstop — battery health is not a constraint). Emergency automation trigger lowered **10% → 5%** so it
+   can't fight the ride-down. New kill-switch `SURVIVAL_FLOOR_PRICE_AWARE`; 3 tests; **232+25+11 pass**;
+   energy_rules Rule 30 + CONTEXT updated; `deploy --check` shows only the intended drift.
+   **⏳ Remaining: `./deploy_ha_config.sh` + `git push`** (both live control-path — held for user go-ahead;
+   deploy the neuter with/before the code push so the layers don't briefly fight). **Still open (separate):**
+   the same price-blind class in the overnight `nonpeak_*` escalations — see the MEDIUM
+   `survival_floor_defend` item below and the overnight-strategy item.
 3. **③ Agent outage fail-safe** (the code half of the user's "internet outage can't stop the system").
    Make the battery-safe default explicit when Amber/Tessie/Anthropic are unreachable. Batches into the
    same push as ②.
 4. **④ EV fields in the daily journal** — offline; add `ev` block (plugged/kWh/mode/soc) to
    `log_daily_energy.py` `record` (~line 462) from Polestar + Zappi sensors. Low risk; seeds Phase 4 + the
-   bill's EV-import accuracy.
+   bill's EV-import accuracy. **Reconfirmed by the 2026-08-06 journal review** as the *one* real gap: EV
+   data is available (`sensor.polestar_7853_battery_charge_level`, Zappi `plug_status` + `power_charging`,
+   mode) and load-bearing — the EV is the only 3–9pm load that counts at the meter (upstream of the
+   Powerwall CT), so a learning agent can't answer "why did the window pass/fail" or reconcile the bill
+   without it.
+   - **Journal schema is otherwise complete** (2026-08-06 review of 08-03/04/05 records): solar
+     forecast/actual + ratio, full SoC trajectory, load & grid by window, price by window, billing-accurate
+     demand-window pass/fail + cost, agent rule rollup, both cost figures — no other gap for
+     currently-available data.
+   - **Deferred — data source doesn't exist yet (do NOT add fields until it does):** weather (cloud
+     cover/temperature — no sensor installed) and Daikin AC load contribution (not separately metered).
+     Revisit if/when those feeds are added.
 5. **⑤ Tesla-app always-on fallback** — **user action**: set a coarse Time-Based Control / reserve schedule
    in the Tesla app so a dead Pi / WAN outage during 3–9pm can't strand the battery. Claude to spec the
    schedule; user sets it.

@@ -975,6 +975,46 @@ the emergency trigger. Kill-switch: `SURVIVAL_FLOOR_DEFENSE = False` restores th
 behaviour. Only ever overrides a HOLD (never a deadline autonomous charge) and never in the demand
 window (the battery must discharge 3–9pm, where the automation is disabled too).
 
+**Revised 2026-08-06 — the floor defence is now price-aware, and the ride-to-5% scope is
+restored.** The 12% floor defence closed the oscillation but reintroduced the *original* problem in
+a new guise: it was **price-blind**. On 2026-08-05 (06:30 & 08:00, 21¢/19¢) and 2026-08-06 (08:00,
+27¢) it force-charged at a morning price *spike* while a ~12¢ Solar Sponge slot was only hours
+away, and the LP shadow correctly held (`mpc_hold`) on every one of those cycles. Buying survival
+insurance *at the peak* is exactly what a human would not do.
+
+**Decision (2026-08-06, with the user): the 5% physical reserve IS the survival backstop — so ride
+to it, and buy at the cheapest slot on the way.** Battery health is *not* a constraint here: Tesla's
+BMS keeps a hidden buffer below the app/Tessie "0%", so the cells are protected regardless, and for
+lithium NMC low SoC is the gentle end (high-SoC parking is the aging villain, which is why we avoid
+sitting at 100%, not empty). At the 5% reserve the Powerwall simply stops discharging and the grid
+covers the ~0.4 kW house load — no blackout, trivial cost. The only real cost of riding low is
+*operational* (no stored buffer, less margin if the agent stalls), and the peak-deadline branch
+protects the ~$100/mo demand charge independently.
+
+**The rule now (`SURVIVAL_FLOOR_PRICE_AWARE`, default on).** At a HOLD verdict with SoC ≤
+`OVERNIGHT_SURVIVAL_FLOOR_PCT` (12%): if a look-ahead slot beats the current 30-min slot by
+`SURVIVAL_DEFER_MARGIN_C` (**1¢**) anywhere in the forecast horizon (`forward_min < price − 1`),
+**keep the HOLD** — let SoC ride toward the 5% reserve and buy at that cheaper slot later. Only when
+the current slot is *already the cheapest ahead* (flat or rising prices, nothing better coming) does
+it force the gentle `survival_floor_defend` top-up (target 20%, ~1.6 kW via Rule 31) — because then
+waiting is strictly worse. This matches the LP's behaviour on the divergent cycles.
+
+**Emergency automation neutered in tandem (trigger 10% → 5%).** With the rule layer now
+deliberately riding through 6–10% to reach a cheaper slot, a 10% trigger would fight it again in the
+≤20¢-morning band. Lowered to **5%**: SoC parks at the 5% reserve and cannot fall below it, so the
+automation fires only if the reserve *itself* has failed — a genuine last resort. The dead-agent
+demand-charge role it used to serve is covered separately by the Healthchecks liveness alert and the
+Tesla-app reserve schedule (todo ⑤); a future refinement gates it on agent liveness
+(`sensor.agent_last_run`, todo ⑧) to restore a higher-SoC dead-agent backstop without fighting a
+live ride-down.
+
+**Kill-switches:** `SURVIVAL_FLOOR_PRICE_AWARE = False` reverts just the price-awareness (back to
+the always-top-up-at-≤12% behaviour) while keeping the floor defence; `SURVIVAL_FLOOR_DEFENSE =
+False` disables the rule entirely (pure ride-to-reserve, never a survival top-up). Still only
+overrides a HOLD, never a deadline autonomous charge, never in the demand window. Tests:
+`test_survival_floor_defers_to_cheaper_slot`, `test_survival_floor_charges_when_no_cheaper_slot`,
+`test_survival_floor_price_aware_killswitch` (232 decision tests total).
+
 ---
 
 ### Rule 31 — Gentle self_consumption Charge (reserve = SoC + offset)

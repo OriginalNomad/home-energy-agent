@@ -1188,19 +1188,29 @@ DEMAND_DEADLINE  = 14 + 55 / 60   # 2:55pm as a decimal hour
 # Tunable; the commanded offset is logged so build_models can learn the real curve later.
 SELF_CONS_CHARGE_OFFSET_PTS = 6
 
-# Overnight survival floor (Rule 30, revised 2026-07-25). The rule layer defends a ~12%
-# instantaneous SoC floor so it never rides down into the `battery_low_soc_emergency_charge`
-# automation's 10% trigger — which sets reserve=85 directly (a 5 kW slam) and then fought the
-# next HOLD that cleared reserve back to 5% (the 2026-07-25 07:00 oscillation). Instead of
-# holding while SoC drains below the floor, the agent issues a gentle self_consumption top-up
-# (Rule 31, ~1.6 kW). The automation stays at 10% as a true "agent is dead / stalled" backstop:
-# the 2-point margin means it only takes over after ~2 missed agent cycles, which is exactly
-# when it should. Applies year-round (small cost, keeps the battery off the floor). Only ever
-# overrides a HOLD verdict — never a deadline autonomous charge — and never in the demand window.
-# Kill-switch: SURVIVAL_FLOOR_DEFENSE = False reverts to the old ride-to-5% behaviour.
+# Overnight survival floor (Rule 30, revised 2026-08-06 — now price-aware). Background: the rule
+# layer used to force a gentle self_consumption top-up whenever a HOLD verdict landed at
+# instantaneous SoC ≤ 12%, to keep the battery off the `battery_low_soc_emergency_charge`
+# automation's 10% trigger. That was PRICE-BLIND: on 2026-08-05/06 it bought at 19–27¢ mornings
+# while a ~12¢ Solar Sponge slot was hours away and the LP shadow correctly held (mpc_hold).
+# Decision (2026-08-06, with the user): the 5% physical reserve IS the survival backstop — at 5%
+# the Powerwall stops discharging and the grid covers the house, at no risk to the cells (Tesla's
+# BMS keeps a hidden buffer below the app 0%). So the battery may ride all the way down to the
+# reserve while waiting for a cheaper slot. Rule 30 is now: at a low-SoC HOLD, defer to the
+# cheapest look-ahead slot (forward_min) when it beats the current slot by SURVIVAL_DEFER_MARGIN_C
+# — letting SoC ride toward 5% and buy later — and only top up NOW when the current slot is
+# already the cheapest ahead (no point waiting). The emergency automation was neutered in tandem
+# (trigger 10% → 5%, 2026-08-06) so it can't fight the deliberate ride-down. Only ever overrides a
+# HOLD verdict — never a deadline autonomous charge (the peak-deadline branch protects the demand
+# charge independently) — and never in the demand window. Rule 31 keeps any top-up ~1.6 kW.
+# Kill-switches: SURVIVAL_FLOOR_DEFENSE = False disables the rule entirely (pure ride-to-reserve,
+# never a survival top-up). SURVIVAL_FLOOR_PRICE_AWARE = False reverts just the price-awareness
+# (back to the old always-top-up-at-≤12% behaviour) while keeping the floor defence.
 SURVIVAL_FLOOR_DEFENSE       = True
-OVERNIGHT_SURVIVAL_FLOOR_PCT = 12   # gently charge below this instantaneous SoC
-SURVIVAL_FLOOR_TARGET_PCT    = 20   # the gentle top-up aims here (buffer above the 10% backstop)
+SURVIVAL_FLOOR_PRICE_AWARE   = True
+OVERNIGHT_SURVIVAL_FLOOR_PCT = 12   # consider a survival top-up for holds at/below this SoC
+SURVIVAL_FLOOR_TARGET_PCT    = 20   # the gentle top-up aims here when it does fire
+SURVIVAL_DEFER_MARGIN_C      = 1.0  # a look-ahead slot must beat the current slot by this (¢) to wait
 
 # PRICE_USE_30MIN_SLOT (Rule 32, 2026-07-25): anchor every price threshold on the current
 # 30-min slot (price_forecast[0]) rather than the raw 5-min settlement sample. The
@@ -1979,17 +1989,22 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         else:
             rec = verdict("charge", cost_target, "self_consumption", "spread_selfcons")
 
-    # Rule 30 (revised 2026-07-25) — overnight survival-floor defense. If the verdict is to
-    # HOLD while SoC sits at/below the floor, override to a gentle self_consumption top-up so
-    # the battery never rides down into the emergency automation's 10% trigger (which slams
-    # 5 kW and then fights the next HOLD). Only touches holds — a deadline autonomous charge is
-    # never downgraded — and never during the demand window, where the battery must be free to
-    # discharge and the automation is disabled anyway. Rule 31 keeps this top-up ~1.6 kW.
+    # Rule 30 (revised 2026-08-06) — price-aware overnight survival-floor defence. If the verdict
+    # is to HOLD while SoC sits low, decide WHEN to top up on price rather than blindly now. The
+    # 5% physical reserve is the real backstop (the Powerwall parks there and the grid covers the
+    # house), so we let SoC ride down toward it and buy at the cheapest look-ahead slot: keep the
+    # HOLD when a slot cheaper than the current one by SURVIVAL_DEFER_MARGIN_C exists ahead
+    # (forward_min = min over the whole forecast horizon), and only force a gentle self_consumption
+    # top-up when the current slot is already the cheapest we'll see. Never downgrades a deadline
+    # autonomous charge, never fires in the demand window. Rule 31 keeps the top-up ~1.6 kW.
     if (SURVIVAL_FLOOR_DEFENSE and not in_demand
             and rec.get("action") == "hold"
             and soc <= OVERNIGHT_SURVIVAL_FLOOR_PCT):
-        rec = verdict("charge", SURVIVAL_FLOOR_TARGET_PCT, "self_consumption",
-                      "survival_floor_defend")
+        cheaper_slot_ahead = forward_min < price - SURVIVAL_DEFER_MARGIN_C
+        if not (SURVIVAL_FLOOR_PRICE_AWARE and cheaper_slot_ahead):
+            rec = verdict("charge", SURVIVAL_FLOOR_TARGET_PCT, "self_consumption",
+                          "survival_floor_defend")
+        # else: a cheaper slot is coming — keep the HOLD, ride toward the 5% reserve, buy later.
 
     return {
         "now_h":               round(now_h, 2),

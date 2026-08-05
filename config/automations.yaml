@@ -908,25 +908,30 @@
 - id: battery_low_soc_emergency_charge
   alias: "Battery: Charge when critically low + price cheap"
   description: >
-    Last-resort backstop: charge when SoC < 10% and price is genuinely cheap (≤ 20¢ absolute
+    Last-resort backstop: charge when SoC < 5% and price is genuinely cheap (≤ 20¢ absolute
     ceiling, plus Amber cheap window). Target: 85% in peak months (demand window protection),
     battery_grid_charge_target otherwise. Never fires above 20¢ or during demand window.
-    Trigger lowered 20% → 10% on 2026-07-24: the deterministic rule layer is *designed* to ride
-    the battery to the 5% reserve floor overnight (peak_early_morning_hold — grid covers home load
-    there, then Solar Sponge deadline logic refills cheaply). At 20% this automation fought that
-    intent every low-SoC morning (it set reserve high, the next HOLD verdict cleared it back to 5%,
-    and the battery oscillated). 10% aligns the backstop with the rule layer's operating floor
-    while keeping ~one agent-cycle of margin above the 5% physical reserve. See energy_rules Rule 30.
+    Trigger lowered 10% → 5% on 2026-08-06 (Rule 30 price-aware revision): the deterministic rule
+    layer is now *designed* to ride the battery all the way to the 5% physical reserve while it
+    waits for a cheaper look-ahead slot (the reserve IS the survival backstop — the Powerwall
+    stops discharging there and the grid covers the house, at no risk to the cells). At 10% this
+    automation fought that intent in the ≤20¢-morning band (it set reserve high, the next HOLD
+    verdict cleared it back to 5%). 5% neuters it in normal operation — SoC parks at the 5% reserve
+    and cannot fall below it — so it fires only if the reserve itself has failed (SoC genuinely
+    below 5%), a true last resort. Dead-agent demand-charge protection is covered separately by the
+    Healthchecks liveness alert + the Tesla-app reserve schedule (todo ⑤). Future refinement: gate
+    on agent liveness (sensor.agent_last_run, todo ⑧) to restore a higher-SoC dead-agent backstop
+    without fighting a live ride-down. See energy_rules Rule 30.
   triggers:
     - trigger: numeric_state
       entity_id: sensor.tessie_powerwall_charge
-      below: 10
+      below: 5
     - trigger: time_pattern
       minutes: "/30"
   conditions:
     - condition: numeric_state
       entity_id: sensor.tessie_powerwall_charge
-      below: 10
+      below: 5
     # Absolute price ceiling: never charge in an emergency above 20¢/kWh.
     # At 20¢+ the "cheap" label is meaningless — wait for Solar Sponge instead.
     - condition: numeric_state
