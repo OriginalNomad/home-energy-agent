@@ -20,7 +20,8 @@ paste (Agent Controls + Manual Battery Control) — supplied in chat 2026-08-05.
 the demand-window guard (Rule 2) and Layer-3 safety automations were untouched by today's changes.
 
 **The plan (ordered):**
-1. ✅ **① Quiet-mode toggle (Rule 36) — DONE 2026-08-05.** `input_boolean.agent_narrative_disable`. ON =
+1. ✅ **① Quiet-mode toggle (Rule 36) — DONE 2026-08-05.** `input_boolean.agent_narrative_disable` *(→
+   renamed by ⑦ to `input_boolean.agent_narrative`, now ON = narrate / OFF = quiet)*. When quiet:
    skip the paid LLM narrative call **+** mute the agent's `🔋/🚗` notifications (and dismiss lingering) **+**
    mute 6 informational HA automations — while keeping all control and every safety/demand-window alert.
    Grew over 3 commits (3c1175f LLM-skip, bebc393 agent-notif mute, + automations gate) as the notification
