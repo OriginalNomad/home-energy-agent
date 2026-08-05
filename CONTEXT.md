@@ -298,6 +298,18 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capability added 2026-08-05:
+- **Rule 36 — Quiet mode** (`input_boolean.agent_narrative_disable`). One dashboard toggle that, when ON,
+  (1) skips the per-cycle **LLM narrative call** — the only paid Anthropic call in the loop, so this cuts
+  API cost — and (2) **mutes notifications**: the agent's own `🔋 Battery` / `🚗 EV` persistent
+  notifications (gated + dismissed inside `log_decision()`) **and** 6 enabled *non-safety* HA automations
+  (a `condition: template` `!= 'on'` placed *after* their control actions, so only the notify is skipped).
+  **Control is never touched** (deterministic layer + demand guard run earlier); logbook / dashboard
+  helpers / JSONL / heartbeat / shadow+optimizer fields all still write. Inverted sense (default OFF =
+  narrate+notify) and **fails toward notifying** so an unavailable toggle can't silence alerts.
+  Safety/demand-window automations always fire. Full gated/kept lists in energy_rules Rule 36. Currently a
+  9th `input_boolean` alongside `agent_manual_override` (Rule 27) and `ev_schedule_active`.
+
 Key agent capability added 2026-08-01:
 - **Rule 35 — peak-eve run-up** (`PEAK_EVE_RUNUP`). The peak-deadline block was gated
   `now_h < 2:55pm`, so on a peak-month day the **9pm–midnight** window fell through to the non-peak

@@ -2,6 +2,49 @@
 
 ## Energy Agent — Active
 
+### ▶️ RESUME HERE — afternoon session 2026-08-05
+
+**Context:** working through a 5-item plan the user gave this morning, **one at a time**. Item ① is
+**DONE + deployed + pushed**; pick up at **② next**.
+
+**The plan (ordered):**
+1. ✅ **① Quiet-mode toggle (Rule 36) — DONE 2026-08-05.** `input_boolean.agent_narrative_disable`. ON =
+   skip the paid LLM narrative call **+** mute the agent's `🔋/🚗` notifications (and dismiss lingering) **+**
+   mute 6 informational HA automations — while keeping all control and every safety/demand-window alert.
+   Grew over 3 commits (3c1175f LLM-skip, bebc393 agent-notif mute, + automations gate) as the notification
+   surface turned out bigger than expected (agent LLM → agent popups → Layer-3 automations). Config deployed
+   (zero drift), Pi has the code, 227/25/11 tests pass. See energy_rules Rule 36 + energy_log 2026-08-05.
+   Toggle is currently **OFF**. **Dashboard card** to paste (storage-mode) is in the chat — relabelled entity +
+   optional `sensor.agent_daily_cost` readout.
+2. ⏭️ **② `survival_floor_defend` forward-price fix — DO NEXT.** Make Rule 30's floor defence price-aware:
+   defend the 12% floor at the **cheapest look-ahead slot before the projected breach**, not at the current
+   spike. **Live this morning:** 06:30 & 08:00 cycles charged `self_consumption` at **21¢/19¢** while the LP
+   correctly held (`mpc_hold`). Control-path change → new kill-switch + unit tests + mirror into
+   energy_rules same response. (Same class also affects the overnight `nonpeak_*` escalations — see the
+   MEDIUM `survival_floor_defend` item below and the overnight-strategy item.)
+3. **③ Agent outage fail-safe** (the code half of the user's "internet outage can't stop the system").
+   Make the battery-safe default explicit when Amber/Tessie/Anthropic are unreachable. Batches into the
+   same push as ②.
+4. **④ EV fields in the daily journal** — offline; add `ev` block (plugged/kWh/mode/soc) to
+   `log_daily_energy.py` `record` (~line 462) from Polestar + Zappi sensors. Low risk; seeds Phase 4 + the
+   bill's EV-import accuracy.
+5. **⑤ Tesla-app always-on fallback** — **user action**: set a coarse Time-Based Control / reserve schedule
+   in the Tesla app so a dead Pi / WAN outage during 3–9pm can't strand the battery. Claude to spec the
+   schedule; user sets it.
+6. **⑥ Energy-bill section of the console** — largest, app-only. **⚠️ ONE DECISION NEEDED BEFORE BUILDING:**
+   does the bill view live in the **Sol Next.js app** (`app/`) or the **HA dashboard**? Step 1 = a bill data
+   model + entry view showing the Amber bill vs the agent's logged `net_cost_c` (EV-aware after ④). Seeds the
+   savings dashboard.
+
+**Also watch this afternoon (from the morning brief):**
+- 🔌 **SolarEdge telemetry stall** (frozen since ~14:40 on 04 Aug) — check mySolarEdge mid-morning; if still
+  frozen through daylight, physical inverter AC restart. Cosmetic + solar-accuracy only; control unaffected.
+- **Battery rode to 11–15% overnight again** on a peak day — the overnight-strategy item is still live (② is
+  the first piece of the fix).
+- Slider-drift morning check was clean.
+
+---
+
 ### Immediate
 
 - [ ] 🔐 **MEDIUM — SolarEdge key rotation still owed (Amber DONE 2026-08-05).** The export-script keys
