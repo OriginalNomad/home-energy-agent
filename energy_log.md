@@ -3005,3 +3005,26 @@ block** (data exists via Polestar + Zappi sensors). Minor: `data_logger.py` CLI 
 - **SolarEdge — still owed.** Current key now in `Amber Electric Data/.env` `SOLAREDGE_API_KEY` (scripts no
   longer error) but **not rotated** — user lacks portal admin access yet. Deferred; separate from the
   SolarEdge telemetry stall.
+
+**Rule 36 — Quiet mode (item ① of the new work plan): mute notifications + pause LLM.** New
+`input_boolean.agent_narrative_disable` ("Quiet mode"). Built in three passes as the real notification
+surface revealed itself:
+1. **LLM skip (commit 3c1175f).** Toggle ON → skip the paid LLM narrative call; log via the deterministic
+   `_build_auto_summary` (fixed to render the verdict `action`, not a hardcoded "hold"). Control untouched
+   (deterministic layer + demand guard run earlier). Inverted sense (default OFF = narrate); fails toward
+   narrating. 227/25/11 tests pass. Config deployed, agent code pushed.
+2. **Also mute the agent's own notifications (commit bebc393).** Gap found in use: `log_decision()` creates
+   the `🔋 Battery` / `🚗 EV` persistent_notifications every cycle via fixed `notification_id` *regardless*
+   of the LLM, so pausing the LLM alone left them firing — not what the user wanted. Now quiet mode also
+   skips both `persistent_notification.create` calls and dismisses any on screen. Everything else (logbook,
+   dashboard helpers, JSONL, heartbeat, shadow/optimizer fields) still writes. Relabelled the toggle.
+3. **Also mute 6 informational HA automations (this commit).** Second surface found: the user's "Solar
+   Underperforming vs Solcast" popup came from a Layer-3 automation, not the agent. ~24 automations fire
+   their own notifications (none call the LLM → display-only, no API cost). Gated the 6 *enabled non-safety*
+   ones with a `condition: template` (`!= 'on'`) placed **after** their control actions, so only the notify
+   is skipped, never control; fails toward notifying. Safety/demand-window alerts and the 12
+   `initial_state:false` (never-fire) automations left alone. Deployed to live HA (validated + reloaded,
+   **zero drift**), pushed. See energy_rules Rule 36 for the gated/kept lists.
+
+**Net:** Quiet mode ON = no LLM cost + no chatter (agent 🔋/🚗 + 6 informational automations), while all
+control and every safety/demand-window alert keep working. Toggle currently OFF. Item ① complete.
