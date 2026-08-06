@@ -3101,7 +3101,7 @@ gentle_lead` charging while the LP held — robust-solar insurance, vindicated (
 windows passed); (c) 14:00 08-05 `peak_solar_will_cover` HOLD vs LP `mpc_charge_grid` — det right,
 solar covered to 90%.
 
-**Item ② — `survival_floor_defend` forward-price fix (DONE, staged; not yet deployed/pushed).**
+**Item ② — `survival_floor_defend` forward-price fix (DONE — deployed + pushed, commit `7377bfe`).**
 
 - **Root of the bug:** the 2026-07-25 revision defended a 12% floor by force-charging any low-SoC
   HOLD *at the current price*, to keep the battery off the emergency automation's 10% trigger. That
@@ -3124,8 +3124,19 @@ solar covered to 90%.
   `_price_aware_killswitch`). **232 decision + 25 optimizer + 11 build_models pass, 0 fail.** The
   existing flat-price survival tests still pass (flat → nothing cheaper ahead → still charges).
 - **energy_rules.md Rule 30** updated (appended a 2026-08-06 revision; history retained).
-- **⏳ Pending:** `./deploy_ha_config.sh` (config → live HA) and `git push` (agent code → Pi cron).
-  Held for the user's go-ahead — both are live control-path changes. Neuter should deploy with/before
-  the code push so the two layers don't briefly fight.
+- **Went live (user go-ahead):** `./deploy_ha_config.sh` ran — automations reloaded, `--check` now
+  reports **zero drift**; live verify SoC 14%, `agent_active` on. Then committed the 7 item-② files
+  (code + config + docs) as `7377bfe` and pushed to `origin/main` (Pi pulls on its next 30-min cron
+  ~09:30). Pre-existing unrelated tree changes (`ARCHITECTURE.md`, `SIMON - Terminal Commands`, the
+  `.claude/commands` rename) were deliberately left uncommitted — not this session's work. Secret
+  scan of the diff clean; local `main` was level with origin before the commit (not stale).
+- **Watch (next low-SoC morning):** SoC should ride toward ~5% and charge at the cheap Solar Sponge
+  slot, **not** at a morning spike; the emergency automation should stay silent; `decisions.jsonl`
+  should show `survival_floor_defend` firing far less (a low-SoC HOLD keeping its base rule, e.g.
+  `wait_for_cheap_go_hard`, = it correctly deferred). If the battery parks at 5% and then misses the
+  peak-day 85%-by-2:55pm climb, confirm the peak-deadline branch is escalating (it protects the
+  demand charge independently of Rule 30).
 - **Not fixed by this (still open):** the same price-blind class in the overnight `nonpeak_*`
   escalations (MEDIUM item) — item ② covered `survival_floor_defend` specifically.
+- **Also today:** the morning-brief point-5 journal review was logged into todo item ④ (EV block
+  confirmed as the one real schema gap; weather/AC deferred until those sensors exist).

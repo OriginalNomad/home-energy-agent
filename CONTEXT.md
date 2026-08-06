@@ -298,6 +298,19 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capability added 2026-08-06:
+- **Rule 30 made price-aware — survival floor rescoped to ride-to-5% (`SURVIVAL_FLOOR_PRICE_AWARE`).**
+  `survival_floor_defend` used to force-charge any low-SoC HOLD *at the current price* (to stay off the
+  emergency automation's 10% trigger), which bought at 19–27¢ morning spikes on 08-05/06 while a ~12¢
+  Solar Sponge slot was hours away and the LP correctly held. Now: at a HOLD with SoC ≤ 12%, if a cheaper
+  slot exists ahead (`forward_min < price − 1¢`) it **keeps the HOLD** and lets SoC ride toward the **5%
+  physical reserve** (the reserve is the survival backstop — battery health is not a constraint), buying
+  the cheaper slot later; it only tops up now when the current slot is already the cheapest ahead.
+  `battery_low_soc_emergency_charge` trigger neutered **10% → 5%** in tandem so it can't fight the
+  ride-down (SoC parks at the reserve and can't fall below it). Kill-switches: `SURVIVAL_FLOOR_PRICE_AWARE`
+  (price-awareness only) / `SURVIVAL_FLOOR_DEFENSE` (whole rule). 3 tests added → **232 decision + 25
+  optimizer + 11 build_models**. Deployed + pushed (`7377bfe`); energy_rules Rule 30 revised.
+
 Key agent capability added 2026-08-05:
 - **Two agent dashboard toggles, both ON = active / OFF = off, both default ON (`initial: on`).** Renamed +
   polarity-flipped this day so "ON means on" — no more double negatives. `initial: on` makes ON the safe
@@ -621,9 +634,9 @@ Counts below were read from the live HA, not from the file. To re-verify:
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors. Same deploy rule |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before a peak month |
-| `agent/test_decision.py` | 183 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/test_decision.py` | 232 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
 | `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. See PRODUCT.md "Optimisation Engine — Depth" |
-| `agent/test_optimizer.py` | 16 unit tests for the LP optimiser — pure, no API calls. Includes regression tests pinning the SoC contract (see 2026-07-22) |
+| `agent/test_optimizer.py` | 25 unit tests for the LP optimiser — pure, no API calls. Includes regression tests pinning the SoC contract (see 2026-07-22) |
 | `agent/.env` | API keys (gitignored — not in repo) |
 | `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
 | `agent/decisions.jsonl` | Structured JSON decision log — full context per cycle, foundation for analyst agent and accuracy tracking |
@@ -652,7 +665,8 @@ Counts below were read from the live HA, not from the file. To re-verify:
   should stay silent. If the battery ever parks at 5% and then *misses* the peak-day 85%-by-2:55pm
   climb, check that the peak-deadline branch is escalating (it protects the demand charge
   independently of Rule 30). Kill-switches: `SURVIVAL_FLOOR_PRICE_AWARE` (price-awareness only),
-  `SURVIVAL_FLOOR_DEFENSE` (whole rule). **⏳ Live only after `./deploy_ha_config.sh` + `git push`.**
+  `SURVIVAL_FLOOR_DEFENSE` (whole rule). **Live 2026-08-06** — config deployed (zero drift), code
+  pushed (`7377bfe`); Pi pulls on its next 30-min cron.
 
 **Open from 2026-07-26 (session 21) — watch these first:**
 

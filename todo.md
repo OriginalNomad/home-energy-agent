@@ -6,9 +6,10 @@
 
 **Where we are:** working through the plan below **one at a time**. **DONE + deployed + pushed today:**
 ① Quiet mode, ⑦ toggle inversion (both agent switches now ON = on / OFF = off, default ON — Rules 27+36).
-Everything committed, zero config drift, all tests pass (228+25+11). **② `survival_floor_defend`
-forward-price fix is DONE 2026-08-06 (staged, ⏳ pending `./deploy_ha_config.sh` + `git push` — held for
-go-ahead; 232+25+11 pass).** Next after ② deploys: **③ agent outage fail-safe** (batches into the same push).
+Everything committed, zero config drift, all tests pass (232+25+11). **② `survival_floor_defend`
+forward-price fix is DONE + LIVE 2026-08-06** (deployed to HA, pushed `7377bfe`, Pi pulls next cron).
+**▶️ PICK UP AT ③ agent outage fail-safe** — the next real control-logic item; was designed to batch with ②
+but ② shipped alone, so ③ is its own small push.
 
 **Naming note for tomorrow:** the two dashboard toggles are now `input_boolean.agent_active` ("Agent
 Control", ON=active) and `input_boolean.agent_narrative` ("Agent Narrative", ON=narrate). The old
@@ -30,18 +31,19 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
    (zero drift), Pi has the code, 227/25/11 tests pass. See energy_rules Rule 36 + energy_log 2026-08-05.
    Toggle is currently **OFF**. **Dashboard card** to paste (storage-mode) is in the chat — relabelled entity +
    optional `sensor.agent_daily_cost` readout.
-2. ✅ **② `survival_floor_defend` forward-price fix — DONE 2026-08-06 (staged; ⏳ pending deploy + push).**
+2. ✅ **② `survival_floor_defend` forward-price fix — DONE + LIVE 2026-08-06 (deployed + pushed `7377bfe`).**
    Rule 30 is now price-aware: at a HOLD with SoC ≤ 12%, if a cheaper slot exists ahead
    (`forward_min < price − SURVIVAL_DEFER_MARGIN_C`, 1¢) it **keeps the HOLD** and rides toward the 5%
    reserve, buying the cheaper slot later; only tops up now when the current slot is already the cheapest
    ahead. **User decision:** ride all the way to the 5% physical reserve (the reserve is the survival
    backstop — battery health is not a constraint). Emergency automation trigger lowered **10% → 5%** so it
    can't fight the ride-down. New kill-switch `SURVIVAL_FLOOR_PRICE_AWARE`; 3 tests; **232+25+11 pass**;
-   energy_rules Rule 30 + CONTEXT updated; `deploy --check` shows only the intended drift.
-   **⏳ Remaining: `./deploy_ha_config.sh` + `git push`** (both live control-path — held for user go-ahead;
-   deploy the neuter with/before the code push so the layers don't briefly fight). **Still open (separate):**
-   the same price-blind class in the overnight `nonpeak_*` escalations — see the MEDIUM
-   `survival_floor_defend` item below and the overnight-strategy item.
+   energy_rules Rule 30 + CONTEXT + energy_log updated. **Deployed to live HA (zero drift) + committed
+   and pushed as `7377bfe`** (user gave go-ahead; Pi pulls on its next 30-min cron). **Watch the next
+   low-SoC morning:** SoC should ride toward ~5% and buy at the cheap sponge, not a morning spike; the
+   emergency automation should stay silent. **Still open (separate):** the same price-blind class in the
+   overnight `nonpeak_*` escalations — see the MEDIUM `survival_floor_defend` item below and the
+   overnight-strategy item.
 3. **③ Agent outage fail-safe** (the code half of the user's "internet outage can't stop the system").
    Make the battery-safe default explicit when Amber/Tessie/Anthropic are unreachable. Batches into the
    same push as ②.
