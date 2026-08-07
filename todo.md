@@ -104,7 +104,49 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
 
 ---
 
+### Forward-looking / seasonal
+
+- [ ] ☀️ **SEASONAL — summer surplus-solar sink: generalise Rule 19 (EV as overflow)** *(observation
+  logged 2026-08-08; revisit ~Nov as the peak solar season approaches).* The peak-day design reserves the
+  battery's top ~15% as free-solar headroom (reason the daytime target is 85%, not 100%). That holds in
+  **winter** — solar is running ~40–47% of forecast, so the headroom rarely fills. **In summer it inverts:**
+  abundant solar fills the battery early and keeps generating, so the site has a *surplus-sink* problem, and
+  the overflow has nowhere to go but export (into the 10am–3pm export penalty and/or a low/negative FIT).
+  **Direction:** in summer, lean on the **EV as the overflow sink** — plug in more often so surplus solar
+  charges the car (Eco+/solar-only) once the battery is near full, instead of exporting at a penalty.
+  - **Rule 19 (EV Case 6 — Negative FIT Solar Dump)** already does this for the *negative-FIT* special case
+    (FIT < 0¢ AND battery ≥ 85% AND EV < 100% → Eco+). The generalisation: trigger EV-as-sink on
+    *battery-near-full + surplus solar* (or export approaching the penalty threshold), not only negative FIT.
+  - **Prerequisite:** the **EV journal block (item ④)** — need plug-in/kWh/mode logged to measure how often
+    summer surplus actually has nowhere to go before changing any rule.
+  - Note Nov–Mar are also demand-charge months, so the demand-window strategy still applies *alongside* the
+    surplus-sink one — this adds to the peak-day logic, doesn't replace it. Don't force EV plug-in as a rule
+    (the car has exogenous availability cost); frame it as a user habit + an opportunistic agent behaviour.
+
 ### Immediate
+
+- [ ] 🔬 **LP-to-control — robustness knob validation (started 2026-08-08, replay-first).** Built two
+  default-off levers + an offline sweep to advance the shadow LP toward control:
+  - **`solar_quantile_k`** (`optimizer.py`, DONE + 9 tests, 34 optimizer pass) — per-hour conservative
+    solar quantile `max(ratio − k·uncertainty, 0)`. **Sweep verdict: NOT the winter lever** — barely moves
+    the divergences (winter morning solar is already tiny). **Hypothesis: a summer lever** — re-run the
+    sweep on summer data (abundant/trusted solar) before judging. Keep default-off.
+  - **`exec_charge_derate`** (stubbed 08-01) — **IS the winter lever**: derate=0.3 lifts DET-agreement
+    79.4%→85.5% and cuts the solar-zeroed under-charge divergences 23→4 (B over-charge 12→16).
+  - **`agent/replay_solar_quantile.py`** — the sweep harness (reconstructs `optimize_battery()` from logged
+    `optimizer_context.inputs`; 100% fidelity on 339 cycles). Directional score A/B vs DET.
+  - **Outcome context DONE 2026-08-08** (`--daily` mode): all 8 winter days passed with 38–70% min SoC —
+    DET's morning insurance charging wasn't needed, so the LP's *holding* would've been safe + cheaper;
+    **derate=0.3 concentrates its extra charging on the easiest days (08-06: 8/2→1/5)**, so its headline
+    agreement is wasted insurance. **Decision: enable NOTHING.** Both knobs stay default-off;
+    `solar_quantile_k` is the probable summer lever. Infrastructure **committed**; brief runs the sweep
+    daily. See energy_log 2026-08-08.
+  - ▶️ **NEXT (the real validator, bigger piece): full-day CLOSED-LOOP LP simulation.** The per-cycle
+    replay can't validate the LP's forward trajectory (days passed because *DET* charged; an LP morning-hold
+    might arrive short of 85% by 2:55pm — 08-07 hit only 83% even with DET charging). Roll the LP forward
+    feeding its own dispatch back into SoC across a whole day; score on "hit 85% by 2:55pm + $ cost" vs what
+    DET actually did. That — not DET-agreement or single-cycle outcomes — is what a cutover decision needs.
+    Then re-run the whole analysis on a spring/summer sample (watch `solar_quantile_k` start to bite).
 
 - [ ] 🔐 **MEDIUM — SolarEdge key rotation still owed (Amber DONE 2026-08-05).** The export-script keys
   live in a gitignored `Amber Electric Data/.env` (`AMBER_API_KEY`, `SOLAREDGE_API_KEY`) read by the 5

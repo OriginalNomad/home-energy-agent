@@ -231,5 +231,58 @@ check("  ...the derated assumed rate is logged, below the point rate",
       r_der["inputs"]["p_charge_max_kw"] < r_base["inputs"]["p_charge_max_kw"],
       (r_der["inputs"]["p_charge_max_kw"], r_base["inputs"]["p_charge_max_kw"]))
 
+# ── Conservative solar quantile (2026-08-08): solar_quantile_k plans solar against
+#    ratio − k·uncertainty per hour, so the badly-forecast morning hours (uncertainty ≈
+#    ratio) are trimmed hard and the reliable midday hours only gently. The lever for the
+#    solar-TRUSTED Family-A holds — distinct from exec_charge_derate, which covers the
+#    solar-ZEROED deferrals above. Default k=0.0 → identical to trusting the mean ratio. ──
+from optimizer import _build_solar_series
+
+# Direct, deterministic check of the per-hour asymmetry (no solver dependence).
+_corr_q = {
+    "09": {"ratio": 0.16, "uncertainty": 0.18, "n": 100},   # morning: uncertainty > ratio
+    "13": {"ratio": 0.72, "uncertainty": 0.26, "n": 100},   # midday: well-forecast for its size
+}
+_pf_q2 = [{"time": "2026-06-01 09:00", "cents_kwh": 10.0},
+          {"time": "2026-06-01 13:00", "cents_kwh": 10.0}]
+_solar_q2 = [{"time": f["time"], "kw_est": 3.0} for f in _pf_q2]
+_mean_s = _build_solar_series(_pf_q2, _solar_q2, 2, 0.0, solar_correction=_corr_q, solar_quantile_k=0.0)
+_cons_s = _build_solar_series(_pf_q2, _solar_q2, 2, 0.0, solar_correction=_corr_q, solar_quantile_k=1.0)
+check("quantile k=0 reproduces the mean-ratio correction",
+      abs(_mean_s[0] - 3.0 * 0.16) < 1e-9 and abs(_mean_s[1] - 3.0 * 0.72) < 1e-9, _mean_s)
+check("quantile k=1 trims the uncertain MORNING hour to zero (ratio−σ ≤ 0)",
+      _cons_s[0] == 0.0, _cons_s)
+check("  ...and trims the reliable MIDDAY hour only partially",
+      0 < _cons_s[1] < _mean_s[1] and abs(_cons_s[1] - 3.0 * (0.72 - 0.26)) < 1e-9,
+      (_cons_s[1], _mean_s[1]))
+check("  ...quantile never makes solar negative",
+      all(s >= 0.0 for s in _cons_s), _cons_s)
+
+# End-to-end: a solar-TRUSTED hold flips to a protective charge under a conservative quantile.
+# Cheap now → expensive later; strong raw solar that the mean ratio trusts to fill the battery,
+# but ratio−σ ≈ 0 removes that credit so the LP must pre-charge in the cheap slots.
+pf_qe = _prices([8, 8, 9, 10, 25, 25, 25, 25], start="2026-06-01 09:00")
+mp_qe = {"solar_correction": {h: {"ratio": 0.6, "uncertainty": 0.6, "n": 100}
+                             for h in ("09", "10", "11", "12")}}
+solar_qe = [{"time": f["time"], "kw_est": 4.0} for f in pf_qe]
+st_qe = {"soc_pct": 40, "is_peak_month": False, "home_load_kw": 0.6}
+r_mean_e = optimize_battery(st_qe, pf_qe, solar_qe, now,
+                            params=OptParams(solar_quantile_k=0.0), model_params=mp_qe)
+r_cons_e = optimize_battery(st_qe, pf_qe, solar_qe, now,
+                            params=OptParams(solar_quantile_k=1.0), model_params=mp_qe)
+check("solar-trusted: mean-ratio LP holds (expects solar to fill)",
+      r_mean_e["verdict"]["action"] == "hold", r_mean_e["verdict"])
+check("  ...conservative solar quantile flips it to charge",
+      r_cons_e["verdict"]["action"] == "charge", r_cons_e["verdict"])
+check("  ...k=0.0 is a no-op vs default (shadow unaffected until swept)",
+      optimize_battery(st_qe, pf_qe, solar_qe, now, model_params=mp_qe)["verdict"]["action"]
+      == r_mean_e["verdict"]["action"], "default should equal solar_quantile_k=0.0")
+check("  ...the conservative effective solar is logged below the mean",
+      sum(r_cons_e["inputs"]["solar_eff_kw"]) < sum(r_mean_e["inputs"]["solar_eff_kw"]),
+      (sum(r_cons_e["inputs"]["solar_eff_kw"]), sum(r_mean_e["inputs"]["solar_eff_kw"])))
+check("  ...solar_quantile_k is logged in the inputs for replay",
+      r_cons_e["inputs"].get("solar_quantile_k") == 1.0, r_cons_e["inputs"].get("solar_quantile_k"))
+
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

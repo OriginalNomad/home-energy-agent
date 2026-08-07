@@ -3140,3 +3140,105 @@ solar covered to 90%.
   escalations (MEDIUM item) — item ② covered `survival_floor_defend` specifically.
 - **Also today:** the morning-brief point-5 journal review was logged into todo item ④ (EV block
   confirmed as the one real schema gap; weather/AC deferred until those sensors exist).
+
+## 2026-08-08 (LP robustness — conservative solar quantile built + offline knob sweep)
+
+Followed the morning brief's "unblock" thread (advance the shadow LP toward control by making it plan
+against a conservative solar forecast). **Replay-first**, per the user — build the lever as a default-off
+option + an offline sweep harness over logged cycles, measure, decide later. **Nothing enabled live.**
+
+**Built (`agent/optimizer.py`, all default-off → live shadow unchanged):**
+- **`OptParams.solar_quantile_k`** (default 0.0) — new *forecast-risk* knob, dedicated (user chose option
+  1 over overloading `risk`). `_build_solar_series()` now applies the per-hour correction as a
+  conservative quantile `max(ratio − k·uncertainty, 0)` (both from `model_params` `solar_correction`)
+  instead of the mean `ratio`. Because the morning hours carry `uncertainty ≈ ratio` (09:00: 0.16/0.18)
+  while midday is well-forecast (13:00: 0.72/0.26), k trims untrustworthy mornings hard and reliable
+  midday gently — which the existing flat `risk` haircut structurally can't. k=0 is a verified no-op.
+  Logged to `optimizer_context.inputs.solar_quantile_k` for replay.
+- **9 tests** (`test_optimizer.py`, now **34 pass / 0 fail**): direct per-hour asymmetry check, an
+  end-to-end solar-trusted hold→charge flip, k=0 no-op, non-negativity, and input logging.
+- **`agent/replay_solar_quantile.py`** — offline harness: reconstructs `optimize_battery()` args from the
+  logged per-slot inputs (logged since 08-01) and re-solves at a grid of (`solar_quantile_k`,
+  `exec_charge_derate`), scoring against the deterministic layer with two *directional* counts —
+  A = DET-charge/LP-hold (LP under-charges; split solar-trusted vs solar-zeroed) and B = DET-hold/LP-charge
+  (LP over-charges).
+
+**Sweep result (339 replayable cycles, 08-01→08-08, winter, solar 40–47% of forecast):**
+- **Fidelity 100%** — baseline (k=0, derate=1.0) reproduces all 339 logged LP verdicts, so the
+  reconstruction is faithful.
+- **Baseline:** 79.4% DET-agreement; **A=58** (trusted 35 / zeroed 23), **B=12**.
+- **`solar_quantile_k` barely moves anything:** k=0→2.0 shifts A_trusted only 35→33 while B creeps 12→16.
+  **The conservative solar quantile is NOT the winter unblock** — in winter the mean ratio already yields
+  tiny morning solar, so trimming it changes almost no decisions. Hypothesis: it's a *summer* lever (when
+  trusted solar is large) — re-run this sweep on summer data before judging it. Good that we measured
+  before enabling: this is the lever I'd have wrongly turned on from the brief's framing.
+- **`exec_charge_derate` IS the winter lever** (matches the 07-31 replay): derate=0.5 → A=39 / agree 81.4%
+  (B=24); **derate=0.3 → A=33 (zeroed 23→4) / agree 85.5% / B=16**. Combining both knobs adds nothing over
+  the derate alone.
+
+**Outcome context (added same session — `replay_solar_quantile.py --daily`, joins `daily_energy.jsonl`):**
+per-day divergence counts beside each day's ACTUAL outcome. **All 8 days (08-01→08-07) passed the demand
+window with large margin** — min SoC in the window 38–70%, peak import 0.02–0.21 kW, cost $0.23–$2.38,
+solar 0.38–0.47 of forecast. Two things this reveals that DET-agreement hid:
+- **DET's morning insurance charging was not needed on any of these days** — the battery always had 38%+
+  to spare at the window's worst point. So the LP's tendency to *hold* (the A "under-charge" divergences)
+  would very likely have been **safe and cheaper** here. On winter evidence the LP's holding instinct
+  looks *right*; it may be **DET that over-insures**, not the LP that under-charges — the opposite of the
+  morning brief's framing.
+- **`derate=0.3` concentrates its extra charging on the days that needed it LEAST** — e.g. 08-06 (min SoC
+  70%, cost $0.23) goes base 8/2 → der 1/5: it removes 7 under-charges but adds 3 over-charges on the
+  easiest day. So the derate's headline "85.5% agreement" is buying insurance the outcomes show was wasted.
+  **Do not enable derate=0.3** on this basis.
+
+**The caveat that blocks any cutover call (load-bearing):** a per-cycle replay cannot validate the LP's
+*forward trajectory*. These days passed because DET charged to ~83–95% by 3pm; had the LP held through the
+mornings it might have arrived short (08-07 reached only 83% by 3pm even *with* DET charging + solar at
+46%). The outcome scores DET, not the LP counterfactual. **The real validator is a full-day CLOSED-LOOP LP
+simulation** — roll the LP forward feeding its own dispatch back into SoC, scored on "hit 85% by 2:55pm, at
+what $." That's the next step (bigger piece) before trusting any lever.
+
+**Decision this session: enable nothing.** Keep both knobs default-off. `solar_quantile_k` stays as the
+probable *summer* lever (re-test when solar is trusted). The morning-brief command now runs this sweep
+daily (with a spring/summer watch on the quantile) until a cutover lever is chosen. **Committed** the
+infrastructure (knob + tests + harness + docs); Pi picks it up on its next cron. Pi live checkout was
+untouched during analysis (ran from `/tmp/lp_test`).
+
+## 2026-08-08 (morning-ea brief + seasonal observation: solar-headroom sink)
+
+Routine morning brief (peak day; agent healthy, data logger 3,020 obs, models rebuilt overnight
+`obs_days: 62`; det↔LP 59/65 = 91% last 2 days, 80.3% since the 07-22 restart — divergences all the
+robust-MPC solar class, no bugs; SolarEdge ~1pm telemetry stall still recurring, cosmetic).
+
+**Discussion — why the peak-day target is 85% not 100%, and a seasonal caveat (user observation, worth
+recording):** Walked through the four reasons the daytime `goal_3pm_soc` is 85% rather than 100% — (1)
+the 3–9pm window only needs ~4–6 kWh so 85% (~11.5 kWh) already carries large margin (08-07 passed at
+83%); (2) the top ~15% is deliberately reserved as **free-solar headroom** so the agent doesn't pay grid
+for what the afternoon sun gives free (and doesn't risk the 10am–3pm export-penalty by having to dump the
+overflow); (3) the `self_consumption` charge rate collapses above 80% (live model_params: 1.67 kW <70%,
+0.96 at 80%, 0.72 at 90%), making the last 15% the slowest/most deadline-expensive to buy; (4) 100%
+parking ages the NMC cells. Also clarified the "flat at 6am" the user saw is the **intended overnight
+ride-down** toward the 5% survival floor (recharge cheaply at the next Solar Sponge), not a missed target
+— with the standing caveat that the overnight-strategy todo is still open for peak-day eves where the
+cheap morning slot never arrives.
+
+**User's seasonal observation (the reason for this entry):** reason (2) — top-15% reserved for solar
+headroom — is sound **in winter**, where solar is currently running only ~40–47% of forecast so that
+headroom rarely fills. **In summer it inverts:** abundant solar will fill the battery early and then keep
+generating, so the reserved headroom is consumed quickly and the site has a *surplus-solar-sink* problem,
+not a shortfall problem. The overflow then has nowhere to go but export — into the 10am–3pm export penalty
+and/or a low/negative FIT. **Proposed direction:** in summer, lean on the **EV as the overflow sink** —
+plug in more frequently so surplus solar charges the car (Eco+/solar-only) once the battery is near full,
+rather than exporting at a penalty.
+
+- **This partly exists already:** **Rule 19 (EV Case 6 — Negative FIT Solar Dump)** already switches the
+  EV to Eco+ when FIT < 0¢ AND battery ≥ 85% AND EV < 100%, absorbing surplus solar that would otherwise
+  export at a negative price. The user's observation **generalises** it: in summer the trigger for
+  EV-as-sink should arguably be *battery-near-full + surplus solar* (or export approaching the penalty
+  threshold), not only *negative FIT* — i.e. Rule 19 is the winter/negative-price special case of a
+  broader summer overflow strategy.
+- **Not acted on now** (it's winter — solar-shortfall is the live regime; forcing EV plug-in has an
+  exogenous cost since the car must be available). Logged as a forward-looking item in `todo.md` to
+  revisit as the peak solar season approaches (Nov onward — note Nov–Mar are also demand-charge months, so
+  the demand-window strategy still applies alongside the surplus-sink one). Depends on knowing plug-in
+  state, which is exactly the **EV journal block (todo ④)** — so ④ is a prerequisite for measuring how
+  often summer surplus actually has nowhere to go.

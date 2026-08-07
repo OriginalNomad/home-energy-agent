@@ -64,6 +64,18 @@ class OptParams:
     # the Family-A det-charge/LP-hold divergence class. See exec_charge_derate.
     risk: float = 0.0
 
+    # forecast risk, PRECISE per-hour form (2026-08-08) — plan solar against a
+    # conservative quantile ratio − k·uncertainty (both from model_params'
+    # solar_correction), clamped ≥ 0, instead of the mean ratio. Because the
+    # badly-forecast morning hours carry uncertainty ≈ their ratio while midday is
+    # well-forecast, k trims the untrustworthy mornings hard and the reliable midday
+    # only gently — which the flat `risk` haircut above structurally cannot do. This
+    # is the lever for the solar-TRUSTED Family-A holds (exec_charge_derate below is
+    # the lever for the solar-ZEROED deferrals — different sub-class). 0.0 = trust the
+    # mean ratio → no change (live shadow unaffected until deliberately swept); higher
+    # = more conservative (k ≈ 1 ⇒ ≈ 1σ below the mean correction).
+    solar_quantile_k: float = 0.0
+
     # plan-execution risk knob — SEPARATE from `risk` (forecast risk). Derates the
     # charge rate the plan assumes (multiplier on p_charge_max_kw), so a deferred fill
     # must start early enough to still finish before the demand window even if the real
@@ -135,13 +147,18 @@ def _model_avg_rate_kw(soc_from: float, soc_to: float,
 
 
 def _build_solar_series(price_forecast, solar_forecast, n, fallback_kw,
-                        solar_correction=None, min_samples=5):
+                        solar_correction=None, min_samples=5, solar_quantile_k=0.0):
     """Align solar (kW) to the price-forecast time grid; 0 where unknown.
 
     If solar_correction is provided (from model_params.json), multiplies each
     slot's kW estimate by the per-hour-of-day ratio to correct for site-specific
     Solcast bias. Correction is skipped for hours with fewer than min_samples
     observations — those hours use the raw Solcast value.
+
+    When solar_quantile_k > 0, the correction is applied as a conservative quantile
+    max(ratio − k·uncertainty, 0) rather than the mean ratio, so the LP plans against
+    a pessimistic-but-plausible low solar case. k=0.0 is the mean ratio (no change);
+    an hour with no `uncertainty` in the table is unaffected by k.
     """
     smap = {_norm_time(s.get("time", "")): float(s.get("kw_est", 0.0))
             for s in (solar_forecast or [])}
@@ -153,7 +170,10 @@ def _build_solar_series(price_forecast, solar_forecast, n, fallback_kw,
             hour_str = key[11:13]
             corr     = solar_correction.get(hour_str, {})
             if corr.get("n", 0) >= min_samples:
-                kw = kw * corr["ratio"]
+                ratio = corr["ratio"]
+                if solar_quantile_k:
+                    ratio = max(ratio - solar_quantile_k * corr.get("uncertainty", 0.0), 0.0)
+                kw = kw * ratio
         out.append(kw)
     return out
 
@@ -239,8 +259,9 @@ def optimize_battery(state: dict,
     solar_raw = _build_solar_series(price_forecast, solar_forecast, H, fallback_kw=0.0,
                                     solar_correction=None)
     solar = _build_solar_series(price_forecast, solar_forecast, H, fallback_kw=0.0,
-                                solar_correction=_solar_corr, min_samples=_min_samples)
-    solar = [s * (1.0 - 0.5 * p.risk) for s in solar]            # conservative solar
+                                solar_correction=_solar_corr, min_samples=_min_samples,
+                                solar_quantile_k=p.solar_quantile_k)
+    solar = [s * (1.0 - 0.5 * p.risk) for s in solar]            # conservative solar (flat haircut)
     if bool(state.get("solar_unreliable", False)):
         solar = [0.0] * H                                         # cloudy morning — no solar credit
     load = [home_load * (1.0 + 0.3 * p.risk)] * H                # conservative load
@@ -254,6 +275,7 @@ def optimize_battery(state: dict,
         "solar_raw_kw":     [round(s, 3) for s in solar_raw],
         "load_kw":          round(load[0], 3),
         "risk":             p.risk,
+        "solar_quantile_k": p.solar_quantile_k,
         "exec_charge_derate": p.exec_charge_derate,
         "p_charge_max_kw":  round(p.p_charge_max_kw, 3),
         "solar_unreliable": bool(state.get("solar_unreliable", False)),

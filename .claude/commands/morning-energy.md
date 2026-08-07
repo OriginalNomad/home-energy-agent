@@ -71,12 +71,44 @@ Report:
 - **Recommendation on next steps** — where we are on the re-architecture path and what's needed
   to advance: Phase 4 (collect det↔optimiser divergence data) → LP-to-control cutover with the
   kill-switch already in place. State whether the data yet supports trusting the optimiser for
-  control, and what to fix/watch first. If the optimiser keeps diverging via cause (b), note
-  whether the `risk` knob / a conservative solar quantile would close the gap.
+  control, and what to fix/watch first. For which lever closes cause-(b), **defer to the knob
+  sweep below** — as of 2026-08-08 the measured winter answer is that `exec_charge_derate` (not the
+  solar quantile) is the effective lever; the `solar_quantile_k` quantile is inert in winter and is
+  a *summer* hypothesis.
 
 If there are too few optimiser records to be meaningful yet, say so and note how many cycles
 have accumulated since the optimiser's clean-data restart (2026-07-22, when the SoC-blindness
 bug was fixed — all earlier optimiser divergence data is void).
+
+### LP robustness knob sweep (run every morning until we decide on a cutover lever)
+
+Added 2026-08-08. Runs the offline sweep that re-solves the shadow LP over the logged cycles at a
+grid of the two robustness knobs (`solar_quantile_k`, `exec_charge_derate`) and scores each against
+the deterministic layer. **Run it on the Pi** (needs the venv + the committed `optimizer.py`):
+
+```
+ssh energypi.local "cd ~/home-energy-agent && source agent/venv/bin/activate && python3 agent/replay_solar_quantile.py --jsonl agent/decisions.jsonl --model agent/model_params.json"
+```
+
+Report from its output:
+- **Fidelity** — the baseline replay should reproduce the logged LP verdicts near 100%; if it drops,
+  the reconstruction has broken (flag it, don't trust the sweep that day).
+- **The two directional counts** at baseline and across both sweeps: **A** = DET-charge / LP-hold
+  (LP *under*-charges vs the rule layer — the cause-(b) class we want a lever to shrink; split
+  `trusted` vs `zeroed`), and **B** = DET-hold / LP-charge (LP *over*-charges — the false-alarm cost).
+  A good lever drives **A down without inflating B**.
+- **⚠️ Seasonal watch (the reason this runs daily):** the winter finding is that `solar_quantile_k`
+  barely moves A (winter morning solar is already ~0, so trimming it changes nothing) while
+  `exec_charge_derate` does the work. **As we head into spring/summer (Sept onward) solar climbs and
+  becomes trustworthy, so the quantile should start to bite — watch the `solar_quantile_k` rows begin
+  to reduce `A_trusted`.** Call out the first morning the quantile sweep visibly moves A: that's the
+  signal the balance of levers is shifting and the cutover analysis needs re-running on the new season.
+- Baseline reference to compare against (2026-08-08, winter, 339 cycles): agree **79.4%**, **A=58**
+  (trusted 35 / zeroed 23), **B=12**; `exec_charge_derate=0.3` → agree 85.5%, A=33 (zeroed 23→4), B=16;
+  `solar_quantile_k` sweep essentially flat. Full context: energy_log 2026-08-08 + todo "LP-to-control".
+
+Once a cutover lever + setting is chosen and enabled (or the idea is dropped), **delete this
+subsection** — it exists only to keep the seasonal picture under review until that decision.
 
 ## Daily energy journal review
 
