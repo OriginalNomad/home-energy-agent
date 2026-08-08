@@ -2,14 +2,21 @@
 
 ## Energy Agent — Active
 
-### ▶️ RESUME HERE — next session (paused 2026-08-05 ~14:30, before the demand window)
+### ▶️ RESUME HERE — next session (updated 2026-08-08)
 
-**Where we are:** working through the plan below **one at a time**. **DONE + deployed + pushed today:**
-① Quiet mode, ⑦ toggle inversion (both agent switches now ON = on / OFF = off, default ON — Rules 27+36).
-Everything committed, zero config drift, all tests pass (232+25+11). **② `survival_floor_defend`
-forward-price fix is DONE + LIVE 2026-08-06** (deployed to HA, pushed `7377bfe`, Pi pulls next cron).
-**▶️ PICK UP AT ③ agent outage fail-safe** — the next real control-logic item; was designed to batch with ②
-but ② shipped alone, so ③ is its own small push.
+**▶️ TOP PRIORITY — ENABLE Rule 37 Phase 1 (do this on a MORNING).** The seasonal solar-after-3pm deadline
+target is built, wired, tested (247/0), and **committed SHIPPED-OFF** (`c2aefb4`, on the Pi, inert). To
+enable: flip **`SEASONAL_DEADLINE_TARGET = False → True`** in `agent/energy_agent.py` and push — the Pi
+pulls on its next 30-min cron. **Do it on a morning** so there's a full day before the 3–9pm window. It has
+been logging `forecast_after_deadline_kwh` + `deadline_target_pct` since 08-08, so by the enable there's
+real post-3pm-solar data to (a) sanity-check the target and (b) run the retrospective replay. On enable,
+also: align `goal_3pm_soc` + the HA `battery_grid_charge_target` sensor to the seasonal target (display
+only), and watch the first day (expect a gentle `peak_opportunistic_topup` toward ~95 during the cheap
+sponge on a low-post-3pm-solar day, and NO change on high-solar/expensive/summer conditions). Then **Phase 2
+— front-load rate** (make the top-up hard/early). Full detail in the "PROPOSAL → Rule 37" item below.
+
+**Older thread (still open, lower priority now):** ③ agent outage fail-safe (control-logic item from the
+08-05 plan — ①/⑦/② done). Pick up after Rule 37 is proven live.
 
 **Naming note for tomorrow:** the two dashboard toggles are now `input_boolean.agent_active` ("Agent
 Control", ON=active) and `input_boolean.agent_narrative` ("Agent Narrative", ON=narrate). The old
@@ -205,7 +212,8 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
     filled ONLY via cheap-window branches (sponge / price≤threshold / no-cheaper-slot), **never** a forced
     autonomous slam at a high price. So the target is two-tier: 85 = at-any-cost safety (escalation), 95 =
     cheap-only ceiling. This keeps the demand-charge guarantee byte-identical to today.
-  - **Phase-1 DONE (built + WIRED + tested, NOT deployed/committed):** helpers + state plumbing
+  - **Phase-1 DONE (built + WIRED + tested + COMMITTED SHIPPED-OFF `c2aefb4`, Pi pulled + verified inert):**
+    helpers + state plumbing
     (`get_current_state` → `solar.forecast_after_deadline_kwh`) + `compute_decision_context` (peak gate to
     `deadline_target`; opportunistic top-up override on the floor-met holds; logs target + post-3pm solar).
     Two-tier: escalation stays on the 85 floor. **+6 wiring tests (16 Rule 37 total); full suite 247/0, zero

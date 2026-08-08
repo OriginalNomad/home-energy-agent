@@ -1197,6 +1197,54 @@ export safety-net `battery_autonomous_export_safety_net` (rare + diagnostic).
 
 ---
 
+### Rule 37 — Seasonal, solar-*after-3pm*-aware deadline target (Phase 1) ⚠️ BUILT BUT DISABLED
+
+**Added 2026-08-08 (commit `c2aefb4`). SHIPPED DEFAULT-OFF (`SEASONAL_DEADLINE_TARGET = False`) — inert on
+the Pi (behaviour byte-identical to today) until a MORNING enable gives a full day of runway before the
+demand window. This entry documents the rule as built; flip the flag to `True` + push to activate.**
+
+**Problem.** The peak fill target was a fixed **85% + "leave the top 15% for solar"**. That reserved
+headroom only pays off if solar is still coming to fill it — but in **winter** solar peaks ~1pm and is
+gone by ~4pm while the demand window *starts* at 3pm, so the headroom is reserved for solar that has
+already finished. It's wasted capacity: every cheap midday kWh not banked is imported that evening at
+~20¢ (observed live 2026-08-08 — `forecast_after_deadline_kwh` = **0.18 kWh**, i.e. ~no post-3pm solar,
+yet the agent stopped charging at 71% at 2pm to let the declining solar limp toward 85%). **Summer
+inverts** — strong late-afternoon solar makes the headroom real.
+
+**Two-tier target (the core design).**
+- **`DEMAND_FLOOR_PCT` = 85** — the inviolable 3–9pm safety floor. The deadline **escalation**
+  (`peak_deadline_autonomous` etc., "price irrelevant, the demand charge dwarfs cost") stays keyed here, so
+  the demand-charge guarantee is **byte-identical to today**.
+- **`PRACTICAL_MAX_PCT` = 95** — the opportunistic ceiling. The 85→95 band is filled **only** via the
+  cheap-window top-up below, **never** a forced autonomous slam at a high price.
+
+**Target formula.** `deadline_target = clamp(95 − expected_solar_after_15:00_kwh / 13.5 × 100, 85, 95)`,
+using corrected Solcast energy expected *after* 3pm (not total remaining, which over-credits morning/midday
+solar that helps you *reach* the target rather than fill the headroom). Winter (post-3pm ≈ 0) → ~95;
+summer (large) → 85. Unknown/absent post-3pm solar, or the kill-switch off → the safe fixed **85** (a
+Solcast-detail outage degrades to today's proven behaviour).
+
+**Opportunistic top-up (the acted-on behaviour).** A post-verdict override in `compute_decision_context`:
+when the peak layer would **HOLD** because the 85 floor is met/covered (`peak_target_met` /
+`peak_solar_will_cover` / `peak_on_track`) but SoC is still below `deadline_target` **and** energy is cheap
+(≤ sponge threshold, or inside the sponge window up to `RULE37_TOPUP_PRICE_CEIL` = 15¢), it fires a
+**gentle self_consumption** charge toward the target instead of holding — banking cheap midday energy in
+winter. **Summer-guard:** gated on `deadline_target > DEMAND_FLOOR_PCT`, so in summer (target == floor) it
+never fires and solar is left to cover. Never overrides a "wait for a cheaper slot" hold, never the
+escalation (those are charges), never in the demand window, never at autonomous.
+
+**Kill-switch `SEASONAL_DEADLINE_TARGET`.** Off → `deadline_target == 85`, gate `soc < 85`, override never
+fires (all today's behaviour). The state plumbing + logging (`forecast_after_deadline_kwh`,
+`deadline_target_pct`) run regardless, so the data is collected live even while disabled.
+
+**Phase 2 (not built): front-load rate.** Make the top-up *hard and early* (autonomous to the target during
+the cheap window) rather than gentle, so a high winter target is reachable despite the >80% charge-rate
+taper. Deferred until Phase 1 is proven live. Also deferred to the enable session: aligning `goal_3pm_soc`
++ the HA `battery_grid_charge_target` sensor formula to the seasonal target (display only — control already
+uses `deadline_target`). Full record: energy_log 2026-08-08.
+
+---
+
 ## Decision Priority Order
 When multiple rules conflict, apply in this order:
 

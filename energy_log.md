@@ -3263,7 +3263,7 @@ free-text narrative (no control impact). **Same class as the open 2026-07-31 "na
 item** — fold a narrative-accuracy guard into that fix (e.g. give the LLM the SoC-vs-target comparison
 pre-computed, or assert consistency before writing).
 
-## 2026-08-08 (Rule 37 Phase 1 — wired into the control path + tested; NOT deployed/committed)
+## 2026-08-08 (Rule 37 Phase 1 — wired into the control path + tested; COMMITTED SHIPPED-OFF)
 
 Decisions locked with the user (floor 85 / ceil 95 / autonomous / peak-only / live-solar, Phase-1-first).
 Built the seasonal two-tier deadline target and wired it in. **Kill-switch `SEASONAL_DEADLINE_TARGET`;
@@ -3290,7 +3290,10 @@ default-safe.**
 
 **Tests: +6 wiring cases (16 Rule 37 total), full suite 247 passed / 0 failed, zero regressions** (run in a
 full-checkout copy). The `winter+cheap → peak_opportunistic_topup` case reproduces today's 2pm/71% cycle and
-confirms the fix. **Not deployed, not committed.** Pending: the pre-deploy replay of the last ~8 days —
+confirms the fix. **Committed SHIPPED-OFF as `c2aefb4` + pushed; Pi pulled and verified inert** (import OK,
+`SEASONAL_DEADLINE_TARGET=False`, live read gave `forecast_after_deadline_kwh=0.18 kWh` / `deadline_target_pct=85`
+— winter thesis confirmed with real data). **To enable: flip `SEASONAL_DEADLINE_TARGET` → True + push on a
+MORNING** (full day of runway). Pending: the pre-deploy replay of the last ~8 days —
 caveat: historical `forecast_after_deadline_kwh` wasn't logged, so a retrospective replay needs a winter≈0
 assumption (or the new logging + wait for data); today's case is already unit-proven. **Deferred to deploy
 session:** aligning the `goal_3pm_soc` record field + the HA `battery_grid_charge_target` sensor to the

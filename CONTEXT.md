@@ -298,6 +298,30 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
+Key agent capabilities added 2026-08-08:
+- **Rule 37 — seasonal, solar-*after-3pm*-aware deadline target (Phase 1). BUILT + WIRED but SHIPPED
+  DEFAULT-OFF** (`SEASONAL_DEADLINE_TARGET = False`, commit `c2aefb4`) — inert on the Pi (behaviour
+  byte-identical to today) until a MORNING enable. Replaces the fixed 85%+headroom target with a two-tier
+  target: `DEMAND_FLOOR_PCT` 85 (inviolable safety floor the escalation stays keyed to) and
+  `PRACTICAL_MAX_PCT` 95 (opportunistic ceiling, filled only via a cheap-window `peak_opportunistic_topup`
+  override, never a forced slam). `deadline_target = clamp(95 − corrected-solar-after-15:00 / 13.5 × 100,
+  85, 95)` — winter (≈0 post-3pm solar, measured 0.18 kWh on 08-08) → ~95; summer → 85; unknown/off → safe
+  85. `get_current_state` logs `solar.forecast_after_deadline_kwh`; `compute_decision_context` logs
+  `deadline_target_pct` — **collecting live even while off**. 16 Rule 37 tests; full suite **247 decision /
+  25 optimizer / 11 build_models, 0 fail**. Deterministic-only (no LLM prompt change). Phase 2 (front-load
+  rate) + `goal_3pm_soc`/HA `battery_grid_charge_target` alignment deferred to the enable session. See
+  energy_rules Rule 37 + energy_log 2026-08-08.
+- **LP robustness knob `solar_quantile_k` + offline sweep (shadow-only, default-off, commit `bb4420d`).**
+  `optimizer.py` `_build_solar_series` can plan solar against a per-hour conservative quantile
+  `max(ratio − k·uncertainty, 0)` (dedicated knob, kept separate from `risk`). `agent/replay_solar_quantile.py`
+  re-solves the LP over logged `optimizer_context.inputs` at a grid of (`solar_quantile_k`,
+  `exec_charge_derate`), scored vs the deterministic layer (`--daily` joins `daily_energy.jsonl` for outcome
+  context). **Winter finding: the solar quantile barely moves divergences (it's a summer lever);
+  `exec_charge_derate` is the winter lever — but its gains land on the days that needed charging least, so
+  enable nothing yet.** The morning-brief command now runs this sweep daily. 25 optimizer tests.
+- **New `decisions.jsonl` fields:** `computed_context` gains `solar_after_deadline_kwh` + `deadline_target_pct`
+  (Rule 37); `optimizer_context.inputs` gains `solar_quantile_k`.
+
 Key agent capability added 2026-08-06:
 - **Rule 30 made price-aware — survival floor rescoped to ride-to-5% (`SURVIVAL_FLOOR_PRICE_AWARE`).**
   `survival_floor_defend` used to force-charge any low-SoC HOLD *at the current price* (to stay off the
@@ -625,7 +649,7 @@ Counts below were read from the live HA, not from the file. To re-verify:
 
 | File | What it contains |
 |------|-----------------|
-| `energy_rules.md` | Full rule-set (Rules 1–14), all business logic, decision priority order, known limitations |
+| `energy_rules.md` | Full rule-set (Rules 1–37; Rule 37 built-but-disabled), all business logic, decision priority order, known limitations |
 | `ea116_tariff.md` | EA116 tariff structure — demand charge, Solar Sponge, export penalty |
 | `energy_log.md` | Chronological log of what was built each day and observations |
 | `todo.md` | Personal and product to-do lists |
@@ -634,8 +658,9 @@ Counts below were read from the live HA, not from the file. To re-verify:
 | `config/configuration.yaml` | HA config — sensors, REST commands, template sensors. Same deploy rule |
 | `agent/energy_agent.py` | Claude-powered optimisation agent — the strategic decision layer |
 | `agent/backtest.py` | Peak-month scenario backtest — feeds the real agent synthetic scenarios, stubs all reads/writes. Validate demand-window logic before a peak month |
-| `agent/test_decision.py` | 232 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
-| `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. See PRODUCT.md "Optimisation Engine — Depth" |
+| `agent/test_decision.py` | 247 unit tests for `compute_decision_context()` — pure, no API calls, run in ms |
+| `agent/optimizer.py` | LP/MPC optimiser (shadow only) — receding-horizon scipy LP; verdict shape matches the deterministic layer for three-way A/B. Robustness knobs `solar_quantile_k` + `exec_charge_derate` (both default-off). See PRODUCT.md "Optimisation Engine — Depth" |
+| `agent/replay_solar_quantile.py` | Offline sweep — re-solves the LP over logged `optimizer_context.inputs` at a grid of the two robustness knobs, scored vs the deterministic layer (A/B divergences; `--daily` adds outcome context). Run by the morning-brief command. Added 2026-08-08 |
 | `agent/test_optimizer.py` | 25 unit tests for the LP optimiser — pure, no API calls. Includes regression tests pinning the SoC contract (see 2026-07-22) |
 | `agent/.env` | API keys (gitignored — not in repo) |
 | `agent/agent_decisions.log` | Plain-text decision log (one line per cycle, committed to git) |
