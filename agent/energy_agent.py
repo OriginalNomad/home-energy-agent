@@ -461,6 +461,11 @@ def get_current_state() -> dict:
             # unavailable, in which case the decision layer falls back to raw.
             "forecast_remaining_corrected_kwh": (_solar_bd or {}).get("remaining_corrected_kwh"),
             "correction_ratio":                 (_solar_bd or {}).get("effective_ratio"),
+            # Rule 37 — corrected Solcast energy expected AFTER the 3pm demand-window start.
+            # Drives the seasonal deadline target (winter ≈0 → aim high; summer large → headroom).
+            "forecast_after_deadline_kwh": _corrected_solar_after_hour(
+                get_solar_forecast(), (_model_params or {}).get("solar_correction"),
+                after_hour=15, min_samples=(_model_params or {}).get("min_samples", 5)),
             # Accuracy: actual kW vs the *bias-corrected* this-hour forecast
             # (Wh→kWh ≈ avg kW for the hour). Corrected ref stops normal winter
             # mornings reading "unreliable"; falls back to raw when uncalibrated.
@@ -1252,6 +1257,80 @@ FAST_ESCALATE_BUFFER_H = 1.5   # go autonomous when hours_to_2_55 <= fill_fast_8
 # fall-through (peak block off after 2:55pm).
 PEAK_EVE_RUNUP = True
 
+# ── Rule 37 (Phase 1) — seasonal, solar-*after-3pm*-aware deadline target ─────────────────
+# The peak fill target has been a fixed 85% + "leave the top 15% for solar". That headroom only
+# pays off if solar is still coming to fill it — but in winter solar peaks ~1pm and is gone by
+# ~4pm while the demand window starts at 3pm, so the reserved headroom is for solar that has
+# already finished (wasted capacity: cheap midday kWh not banked = imported at ~20¢ that evening).
+# Summer inverts (strong late-afternoon solar → the headroom is real). So the target should leave
+# headroom only for the solar expected AFTER 3pm.
+#
+# TWO-TIER target (deliberate — see energy_log 2026-08-08):
+#   • DEMAND_FLOOR_PCT — the inviolable 3–9pm safety floor. The deadline ESCALATION
+#     (peak_deadline_autonomous et al., "price irrelevant, the demand charge dwarfs cost") stays
+#     keyed HERE, so the at-any-cost guarantee is unchanged from today.
+#   • PRACTICAL_MAX_PCT — the opportunistic ceiling. Charging from the floor up to the seasonal
+#     target is OPPORTUNISTIC — only ever via cheap energy, NEVER a forced autonomous slam at a
+#     high price for the 85→95 portion.
+# Wired into compute_decision_context() (peak gate + opportunistic top-up override) 2026-08-08.
+# SHIPPED DEFAULT-OFF: the Pi auto-pulls main and runs it, so this stays False to keep behaviour
+# byte-identical to today (target == DEMAND_FLOOR_PCT, override never fires) until a MORNING enable
+# gives a full day of runway before the demand window. NB: the state plumbing + logging run
+# regardless, so `forecast_after_deadline_kwh` / `deadline_target_pct` are collected live even while
+# off — data for the replay and the informed enable. Flip to True (+ push) to activate.
+SEASONAL_DEADLINE_TARGET = False
+DEMAND_FLOOR_PCT   = 85    # inviolable peak-month safety floor (escalation keyed here)
+PRACTICAL_MAX_PCT  = 95    # opportunistic ceiling (5% longevity / forecast-error margin)
+RULE37_TOPUP_PRICE_CEIL = 15.0   # ¢ — sponge-window cheap ceiling for the opportunistic top-up
+# The peak HOLD verdicts the opportunistic top-up may override — only "floor met / covered / on
+# track" holds, NEVER the "wait for a cheaper slot" holds (wait_for_cheap_go_hard,
+# peak_early_morning_hold, peak_survival_wait_for_sponge), which are deliberately deferring.
+_RULE37_TOPUP_OVERRIDABLE = frozenset({"peak_target_met", "peak_solar_will_cover", "peak_on_track"})
+
+
+def _corrected_solar_after_hour(periods, solar_correction=None, after_hour=15, min_samples=5):
+    """Corrected Solcast energy (kWh) from half-hourly forecast periods starting at/after
+    `after_hour` (local clock). Pure. `periods` = [{"time": "YYYY-MM-DDTHH:MM", "kw_est": kW}]
+    (the shape get_solar_forecast() returns); `solar_correction` = model_params' per-hour
+    {"HH": {"ratio", "n"}}. Each 30-min slot contributes kw_est × 0.5h × ratio; hours with fewer
+    than min_samples observations (or no correction table) use the raw estimate (ratio 1.0).
+    Returns None when there is no forecast to sum (empty/absent periods) — the caller then falls
+    back to the safe fixed floor rather than aiming high on missing data."""
+    if not periods:
+        return None
+    total = 0.0
+    for p in periods:
+        t = str(p.get("time", ""))
+        if len(t) < 13:
+            continue
+        hh_str = t[11:13]
+        try:
+            if int(hh_str) < after_hour:
+                continue
+        except ValueError:
+            continue
+        ratio = 1.0
+        corr = (solar_correction or {}).get(hh_str, {})
+        if corr.get("n", 0) >= min_samples:
+            ratio = corr["ratio"]
+        total += _float(p.get("kw_est", 0.0)) * 0.5 * ratio
+    return round(total, 2)
+
+
+def _deadline_target_pct(solar_after_deadline_kwh,
+                         floor=DEMAND_FLOOR_PCT, ceil=PRACTICAL_MAX_PCT):
+    """Seasonal opportunistic deadline target: leave headroom ONLY for solar expected AFTER the
+    demand window starts (15:00) — the only solar that can still fill it. Pure.
+      winter (post-3pm solar ≈ 0 kWh) → ceil  (e.g. 95)
+      summer (post-3pm solar large)   → floor (headroom = the solar that will actually arrive)
+    Kill-switch off, OR post-3pm solar unknown (None) → floor (today's safe fixed behaviour).
+    Never returns outside [floor, ceil]."""
+    if not SEASONAL_DEADLINE_TARGET or solar_after_deadline_kwh is None:
+        return floor
+    headroom_pct = solar_after_deadline_kwh / USABLE_KWH * 100.0
+    return int(round(max(float(floor), min(float(ceil), ceil - headroom_pct))))
+
+
 # Phase 2.5-A: charge rate model (SoC-dependent rates from logged observations).
 # Built from energy_log.db; falls back to SLOW_KW/FAST_KW for missing/low-sample buckets.
 MODEL_PARAMS_FILE = Path(__file__).parent / "model_params.json"
@@ -1690,6 +1769,12 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                           else remaining_raw)
     accuracy           = _accuracy_class(solar.get("forecast_accuracy", ""))
 
+    # Rule 37 (two-tier target). DEMAND_FLOOR_PCT (85) is the inviolable safety floor the deadline
+    # ESCALATION stays keyed to (unchanged); deadline_target (85–95) is the seasonal OPPORTUNISTIC
+    # ceiling, filled only via the cheap-window top-up below. Winter (≈0 post-3pm solar) → aim high.
+    solar_after_deadline = solar.get("forecast_after_deadline_kwh")   # None when unavailable
+    deadline_target      = _deadline_target_pct(solar_after_deadline)
+
     zero_solar_day    = _detect_zero_solar(recent_records, solar_now, now_h, solar_unavailable, remaining)
     deferral_detected = _detect_deferral(recent_records, price)
 
@@ -1853,7 +1938,7 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
 
     if in_demand:
         rec = verdict("hold", None, None, "demand_window_active")
-    elif is_peak and soc < 85 and (now_h < DEMAND_DEADLINE or peak_eve):
+    elif is_peak and soc < deadline_target and (now_h < DEMAND_DEADLINE or peak_eve):
         # Peak-month hard deadline escalation (Rule 13)
         if kwh_needed_85 <= 0:
             # net solar (after home load) covers the remaining gap — no grid charge needed yet.
@@ -2006,6 +2091,24 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                           "survival_floor_defend")
         # else: a cheaper slot is coming — keep the HOLD, ride toward the 5% reserve, buy later.
 
+    # Rule 37 — opportunistic top-up toward the seasonal deadline target. When the peak layer would
+    # HOLD because the 85% demand floor is met/covered, but SoC is still below the seasonal target
+    # AND energy is cheap, gently top up toward the target instead of holding — this banks cheap
+    # midday energy in winter, where the reserved post-3pm headroom will NOT be filled by solar.
+    # Two-tier safety: gated on deadline_target > DEMAND_FLOOR_PCT, so in summer (target == floor)
+    # it never fires and solar is left to cover; it only ever overrides the "floor met/covered/on
+    # track" holds (never a "wait for cheaper" hold), never the escalation (those are charges),
+    # never in the demand window, and only at self_consumption — the 85% demand-charge guarantee is
+    # untouched. Cheap = at/below the sponge threshold, or inside the sponge window up to a ceiling.
+    _rule37_cheap = (price <= SOLAR_SPONGE_PRICE_THRESHOLD
+                     or (in_sponge and price <= RULE37_TOPUP_PRICE_CEIL))
+    if (SEASONAL_DEADLINE_TARGET and is_peak and not in_demand
+            and deadline_target > DEMAND_FLOOR_PCT
+            and rec.get("action") == "hold"
+            and rec.get("rule_fired") in _RULE37_TOPUP_OVERRIDABLE
+            and soc < deadline_target and _rule37_cheap):
+        rec = verdict("charge", deadline_target, "self_consumption", "peak_opportunistic_topup")
+
     return {
         "now_h":               round(now_h, 2),
         "soc":                 soc,
@@ -2019,6 +2122,10 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "cost_target_pct":     cost_target,
         "cost_target_method":  cost_target_method,
         "expected_solar_kwh":      round(expected_solar, 2),
+        # Rule 37 — seasonal two-tier target diagnostics.
+        "solar_after_deadline_kwh": (round(solar_after_deadline, 2)
+                                     if solar_after_deadline is not None else None),
+        "deadline_target_pct":      deadline_target,
         # Both figures logged so the correction's effect on decisions is measurable
         # — `solar_remaining_used_kwh` is what the verdict was actually reasoned from.
         "solar_remaining_raw_kwh":       round(remaining_raw, 2),

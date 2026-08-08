@@ -1618,8 +1618,96 @@ def test_settings_spec_holds_no_target_values():
         check(f"{key} band is ordered", lo < hi, f"lo={lo} hi={hi}")
 
 
+def test_rule37_solar_after_hour():
+    """_corrected_solar_after_hour sums only >=15:00 slots, applies per-hour correction,
+    and falls back to raw for low-sample hours."""
+    winter = [
+        {"time": "2026-08-08T13:00", "kw_est": 3.0},
+        {"time": "2026-08-08T14:30", "kw_est": 1.6},
+        {"time": "2026-08-08T15:00", "kw_est": 0.8},   # after 3pm
+        {"time": "2026-08-08T15:30", "kw_est": 0.4},   # after 3pm
+        {"time": "2026-08-08T16:00", "kw_est": 0.1},   # after 3pm
+    ]
+    # raw post-3pm kWh = (0.8 + 0.4 + 0.1) * 0.5 = 0.65
+    check("rule37 post-3pm solar sums only >=15:00 slots (raw)",
+          abs(ea._corrected_solar_after_hour(winter, None) - 0.65) < 1e-9,
+          ea._corrected_solar_after_hour(winter, None))
+    # correction halves the 15/16h ratios (n high); helper rounds to 2dp → round(0.325,2)
+    corr = {"15": {"ratio": 0.5, "n": 100}, "16": {"ratio": 0.5, "n": 100}}
+    exp_corr = round((0.8 + 0.4 + 0.1) * 0.5 * 0.5, 2)
+    check("rule37 post-3pm solar applies per-hour correction",
+          ea._corrected_solar_after_hour(winter, corr) == exp_corr,
+          (ea._corrected_solar_after_hour(winter, corr), exp_corr))
+    # low-sample hour falls back to raw (no correction)
+    check("rule37 low-sample hour uses raw ratio 1.0",
+          abs(ea._corrected_solar_after_hour(winter, {"15": {"ratio": 0.5, "n": 2}}) - 0.65) < 1e-9,
+          ea._corrected_solar_after_hour(winter, {"15": {"ratio": 0.5, "n": 2}}))
+    check("rule37 empty/absent periods -> None (caller falls back to floor)",
+          ea._corrected_solar_after_hour([]) is None and ea._corrected_solar_after_hour(None) is None,
+          (ea._corrected_solar_after_hour([]), ea._corrected_solar_after_hour(None)))
+
+
+def test_rule37_deadline_target_pct():
+    """Seasonal target: winter (≈0 post-3pm solar) → ceil; summer (large) → floor; banded;
+    unknown/kill-switch off → floor. Sets the flag explicitly so it is independent of the
+    module default (which ships False)."""
+    _saved = ea.SEASONAL_DEADLINE_TARGET
+    ea.SEASONAL_DEADLINE_TARGET = True
+    try:
+        check("rule37 winter (0 post-3pm solar) -> ceil 95",
+              ea._deadline_target_pct(0.0) == 95, ea._deadline_target_pct(0.0))
+        check("rule37 summer (large post-3pm solar) -> floor 85",
+              ea._deadline_target_pct(6.0) == 85, ea._deadline_target_pct(6.0))
+        exp = int(round(max(85.0, min(95.0, 95 - 0.65 / ea.USABLE_KWH * 100))))
+        check("rule37 small post-3pm solar raises headroom below ceil",
+              ea._deadline_target_pct(0.65) == exp, (ea._deadline_target_pct(0.65), exp))
+        check("rule37 target never exceeds ceil for negative/zero solar",
+              ea._deadline_target_pct(-5.0) == 95, ea._deadline_target_pct(-5.0))
+        check("rule37 unknown post-3pm solar (None) -> safe floor 85",
+              ea._deadline_target_pct(None) == 85, ea._deadline_target_pct(None))
+        ea.SEASONAL_DEADLINE_TARGET = False
+        check("rule37 kill-switch off -> fixed floor 85 regardless of solar",
+              ea._deadline_target_pct(0.0) == 85, ea._deadline_target_pct(0.0))
+    finally:
+        ea.SEASONAL_DEADLINE_TARGET = _saved
+
+
+def test_rule37_opportunistic_topup():
+    """Wired behaviour: winter (0 post-3pm solar → target 95) + cheap → the peak HOLD is overridden
+    to a gentle top-up toward 95; summer / expensive / kill-switch off leave the hold intact."""
+    def run(soc, price, hour, solar_after, seasonal=True):
+        _sv = ea.SEASONAL_DEADLINE_TARGET
+        ea.SEASONAL_DEADLINE_TARGET = seasonal
+        st = mk_state(soc, hour, price=price, solar_kw=2.0, remaining_corrected=3.0)
+        st["solar"]["forecast_after_deadline_kwh"] = solar_after
+        try:
+            return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
+        finally:
+            ea.SEASONAL_DEADLINE_TARGET = _sv
+
+    r = run(71, 8.0, 14, 0.0)   # winter, cheap, floor covered by solar
+    check("rule37 winter+cheap: opportunistic top-up overrides the hold to charge->95",
+          r["rule_fired"] == "peak_opportunistic_topup" and r["action"] == "charge"
+          and r["mode"] == "self_consumption" and r["target_pct"] == 95, r)
+    r = run(71, 8.0, 14, 6.0)   # summer: target == floor 85 → override must NOT fire
+    check("rule37 summer: hold preserved (solar covers, no grid top-up)",
+          r["rule_fired"] == "peak_solar_will_cover" and r["action"] == "hold", r)
+    r = run(88, 25.0, 13, 0.0)  # winter but expensive → cheap-gate blocks it
+    check("rule37 winter+expensive: cheap-gated, holds peak_target_met (no forced slam)",
+          r["rule_fired"] == "peak_target_met" and r["action"] == "hold", r)
+    r = run(88, 8.0, 13, 0.0)   # winter, cheap, in the 85–95 band → top up toward 95
+    check("rule37 winter+cheap above floor: top-up toward 95",
+          r["rule_fired"] == "peak_opportunistic_topup" and r["target_pct"] == 95, r)
+    r = run(71, 8.0, 14, 0.0, seasonal=False)  # kill-switch off
+    check("rule37 kill-switch off: no top-up, hold preserved",
+          r["rule_fired"] == "peak_solar_will_cover" and r["action"] == "hold", r)
+
+
 if __name__ == "__main__":
     for fn in [test_manual_override,
+               test_rule37_solar_after_hour,
+               test_rule37_deadline_target_pct,
+               test_rule37_opportunistic_topup,
                test_gentle_charge_reserve_small_gap,
                test_gentle_charge_reserve_clamps_at_target,
                test_gentle_charge_reserve_none_soc_falls_back_to_target,

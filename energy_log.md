@@ -3203,6 +3203,99 @@ daily (with a spring/summer watch on the quantile) until a cutover lever is chos
 infrastructure (knob + tests + harness + docs); Pi picks it up on its next cron. Pi live checkout was
 untouched during analysis (ran from `/tmp/lp_test`).
 
+## 2026-08-08 (live diagnosis → Rule 37 proposal: front-load the cheap floor at the hard rate)
+
+User asked at ~10:28am why the battery (16%) was on a slow ~1.6 kW trickle when price was at its **6¢
+daily floor (nothing cheaper ahead)** and solar was weak. Pulled the live cycles:
+- 07:00–09:00 rode at the **5% reserve** (deliberate item-② ride-down), holding for the cheap morning slot
+  (`wait_for_cheap_go_hard`, `go_hard_slot` ~8–9¢ a few hours out) — working as designed.
+- 09:30 price hit 9¢ → `peak_charge_now` but **gentle** (Rule 31 chase, reserve `SoC+6`); climbed 5→16% by
+  10:30 ≈ 1.5 kW.
+- 10:30: rule `solar_sponge_floor`, `charge_rate_intent=gentle`, **`goal_3pm_soc=85` but the solar-only
+  `projected_3pm_soc=17`**, `kwh_needed_85=5.2`, solar actuals 0.2–0.7 kW, `forecast_accuracy` bouncing
+  "poor(40%)"→"good(75%)". So the agent *knew* grid charging was essential and solar wouldn't bail it out —
+  and was still trickling the cheapest energy of the day.
+
+**Root cause (rule-ordering + pacing):** `solar_sponge_floor` (Rule 14) pre-empts the deadline maths and
+charges *gently to a 50% floor*; Rule 33 defers the 5 kW autonomous slam to the point-of-no-return (~1pm).
+So escalation lands at "the latest possible moment" — exactly what the user saw. Gentle-lead's two reasons
+to pace — *a cheaper slot may come* and *leave headroom for incoming solar* — are **both void** when price
+is flat-cheap and solar is unreliable, so the trickle had no upside and two costs (passes up the cheapest
+kWh; cuts the deadline close, forcing a late 5 kW slam).
+
+**User's fix (good — decouples RATE from TARGET):** don't wait; **charge HARD (autonomous ~5 kW) to a
+MIDDLE target (~50%), not 85%**, then pace the rest. Safe because the receding-horizon re-decides every
+30 min — "hard to 50% now" self-limits (max ~2.5 kWh/~18% SoC per cycle) and reverts the moment SoC hits
+~50%, solar turns reliable, or a cheaper slot appears. The 50% cap **preserves solar headroom** (honoured
+by the target, not by crippling the rate); `reserve=100` keeps autonomous **export-safe**. Day-profile
+becomes hard-front-load-to-~50% → gentle-lead-to-85%, replacing all-gentle-then-late-slam.
+
+**Written up as the Rule 37 proposal in `todo.md`** (gating conditions, precedence, kill-switch
+`FRONTLOAD_CHEAP_FLOOR`, tests, open decisions). **Not implemented — proposal awaiting user sign-off**;
+energy_rules.md Rule 37 to be written on implementation. Note this is the deterministic-layer twin of the LP
+work above: here the *rule* layer under-charges via pacing, while the LP `mpc_hold`s via plan-execution —
+same "front-load when flat-price + weak-solar" gap seen from both sides.
+
+**Design evolved same session (user's 2nd insight) — the TARGET should be solar-*after-3pm*-aware +
+seasonal, not a fixed 85%** (todo Rule 37 updated to two coupled parts: (A) front-load rate/timing, (B)
+seasonal target). The fixed "85% + top-15% headroom for solar" ignores solar TIMING: in winter solar peaks
+~1pm and is gone by ~4pm while the demand window starts at 3pm, so the reserved headroom is for solar
+already finished — wasted capacity (cheap midday kWh not banked = imported at ~20¢ that evening). **Surgical
+formula change:** `battery_grid_charge_target` should use `expected_solar_after_15:00` instead of
+`net_solar_remaining` (the total over-credits morning/midday solar, which helps you REACH the target, not
+fill headroom). Winter → target ≈ practical_max (~95); summer → lower + real headroom. Composes with (A):
+the >80% charge-rate taper makes a high winter target unreachable by 3pm from a midday start, so
+front-loading buys the time. Layer-2 follow-on: a monthly solar-after-3pm model in `build_models.py`
+(winter-only data so far). Demand-charge floor stays separate + inviolable.
+
+**Live confirmation the same afternoon (traced 12:00→14:00):** the day played out exactly as diagnosed —
+trickled 5→48% to 1pm (gentle sponge), **slammed autonomous 5 kW at 13:30** (56%→71% by 14:00 = the
+predicted late slam), then at **14:00 / 71% fired `peak_solar_will_cover` (reserve→5), STOPPING the cheap
+grid charge** to let ~2.68 kWh of *declining* solar limp toward the 85% target. In the 0.92h left it could
+have kept filling toward ~95–100% on cheap grid+solar, but capped at the season-blind 85%. **Control isn't
+"broken"** (71% is already ample demand-charge cover; solar-cover is cost-logical *for an 85% target*) — it
+is optimising to the wrong, too-low *winter* target. A clean live instance of Rule 37(B).
+
+**Narrative bug (user-flagged, narrative-only):** the 14:00 LLM summary opened *"Battery has reached 71% SoC
+… well above the 85% demand-window target"* — 71 < 85, and the very next clause says solar is needed *to
+reach* 85%, so the sentence contradicts itself. Structured data + control were correct; pure LLM slip in the
+free-text narrative (no control impact). **Same class as the open 2026-07-31 "narrate-the-wrong-number"
+item** — fold a narrative-accuracy guard into that fix (e.g. give the LLM the SoC-vs-target comparison
+pre-computed, or assert consistency before writing).
+
+## 2026-08-08 (Rule 37 Phase 1 — wired into the control path + tested; NOT deployed/committed)
+
+Decisions locked with the user (floor 85 / ceil 95 / autonomous / peak-only / live-solar, Phase-1-first).
+Built the seasonal two-tier deadline target and wired it in. **Kill-switch `SEASONAL_DEADLINE_TARGET`;
+default-safe.**
+
+- **Pure helpers** (`_corrected_solar_after_hour`, `_deadline_target_pct`) + constants `DEMAND_FLOOR_PCT=85`,
+  `PRACTICAL_MAX_PCT=95`, `RULE37_TOPUP_PRICE_CEIL=15`, `_RULE37_TOPUP_OVERRIDABLE`.
+- **State plumbing:** `get_current_state()` now computes `solar.forecast_after_deadline_kwh` (corrected
+  Solcast energy after 15:00, from `get_solar_forecast()` × `model_params` correction).
+- **`compute_decision_context`:** computes `deadline_target` (85–95); the peak gate runs up to it
+  (`soc < deadline_target`); a post-verdict **opportunistic top-up** overrides the "floor met/covered/on
+  track" HOLDs (`peak_target_met`/`peak_solar_will_cover`/`peak_on_track`) → gentle self_consumption charge
+  toward the target, **only** when `is_peak`, not in demand window, cheap, and `soc < target`. Logs
+  `solar_after_deadline_kwh` + `deadline_target_pct`.
+- **Two-tier safety (the whole point):** the deadline ESCALATION stays keyed to the 85 floor — the
+  demand-charge guarantee is byte-identical to today.
+
+**Two correctness fixes made *during* implementation (both caught by reading the tree, not by the tests):**
+1. **Summer-guard:** the override is gated `deadline_target > DEMAND_FLOOR_PCT`, so in summer (target ==
+   floor) it never fires and solar is left to cover — without this it would grid-charge toward a floor solar
+   was about to fill. 2. **Absent → floor:** unknown post-3pm solar (empty/absent forecast, or kill-switch
+   off) returns the fixed floor 85, not an aggressive 95 — so a Solcast-detail outage degrades to today's
+   proven behaviour, and every existing test (which doesn't set the field) is unchanged.
+
+**Tests: +6 wiring cases (16 Rule 37 total), full suite 247 passed / 0 failed, zero regressions** (run in a
+full-checkout copy). The `winter+cheap → peak_opportunistic_topup` case reproduces today's 2pm/71% cycle and
+confirms the fix. **Not deployed, not committed.** Pending: the pre-deploy replay of the last ~8 days —
+caveat: historical `forecast_after_deadline_kwh` wasn't logged, so a retrospective replay needs a winter≈0
+assumption (or the new logging + wait for data); today's case is already unit-proven. **Deferred to deploy
+session:** aligning the `goal_3pm_soc` record field + the HA `battery_grid_charge_target` sensor to the
+seasonal target (display/deploy only; control already uses the new target).
+
 ## 2026-08-08 (morning-ea brief + seasonal observation: solar-headroom sink)
 
 Routine morning brief (peak day; agent healthy, data logger 3,020 obs, models rebuilt overnight

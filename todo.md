@@ -125,6 +125,99 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
 
 ### Immediate
 
+- [ ] ⚡ **PROPOSAL (awaiting sign-off) — Rule 37: front-load the cheap floor at the HARD rate to a
+  SOLAR-AWARE seasonal target.** Surfaced live 2026-08-08 (user, two questions). **Diagnosis:** on a peak
+  day with SoC 16%, price at its **6¢ daily floor (nothing cheaper ahead)**, solar **weak/unreliable**
+  (actuals 0.2–0.7 kW; `forecast_accuracy` bouncing poor), the agent's own **solar-only 3pm projection was
+  17% vs the 85% goal** — yet it was **trickling at ~1.6 kW** (`solar_sponge_floor` → gentle). Two rules
+  combine to defer the hard charge to the last moment: `solar_sponge_floor` (Rule 14) pre-empts the deadline
+  maths and charges *gently to 50%*, and Rule 33 reserves the 5 kW autonomous slam for the point-of-no-return
+  (~1pm here). So it passes up the cheapest guaranteed energy of the day and cuts the deadline close.
+  **Gentle-lead's two justifications — "a cheaper slot may come" and "leave headroom for incoming solar" —
+  are BOTH void when price is flat-cheap and solar is unreliable.** The design has **two coupled parts**:
+
+  **(A) RATE/TIMING — front-load hard early (user's first idea).** Don't wait to the last moment: **charge
+  HARD (autonomous ~5 kW, `reserve=100` → export-safe) toward the day's target**, rather than trickling to
+  the deadline. Because every cycle re-decides, committing to "hard now" is low-risk — the moment SoC reaches
+  the target, or solar turns reliable, or a cheaper slot appears, the **next cycle reverts** to gentle/hold.
+  Receding-horizon bound: only ever "hard for the next 30 min" ≈ max 2.5 kWh (~18% SoC) before re-decision,
+  so it can't run away.
+
+  **(B) TARGET — solar-*after-3pm*-aware, seasonal (user's second insight, the deeper fix).** The current
+  fixed "85% + top-15% headroom for solar" **ignores solar TIMING, which is seasonal**. The headroom only
+  makes sense if solar is still coming to fill it. In **winter** solar peaks ~1pm and is gone by ~4pm while
+  the demand window starts at 3pm — so the reserved headroom is for solar that's already finished (today:
+  76% at 2:15pm, "might reach 85% then it's gone, never gets to 100%"). It's wasted capacity: every kWh not
+  banked at the ~6–8¢ midday sponge is imported later at ~18–24¢. **Summer inverts** — strong late-afternoon
+  solar makes headroom valuable (absorbs real excess, dodges the 10am–3pm export penalty).
+  - **Refinement (mine):** the driver is NOT peak solar *magnitude* but **expected corrected solar generated
+    AFTER the demand-window start (15:00)** — the only solar that can still fill headroom. The surgical
+    change to the existing `battery_grid_charge_target` formula is to **replace `net_solar_remaining` (total
+    remaining today) with `expected_solar_after_15:00`**, because total remaining over-credits the
+    morning/midday solar (which helps you REACH the target, not fill headroom).
+  - **Target formula (shape; constants tunable/calibrated):**
+    `deadline_target_pct = clamp(practical_max_pct − expected_solar_after_15:00_kwh / capacity_kwh × 100,
+    demand_floor_pct, practical_max_pct)`. Winter (post-3pm solar ≈ 0) → target ≈ `practical_max` (~95);
+    summer (post-3pm solar large) → lower, leaving headroom = the solar that will actually arrive.
+  - **Physics ceiling ties A↔B together:** the charge rate collapses >80% (live: 0.96 kW @80, 0.72 @90), so
+    a high winter target is UNreachable by 3pm from a midday start (why today is stuck ~85). **Front-loading
+    (A) is what buys the time to reach a high winter target (B)** — the two compose. In winter: front-load
+    hard toward a high target (no headroom to protect). In summer: front-load to a lower target, let
+    afternoon solar finish + keep headroom. So (A)'s old fixed "middle cap" becomes the seasonal target (B).
+
+  - **Gating (Rule 37 fires autonomous→`deadline_target` when ALL hold):**
+    1. peak month, **charging genuinely needed** (SoC < target AND solar-only 3pm projection < goal);
+    2. **this is ~the cheapest energy available** — price ≤ sponge threshold (~10¢) OR no cheaper slot ahead
+       (`go_hard_slot` null / `forward_min ≥ price − margin`) — else defer (existing Rule 22);
+    3. **near-term solar won't cover** — `solar_unreliable` OR poor `forecast_accuracy` OR small
+       `expected_solar_after_15:00` vs `kwh_needed` — else keep gentle + headroom;
+    4. SoC < `deadline_target`; and **never in the demand window** (3–9pm).
+  - **Precedence/interactions:** fires *before* `solar_sponge_floor` (upgrades its rate); above the target
+    hands to Rule 31 (gentle chase) + Rule 33 (escalation); Rule 2 demand-window guard + all safety
+    automations untouched. **Kill-switch `FRONTLOAD_CHEAP_FLOOR`**. The **demand-charge safety floor stays
+    separate + inviolable** (`demand_floor_pct` — enough to cover 3–9pm without import; never dropped by the
+    solar-timing logic, which only sets how far *above* the floor to aim). Longevity is a non-issue here: we
+    cycle through the high SoC into the evening window (+ overnight ride-down), not *park* at 100%.
+  - **Layer-2 follow-on — monthly solar-shape model in `build_models.py`:** v1 sources
+    `expected_solar_after_15:00` **live** (Solcast forward forecast × per-hour `solar_correction`) — works in
+    any season immediately. Add a **monthly seasonal prior** (energy_log.db → expected generation-after-3pm
+    by month) as a low-variance smoother. **Data reality: only winter is logged so far (obs_days 62,
+    ~Jun–Aug); summer months fill in as we reach them** — dovetails with the morning-brief spring/summer
+    watch. Evidence for the curve shape already in `model_params`: `solar_correction` table peaks at 13:00
+    and *ends at hour 16*.
+  - **Tests to add:** fires on flat-cheap + unreliable-solar + SoC<target + no-cheaper-slot; does NOT fire
+    when a cheaper slot is ahead; does NOT fire when solar reliably covers; reverts at ≥target; never in
+    demand window; kill-switch off = old behaviour; **target is high in winter (post-3pm solar≈0) and lower
+    in summer (post-3pm solar large)**; target never below `demand_floor_pct`.
+  - **Open decisions before implementing:** (a) **`practical_max_pct`** — 95 (leave a 5% longevity margin)
+    vs a true 100 in deep winter? (b) **`demand_floor_pct`** — the inviolable 3–9pm safety floor (was the
+    conservative 85; the real evening need is ~40–50% — decide the number); (c) **rate** — autonomous 5 kW is
+    the only hard rate today (±~18% SoC/cycle granularity) vs building a "medium" ~4 kW (`offset+10`) for
+    finer capping; (d) whether to also apply the front-load test to the overnight `nonpeak_*` price-blind
+    escalations (likely a separate follow-up). **Not implemented — proposal only; energy_rules.md Rule 37 +
+    the `battery_grid_charge_target` formula change to be written on implementation.** See energy_log 2026-08-08.
+  - **DECISIONS LOCKED 2026-08-08:** `demand_floor_pct=85` (kept — v1 only ever charges *more* than today,
+    never less), `practical_max_pct=95`, rate=autonomous 5 kW, scope=peak-path only, solar source=live
+    Solcast detailed forecast × correction. Phase-1-first sequencing.
+  - **⚠️ TWO-TIER refinement found while reading the tree (needs a nod before wiring):** the deadline
+    ESCALATION (`peak_deadline_autonomous` etc., "price irrelevant, demand charge dwarfs cost") must stay
+    keyed to **`DEMAND_FLOOR_PCT` (85)** — the 85→95 portion is *opportunistic arbitrage* and must be
+    filled ONLY via cheap-window branches (sponge / price≤threshold / no-cheaper-slot), **never** a forced
+    autonomous slam at a high price. So the target is two-tier: 85 = at-any-cost safety (escalation), 95 =
+    cheap-only ceiling. This keeps the demand-charge guarantee byte-identical to today.
+  - **Phase-1 DONE (built + WIRED + tested, NOT deployed/committed):** helpers + state plumbing
+    (`get_current_state` → `solar.forecast_after_deadline_kwh`) + `compute_decision_context` (peak gate to
+    `deadline_target`; opportunistic top-up override on the floor-met holds; logs target + post-3pm solar).
+    Two-tier: escalation stays on the 85 floor. **+6 wiring tests (16 Rule 37 total); full suite 247/0, zero
+    regressions.** The `winter+cheap` test reproduces today's 2pm/71% cycle. Two fixes made while wiring:
+    summer-guard (`deadline_target > floor`) and absent→floor (safe default on missing data / kill-switch off).
+  - ▶️ **NEXT:** (1) pre-deploy replay of the last ~8 days — caveat: `forecast_after_deadline_kwh` wasn't
+    logged historically, so needs a winter≈0 assumption or the new logging + wait; today's case is unit-proven.
+    (2) Deploy session: align `goal_3pm_soc` record field + the HA `battery_grid_charge_target` sensor to the
+    seasonal target (display/deploy only). (3) Then Phase 2 (front-load rate) once Phase 1 is proven live.
+  - **Aside (pre-existing smell):** 6 tests in `test_decision.py` claim "no HTTP" but hit HA and fail
+    without a valid `HA_TOKEN` (`sent=[]`) — worth making hermetic (mock the HA calls) in a separate cleanup.
+
 - [ ] 🔬 **LP-to-control — robustness knob validation (started 2026-08-08, replay-first).** Built two
   default-off levers + an offline sweep to advance the shadow LP toward control:
   - **`solar_quantile_k`** (`optimizer.py`, DONE + 9 tests, 34 optimizer pass) — per-hour conservative
