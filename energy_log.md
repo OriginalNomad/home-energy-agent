@@ -3338,3 +3338,74 @@ rather than exporting at a penalty.
   the demand-window strategy still applies alongside the surplus-sink one). Depends on knowing plug-in
   state, which is exactly the **EV journal block (todo ④)** — so ④ is a prerequisite for measuring how
   often summer surplus actually has nowhere to go.
+
+## 2026-08-09 (morning brief + today's misstep → Rule 37 Phase 2 seasonal-timing design)
+
+Routine morning brief (peak day, August; agent healthy at 81% SoC/autonomous by 2pm, well-placed for the
+3–9pm window; data logger 3,081 obs / 63 obs-days; **nightly model retrain confirmed running** —
+`model_params.built_at 2026-08-09`, closing the old "cron the rebuild" item; det↔LP 58/77 = 75.3% last 2
+days, all divergences the benign robust-MPC winter-solar class, no bugs; SolarEdge ~1pm stall still
+recurring, cosmetic). ② survival-floor ride-down **validated live**: SoC rode to 5% at 07:30 and recharged
+at the cheap sponge with no morning spike.
+
+**User flagged today as a miss and asked for an assessment. Traced the full decision + forecast history.**
+
+**What happened:** cloudy day (solar ~0.5× forecast). SoC rode to 5% at 07:30, then the agent **held / slow-
+charged (`wait_for_cheap_go_hard` at spread 0.0, then `peak_deadline_gentle_lead` self_consumption ~1.67 kW)
+through the cheap flat morning**, creeping 5%→47% by 13:00, then was **forced into an autonomous 5 kW slam
+(`peak_deadline_autonomous`) 47%→81% in the single hour 13:00–14:00** — landing the bulk of the day's grid
+import in an **18–20¢ price window**. Morning grid had been a flat **13–14¢**.
+
+**Key correction to the framing (important — changes the fix):** the 18–20¢ spike was **NOT in the price
+forecast until ~12:00**. Reconstructed the forecast-evolution from `price_forecast_6h` on every cycle: right
+through 11:30 every cycle forecast the 12:30–14:00 deadline slots at **13–14¢** (flat). The spike entered the
+forecast only at 12:00 (12:30 slot → 18) and 12:30 (13:00 slot → 18), ~30–60 min before it hit. **So this
+was a late Amber forecast revision, not a spike the agent could have predicted** — "charge earlier because
+waiting will cost more" isn't supported by the curve it held.
+
+**The real, self-inflicted miss (endorses the user's instinct, different mechanism):** a **front-load /
+insurance gap**, = the already-queued **Rule 37 Phase 2 (front-load rate)**. On a peak day, from 5% SoC, with
+a *confirmed flat-cheap* morning, the robust move is to **bank the energy early at the known price** rather
+than defer for a sub-2¢ prospective saving (spread was 0.0 most of 08:00–10:00 — nothing to wait for) and
+leave a large refill concentrated in the last 2 h, exposed to exactly this kind of late revision. The shadow
+LP made the *same* under-charge call (`grid_charge_now_kw=0` at 09:00), trusting the same flat forecast —
+textbook cause-(b). Cost of the miss ≈ **~30¢ today** (the ~5.5 kWh slammed at ~19¢ vs ~13.5¢ if front-
+loaded); small in dollars but **systematic on every cloudy low-overnight-SoC peak day**.
+
+**User's design insight (the substance of the session) — make the front-load TIMING seasonal, not clock-
+fixed.** Yesterday's Rule 37 made the target *level* seasonal (deadline SoC from post-3pm solar); today the
+user proposed the target *timing* be seasonal too: aim for X% by **peak-solar time**, computed as a **rolling
+average** of the daily solar peak over a trailing window (their example: ±10 days) so it tracks the season
+automatically, instead of a hardcoded "late morning." **Grounded it in the logged data** (`observations.
+solar_actual_kw`, already logged every cycle — no new data needed):
+
+- Rolling **21-day**: argmax peak-solar **13:17** (sd 0.75 h), solar-weighted **centroid 12:58** (sd 0.71 h).
+- Last **7 days**: argmax 13:13, centroid 12:41.
+- → Stable to ±0.7 h and visibly season-dragging. **Measured peak is ~1pm, not the user's eyeballed "noon"**
+  (~40 min early on centroid) — matters for the offset below. Feasible to emit nightly from `build_models.py`
+  exactly like the charge-rate / solar-correction tables.
+
+**Three guardrails identified (a naive "X% by peak-solar" breaks on all three):**
+1. **Target the level *before* the peak, not *at* it** → front-load deadline = `peak_solar_time − onset_offset`
+   (~1–1.5 h). Aiming *at* the peak grid-charges right through the productive solar ramp, eating the very
+   headroom you wanted for free solar. (This is roughly where the "noon" intuition was pointing.)
+2. **Timing ≠ delivery** — peak-solar *time* says when solar peaks, not whether it shows up. Today (cloudy)
+   the battery still needed grid past 1pm. So: peak-solar-time sets the **deadline by which insurance must be
+   banked**; a **separate live solar-delivery check** (forecast-accuracy + on-track generation) decides
+   whether grid-charging may *stop*. The front-load win holds regardless of cloud — the energy just gets
+   bought earlier and more evenly, dodging late spikes.
+3. **DST is a step-change** — Sydney DST (early Oct) jumps peak-solar *clock* time ~1 h overnight; a trailing
+   clock-average smears across it for ~2 weeks right at the season boundary. Compute the centroid in
+   **standard/solar time and convert**, or make the window DST-aware.
+- Also: prefer the **solar-weighted centroid over the argmax** — argmax is thrown by cloudy days (07-30 →
+  15:30 on a 0.9 kW washout; centroid barely moved).
+
+**Unifying point:** one rolling `peak_solar_time` anchors **both** halves of the daytime shape — front-load
+cheap grid *before* it, back off grid + leave headroom *after* it (yesterday's summer surplus-sink). Same
+seasonal number, opposite sides. This is the "rule-set that naturally adjusts to the seasons" the user is
+after.
+
+**Outcome:** written up as the **Rule 37 Phase 2 design** in `todo.md` (three guardrails as explicit sub-
+items) with today as its motivating case. **Spec only — no code, no config, no rule shipped.** Rule 37
+Phase 1 remains inert (`SEASONAL_DEADLINE_TARGET=False`); enable it on a morning first (today's runway was
+already gone by brief time), prove it live, *then* build Phase 2 on this seasonal-timing anchor.

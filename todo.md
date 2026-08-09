@@ -223,6 +223,34 @@ the demand-window guard (Rule 2) and Layer-3 safety automations were untouched b
     logged historically, so needs a winter≈0 assumption or the new logging + wait; today's case is unit-proven.
     (2) Deploy session: align `goal_3pm_soc` record field + the HA `battery_grid_charge_target` sensor to the
     seasonal target (display/deploy only). (3) Then Phase 2 (front-load rate) once Phase 1 is proven live.
+  - **▶️ PHASE 2 DESIGN — seasonal-timing anchor (user, 2026-08-09; spec only, build after Phase 1 proven).**
+    Phase 2's front-load ("hard/early") needs a *by-when* target. **Don't hardcode "late morning" — make the
+    timing seasonal**, the timing-analogue of Phase 1's seasonal target *level*. Aim for the insurance-% by a
+    **rolling `peak_solar_time`**, computed nightly in `build_models.py` from `observations.solar_actual_kw`
+    (already logged every cycle — no new data). **Data check (2026-08-09):** rolling 21-day argmax **13:17**
+    (sd 0.75 h) / **solar-weighted centroid 12:58** (sd 0.71 h); last 7d centroid 12:41 — stable to ±0.7 h
+    and visibly season-dragging. **Motivating case = today's miss** (cloudy; held/slow-charged the flat-cheap
+    13–14¢ morning from 5% SoC, forced into an autonomous 47%→81% slam at 13:00–14:00 that landed on an 18–20¢
+    spike; the spike was a *late Amber revision*, NOT forecast until ~12:00 — so the fix is front-load
+    insurance, not spike-prediction). Full trace in energy_log 2026-08-09.
+    - **Guardrail 1 — target BEFORE the peak, not AT it:** front-load deadline = `peak_solar_time −
+      onset_offset` (~1–1.5 h). Aiming at the peak grid-charges through the productive solar ramp, eating the
+      free-solar headroom.
+    - **Guardrail 2 — timing ≠ delivery:** peak-solar *time* sets the deadline by which insurance must be
+      banked; a **separate live solar-delivery gate** (forecast-accuracy + on-track generation) decides
+      whether grid-charging may *stop*. On a cloudy day (today) it keeps buying — but earlier/evener, dodging
+      late spikes.
+    - **Guardrail 3 — DST is a step-change:** Sydney DST (early Oct) jumps peak-solar *clock* time ~1 h
+      overnight; a trailing clock-average smears across it for ~2 weeks. Compute the centroid in
+      standard/solar time and convert, or make the window DST-aware.
+    - **Use the solar-weighted centroid, not the argmax** (argmax is thrown by cloudy days: 07-30 → 15:30 on a
+      0.9 kW washout; centroid barely moved).
+    - **Unifying note:** one rolling `peak_solar_time` anchors BOTH sides of the daytime shape — front-load
+      cheap grid *before* it, back off grid + leave headroom *after* it (the summer surplus-sink item). Same
+      seasonal number, opposite sides = the "rule-set that naturally adjusts to the seasons."
+    - Also fold in the **`wait_for_cheap_go_hard` thin-margin/deadline tweak** exposed today: on a peak day
+      from low SoC, don't hold a large refill for a sub-~2¢ spread, and bound the forward-min it chases to
+      *before* the 3pm deadline (today it partly compared against an 11¢ slot that fell after the window).
   - **Aside (pre-existing smell):** 6 tests in `test_decision.py` claim "no HTTP" but hit HA and fail
     without a valid `HA_TOKEN` (`sent=[]`) — worth making hermetic (mock the HA calls) in a separate cleanup.
 
