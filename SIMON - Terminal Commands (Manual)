@@ -1,6 +1,7 @@
 
 ** To run the agent now **
-        ssh energypi.local "cd home-energy-agent && git pull -q && agent/venv/bin/python agent/energy_agent.py 2>&1"
+
+ssh energypi.local "cd home-energy-agent && git pull -q && agent/venv/bin/python agent/energy_agent.py 2>&1"
 
 
 

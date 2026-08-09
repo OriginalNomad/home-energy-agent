@@ -109,6 +109,93 @@ models (Layer 2 below) will feed calibrated inputs into the LP optimiser when bu
 
 ---
 
+## Home network topology (physical infrastructure)
+
+*Added 2026-07-30 after a power-outage recovery exposed how fragile the addressing was.
+This is the network the Pi, Powerwall, and inverter actually live on — foundational to
+every local integration in this system.*
+
+### Two routers in series (a double-NAT)
+
+The house runs **two routers**, which is the root cause of several recurring failures:
+
+```
+Internet ──► Telstra NBN modem  (192.168.0.1/24, hostname "mymodem")
+                 │   SSID: TelstraNBN-1A  (2.4G + 5G, same name)
+                 ├── SolarEdge inverter (Wi-Fi)   ← the ONLY device on this side
+                 └── TP-Link Deco  (WAN uplink leased 192.168.0.119)
+                          │
+                          ▼   Deco runs in ROUTER mode → its own subnet
+                     Deco mesh network  (192.168.68.1/24)
+                          ├── energy-Pi   (Home Assistant host)
+                          ├── Tesla Powerwall gateway
+                          ├── Mac Studio · Meross hub + thermostats · Arlo hub
+                          └── everything else
+```
+
+- **Telstra modem** — `192.168.0.0/24`, gateway `192.168.0.1`. The primary router; the Deco uplinks to it.
+- **TP-Link Deco (BE65 mesh)** — runs in **Router mode**, creating a *second*, private `192.168.68.0/24` network behind the Telstra modem (a double-NAT). **Everything except the inverter lives here.**
+
+Devices on the Telstra side cannot initiate connections *into* the Deco side — that NAT boundary is why the Pi and the Powerwall couldn't see each other until the Pi was moved (below).
+
+### Why the inverter is on the Telstra side — and why that's fine
+
+The SolarEdge inverter's built-in Wi-Fi is an old **FS Forth-Systeme** 2.4 GHz module (MAC OUI `00:04:F3`) that **will only join the Telstra modem's Wi-Fi** — it refuses the Deco mesh (band-steering / WPA handling). So it sits alone on the `192.168.0.x` island.
+
+This does **not** matter to Home Assistant, because **the inverter is read via the SolarEdge cloud API, not locally.** It only needs internet, which the Telstra side provides. HA never talks to it over the LAN.
+
+### Why the Pi MUST be on the Deco side
+
+The **Powerwall integration is local** — HA connects directly to the gateway over the LAN. The gateway is on the Deco network (`192.168.68.51`), so **the Pi has to be on the Deco network too**, or the two can't reach each other across the double-NAT. On **2026-07-30 the Pi was re-cabled from the Telstra modem to a Deco LAN port** for exactly this reason; the Powerwall integration only connects with the Pi on `192.168.68.x`.
+
+Bonus: `energypi.local` mDNS only resolves *within a single network segment*. With the Pi and Mac now both on the Deco, `http://energypi.local:8123` resolves again (it didn't while they were split across the two routers).
+
+### Reserved addresses
+
+**Telstra modem — `192.168.0.0/24`** (static lease):
+
+| Device | IP | MAC | Notes |
+|---|---|---|---|
+| SolarEdge inverter — Wi-Fi | `192.168.0.146` | `00:04:F3:21:9B:85` | FS Forth-Systeme module; SSID `TelstraNBN-1A` |
+| SolarEdge inverter — Ethernet (unused) | `0.0.0.0` | `00:27:02:16:A9:36` | SolarEdge's own OUI; no cable plugged in |
+
+**Deco — `192.168.68.0/24`** (address reservations):
+
+| Device | IP | MAC |
+|---|---|---|
+| Tesla Powerwall gateway | `192.168.68.51` | `28:0F:EB:91:6D:F0` |
+| Meross Hub (MSH400) | `192.168.68.54` | `C4:E7:AE:22:A2:11` |
+| Meross thermostat (Kitchen) | `192.168.68.57` | `48:E1:E9:A5:2C:7B` |
+| Meross thermostat (Hallway) | `192.168.68.58` | `48:E1:E9:A5:44:5F` |
+| Mac Studio | `192.168.68.67` | `D2:0E:FF:10:FA:36` |
+| Arlo Home Hub | `192.168.68.69` | `A4:11:62:A3:0E:79` |
+| energy-Pi (HA host) | `192.168.68.76` | `88:A2:9E:E5:82:30` |
+
+> **Powerwall gateway login** — the local-API password is the **last 5 characters of the
+> gateway serial number**, and it lives in the **password manager, not this repo** (secrets
+> policy — the repo is pushed to GitHub). The gateway shows in the Deco client list as
+> "Tesla Powerwall Energy Gateway".
+
+### ⚠️ DHCP lease is 1 hour — reserve everything HA depends on
+
+The Telstra modem's DHCP lease time is **1 hour** with no reservations by default, so after
+any power cut or router reboot devices grab fresh IPs — which **silently breaks every
+integration pinned to an address** (the Powerwall local connection, `.local` names). The
+whole 2026-07-30 outage cascade (Powerwall integration dead, HA unreachable by name,
+inverter on a shifted subnet) was this and nothing more. **Rule: every device HA depends on
+gets a static lease / reservation** on whichever router it sits behind.
+
+### Post-outage gotcha: inverter firmware auto-update
+
+After the same outage the inverter **auto-installed a firmware update**, rejoined Wi-Fi fine
+(strong RSSI) but its **cloud-monitoring service didn't resume** — HA reported the SolarEdge
+sensor "stale ~19h" while the panels were actually producing. **Fix: a clean inverter
+restart**, after which it flushed its backlog to the SolarEdge cloud and HA caught up.
+First diagnostic for a future "stale" alert: check the mySolarEdge app — if the portal is
+*also* flat, it's the inverter, not HA.
+
+---
+
 ## Background and motivation
 
 The current system (`agent/energy_agent.py`) runs every 30 minutes, reads sensor state
