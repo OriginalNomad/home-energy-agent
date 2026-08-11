@@ -1278,7 +1278,7 @@ PEAK_EVE_RUNUP = True
 # gives a full day of runway before the demand window. NB: the state plumbing + logging run
 # regardless, so `forecast_after_deadline_kwh` / `deadline_target_pct` are collected live even while
 # off — data for the replay and the informed enable. Flip to True (+ push) to activate.
-SEASONAL_DEADLINE_TARGET = False
+SEASONAL_DEADLINE_TARGET = True
 DEMAND_FLOOR_PCT   = 85    # inviolable peak-month safety floor (escalation keyed here)
 PRACTICAL_MAX_PCT  = 95    # opportunistic ceiling (5% longevity / forecast-error margin)
 RULE37_TOPUP_PRICE_CEIL = 15.0   # ¢ — sponge-window cheap ceiling for the opportunistic top-up
