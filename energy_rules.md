@@ -1197,11 +1197,10 @@ export safety-net `battery_autonomous_export_safety_net` (rare + diagnostic).
 
 ---
 
-### Rule 37 — Seasonal, solar-*after-3pm*-aware deadline target (Phase 1) ⚠️ BUILT BUT DISABLED
+### Rule 37 — Seasonal, solar-*after-3pm*-aware deadline target ✅ LIVE
 
-**Added 2026-08-08 (commit `c2aefb4`). SHIPPED DEFAULT-OFF (`SEASONAL_DEADLINE_TARGET = False`) — inert on
-the Pi (behaviour byte-identical to today) until a MORNING enable gives a full day of runway before the
-demand window. This entry documents the rule as built; flip the flag to `True` + push to activate.**
+**Added 2026-08-08 (commit `c2aefb4`). Phase 1 enabled 2026-08-12 (`SEASONAL_DEADLINE_TARGET = True`).
+Phase 2 (front-load rate) added 2026-08-12 (`FRONTLOAD_CHEAP_FLOOR = True`).** Both live on the Pi.
 
 **Problem.** The peak fill target was a fixed **85% + "leave the top 15% for solar"**. That reserved
 headroom only pays off if solar is still coming to fill it — but in **winter** solar peaks ~1pm and is
@@ -1237,11 +1236,46 @@ escalation (those are charges), never in the demand window, never at autonomous.
 fires (all today's behaviour). The state plumbing + logging (`forecast_after_deadline_kwh`,
 `deadline_target_pct`) run regardless, so the data is collected live even while disabled.
 
-**Phase 2 (not built): front-load rate.** Make the top-up *hard and early* (autonomous to the target during
-the cheap window) rather than gentle, so a high winter target is reachable despite the >80% charge-rate
-taper. Deferred until Phase 1 is proven live. Also deferred to the enable session: aligning `goal_3pm_soc`
-+ the HA `battery_grid_charge_target` sensor formula to the seasonal target (display only — control already
-uses `deadline_target`). Full record: energy_log 2026-08-08.
+**Phase 2 — front-load the demand floor at autonomous rate.** Added 2026-08-12. Post-processing override:
+when the decision tree charges gently (self_consumption) toward the 85% demand floor and energy is cheap
+(≤ sponge threshold, or in sponge ≤ 15¢), upgrades to **autonomous** (~5 kW). Scoped to `SoC <
+DEMAND_FLOOR_PCT` (85) — the HA revert automation (`battery_autonomous_revert_target_reached`) fires at ~85%
+and switches back to self_consumption; Phase 1's gentle 85→seasonal top-up is unaffected. Overridable
+verdicts: `peak_sponge_selfcons`, `peak_deadline_gentle_lead`, `solar_sponge_floor`, `peak_charge_now`,
+`peak_deadline_selfcons`, `peak_solar_cover_survival`. **Kill-switch `FRONTLOAD_CHEAP_FLOOR`.** Off → no
+rate upgrade (gentle-only floor charges, original behaviour). Rule_fired: `peak_frontload_cheap`.
+
+**Still open:** align the HA `battery_grid_charge_target` sensor formula to the seasonal `deadline_target`
+so Phase 2 can eventually front-load to the seasonal ceiling (95% in winter) at autonomous rate, not just
+the 85% floor. The current sensor uses `remaining_solar` (total remaining) instead of post-3pm solar. This
+is display/deploy only — control already uses `deadline_target`.
+
+---
+
+### Rule 38 — Overnight insurance for peak-day eves ✅ LIVE
+
+**Added 2026-08-12 (`OVERNIGHT_INSURANCE = True`).** Post-processing override: on a peak-day nighttime hold
+(`wait_for_cheap_go_hard`, `peak_early_morning_hold`, or `survival_floor_defend`), if the battery is
+projected to drain below `OVERNIGHT_INSURANCE_MARGIN_PCT` (15%) before Solar Sponge start (10am), gently
+charges to a survive-to-sponge target via self_consumption.
+
+**Problem solved.** The battery would ride to 5% overnight on peak-day eves — `wait_for_cheap_go_hard` held
+all night waiting for a cheap sponge window that was 10+ hours away, draining the battery through the 5%
+floor. The emergency HA automation then slammed 5 kW at whatever the early-morning spot price was (~18–20¢),
+and/or the agent scrambled with an expensive morning charge. With insurance, the battery arrives at sponge
+with ≥15% SoC, avoiding the emergency path and starting the morning charge from a higher base.
+
+**Survive-to-sponge target.**
+`survive_target = min(soc + (MARGIN − projected_soc_at_sponge), DEMAND_FLOOR_PCT)`. Clamped at `soc + 1`
+(minimum progress) and `DEMAND_FLOOR_PCT` (85, upper cap — sponge handles the rest). Uses actual
+`home_load_kw` for drain projection.
+
+**Guards.** Peak month only. Nighttime only (20:00–07:00). Price ≤ `OVERNIGHT_INSURANCE_PRICE_CEIL` (22¢).
+Never in the demand window. Fires AFTER Rule 30 (survival floor) so it can upgrade Rule 30's 20% target if
+20% isn't enough to survive to sponge.
+
+**Kill-switch `OVERNIGHT_INSURANCE`.** Off → old ride-to-floor-and-hope behaviour. Rule_fired:
+`overnight_insurance`.
 
 ---
 

@@ -1287,6 +1287,38 @@ RULE37_TOPUP_PRICE_CEIL = 15.0   # ¢ — sponge-window cheap ceiling for the op
 # peak_early_morning_hold, peak_survival_wait_for_sponge), which are deliberately deferring.
 _RULE37_TOPUP_OVERRIDABLE = frozenset({"peak_target_met", "peak_solar_will_cover", "peak_on_track"})
 
+# ── Rule 37 (Phase 2) — front-load the demand floor at autonomous rate ──────────────────
+# When the decision tree charges gently toward the 85% demand floor at a cheap price, upgrade
+# to autonomous (~5 kW). The existing HA revert automation (`battery_autonomous_revert_target_
+# reached`) fires at ~85%, so scoping to SoC < DEMAND_FLOOR_PCT is safe and doesn't need an
+# HA sensor change. Phase 1's gentle 85→seasonal top-up is unaffected (target > floor, SoC ≥
+# floor). Kill-switch: FRONTLOAD_CHEAP_FLOOR = False reverts to gentle-only floor charges.
+FRONTLOAD_CHEAP_FLOOR = True
+_RULE37P2_UPGRADEABLE = frozenset({
+    "peak_sponge_selfcons",        # in sponge, gentle to 85
+    "peak_deadline_gentle_lead",   # gentle lead before deadline
+    "solar_sponge_floor",          # early sponge, gentle to 50
+    "peak_charge_now",             # no cheaper slot, gentle to 85
+    "peak_deadline_selfcons",      # tight deadline, gentle
+    "peak_solar_cover_survival",   # survival case
+})
+
+# ── Rule 38 — overnight insurance for peak-day eves ─────────────────────────────────────
+# On a peak-day overnight hold, if the battery is projected to drain below a threshold before
+# Solar Sponge (10am), gently charge to a survive-to-sponge target. Prevents the recurring
+# "5% at dawn → rushed expensive morning charge" pattern. Fires AFTER Rule 30 (survival
+# floor) so it can upgrade Rule 30's 20% target if 20% isn't enough to survive to sponge.
+# Price-capped: won't charge at crazy overnight prices. Kill-switch: OVERNIGHT_INSURANCE =
+# False reverts to the old ride-to-floor-and-hope behaviour.
+OVERNIGHT_INSURANCE            = True
+OVERNIGHT_INSURANCE_MARGIN_PCT = 15     # arrive at sponge (10am) with at least this SoC
+OVERNIGHT_INSURANCE_PRICE_CEIL = 22.0   # ¢ — don't charge above this
+_RULE38_OVERRIDABLE = frozenset({
+    "wait_for_cheap_go_hard",      # peak overnight hold — cheaper slot ahead
+    "peak_early_morning_hold",     # peak morning hold — autonomous has time
+    "survival_floor_defend",       # Rule 30 — target (20%) may be too low to survive to sponge
+})
+
 
 def _corrected_solar_after_hour(periods, solar_correction=None, after_hour=15, min_samples=5):
     """Corrected Solcast energy (kWh) from half-hourly forecast periods starting at/after
@@ -2108,6 +2140,41 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             and rec.get("rule_fired") in _RULE37_TOPUP_OVERRIDABLE
             and soc < deadline_target and _rule37_cheap):
         rec = verdict("charge", deadline_target, "self_consumption", "peak_opportunistic_topup")
+
+    # Rule 37 Phase 2 — front-load the demand floor at autonomous rate. When the verdict is a
+    # gentle charge toward the 85% floor and energy is cheap, upgrade to autonomous (5 kW) to
+    # bank the cheap energy faster. The HA revert automation fires at ~85% and switches back to
+    # self_consumption; Phase 1 then handles the 85→seasonal opportunistic top-up gently.
+    if (FRONTLOAD_CHEAP_FLOOR and is_peak and not in_demand
+            and rec.get("action") == "charge"
+            and rec.get("mode") == "self_consumption"
+            and rec.get("rule_fired") in _RULE37P2_UPGRADEABLE
+            and soc < DEMAND_FLOOR_PCT
+            and _rule37_cheap):
+        rec = verdict("charge", DEMAND_FLOOR_PCT, "autonomous", "peak_frontload_cheap")
+
+    # Rule 38 — overnight insurance for peak-day eves. On a nighttime peak-day hold (or Rule
+    # 30's low survive target), if the battery is projected to drain below the margin before
+    # Solar Sponge (10am), gently charge to a survive-to-sponge target. This prevents the
+    # recurring "5% at dawn → emergency 5 kW slam at expensive morning price" pattern.
+    _insurance_night = now_h >= 20 or now_h < 7
+    if (OVERNIGHT_INSURANCE and is_peak and not in_demand
+            and _insurance_night
+            and price <= OVERNIGHT_INSURANCE_PRICE_CEIL
+            and rec.get("rule_fired") in _RULE38_OVERRIDABLE):
+        if now_h >= 20:
+            _hrs_to_sponge = (24.0 - now_h) + 10.0
+        else:
+            _hrs_to_sponge = 10.0 - now_h
+        _projected_soc = soc - (home_load_kw * _hrs_to_sponge / USABLE_KWH * 100)
+        if _projected_soc < OVERNIGHT_INSURANCE_MARGIN_PCT:
+            _survive_target = min(
+                round(soc + (OVERNIGHT_INSURANCE_MARGIN_PCT - _projected_soc)),
+                DEMAND_FLOOR_PCT,
+            )
+            _survive_target = max(_survive_target, round(soc) + 1)
+            rec = verdict("charge", _survive_target, "self_consumption",
+                          "overnight_insurance")
 
     return {
         "now_h":               round(now_h, 2),

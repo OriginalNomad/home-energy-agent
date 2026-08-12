@@ -221,12 +221,14 @@ def test_peak_charge_now_when_no_cheaper_slot():
     # SoC=50%, 8:30am, all prices flat at 10¢ (at Solar Sponge threshold).
     # Price is at/below threshold so Rule 26 doesn't apply — charge now.
     # No cheaper slot exists (flat forecast, need 1¢ below 10¢ to find one).
+    # Phase 2 upgrades to autonomous because price is cheap and SoC < 85%.
     state = mk_state(50, 8, "na", 0.0, 0.0, price=10.0)
     ctx = ea.compute_decision_context(state, flat(10), [], now_at(8, 30))
     r = ctx["recommended"]
-    check("peak_charge_now when price at threshold", r["rule_fired"] == "peak_charge_now", r)
+    check("peak_charge_now at threshold → Phase 2 front-loads",
+          r["rule_fired"] == "peak_frontload_cheap", r)
     check("action is charge", r["action"] == "charge", r)
-    check("mode is self_consumption (not urgent enough for autonomous)", r["mode"] == "self_consumption", r)
+    check("mode is autonomous (Phase 2 front-load)", r["mode"] == "autonomous", r)
 
 
 def test_peak_early_morning_hold_on_price_spike():
@@ -243,11 +245,12 @@ def test_peak_early_morning_hold_on_price_spike():
 def test_peak_early_morning_hold_not_fired_when_cheap():
     # SoC=35%, 5am, price=8¢ — genuinely cheap, below Solar Sponge threshold.
     # overnight_hold requires price > 10¢, so the early-morning guard doesn't apply.
-    # → charge now (peak_charge_now).
+    # → charge now, then Phase 2 upgrades to autonomous (front-load cheap).
     state = mk_state(35, 5, "na", 0.0, 0.0, price=8.0)
     ctx = ea.compute_decision_context(state, flat(8), [], now_at(5, 0))
     r = ctx["recommended"]
-    check("peak_charge_now when price genuinely cheap at 5am", r["rule_fired"] == "peak_charge_now", r)
+    check("peak_charge_now when price genuinely cheap at 5am",
+          r["rule_fired"] == "peak_frontload_cheap", r)
     check("action is charge", r["action"] == "charge", r)
 
 
@@ -268,9 +271,15 @@ def test_peak_eve_holds_for_cheap_morning_slot():
     # the non-peak chain and slammed 5 kW autonomous (nonpeak_solar_unreliable_autonomous — the
     # 2026-07-30 23:00 incident). Now the peak block runs through the peak-eve window and defers to
     # the cheap morning slot, matching the LP's mpc_hold.
-    state = mk_state(23, 23, "na", 0.0, 0.0, price=19.0)
-    prices = [19.0] * 16 + [12.0] * 8   # 12¢ Solar Sponge slot ~8h ahead
-    ctx = ea.compute_decision_context(state, fc(prices), [], now_at(23, 0))
+    # Rule 38 (overnight insurance) would override this hold — isolate it.
+    _sv38 = ea.OVERNIGHT_INSURANCE
+    ea.OVERNIGHT_INSURANCE = False
+    try:
+        state = mk_state(23, 23, "na", 0.0, 0.0, price=19.0)
+        prices = [19.0] * 16 + [12.0] * 8   # 12¢ Solar Sponge slot ~8h ahead
+        ctx = ea.compute_decision_context(state, fc(prices), [], now_at(23, 0))
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv38
     r = ctx["recommended"]
     check("peak-eve defers to cheap morning slot", r["rule_fired"] == "wait_for_cheap_go_hard", r)
     check("peak-eve action is hold", r["action"] == "hold", r)
@@ -296,8 +305,14 @@ def test_peak_eve_no_quickcheck_slam_at_low_soc():
     # SoC=30% (<40) at 11pm would trip the afternoon-only peak_deadline_quickcheck if that heuristic
     # weren't guarded to now_h < 2:55pm. With a flat 19¢ forecast (no cheaper slot) the peak-eve
     # window must HOLD (peak_early_morning_hold), never slam autonomous at 11pm.
-    state = mk_state(30, 23, "na", 0.0, 0.0, price=19.0)
-    ctx = ea.compute_decision_context(state, flat(19), [], now_at(23, 0))
+    # Rule 38 (overnight insurance) would override this hold — isolate it.
+    _sv38 = ea.OVERNIGHT_INSURANCE
+    ea.OVERNIGHT_INSURANCE = False
+    try:
+        state = mk_state(30, 23, "na", 0.0, 0.0, price=19.0)
+        ctx = ea.compute_decision_context(state, flat(19), [], now_at(23, 0))
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv38
     r = ctx["recommended"]
     check("peak-eve does not fire peak_deadline_quickcheck", r["rule_fired"] != "peak_deadline_quickcheck", r)
     check("peak-eve holds at low SoC on flat expensive price", r["action"] == "hold", r)
@@ -318,11 +333,14 @@ def test_peak_sponge_go_hard():
 def test_peak_sponge_selfcons_then_escalates():
     # SoC=65%, 10:30am, poor solar, kwh_needed_85=(0.85-0.65)*13.5=2.7, fill_slow=1.6h, deadline=4.4h.
     # In Solar Sponge, grid charge needed, fill_slow comfortably fits → peak_sponge_selfcons.
+    # Phase 2 upgrades to autonomous because in sponge (price=11 ≤ 15¢ ceiling) and SoC < 85.
     state = mk_state(65, 10, "poor", 0.3, 2.0, price=11.0)
     ctx = ea.compute_decision_context(state, flat(11), [], now_at(10, 30))
     r = ctx["recommended"]
-    check("peak_sponge_selfcons: fill_slow fits → self_consumption", r["rule_fired"] == "peak_sponge_selfcons", r)
-    check("mode is self_consumption (receding horizon, may downgrade if solar improves)", r["mode"] == "self_consumption", r)
+    check("peak_sponge_selfcons → Phase 2 front-loads at autonomous",
+          r["rule_fired"] == "peak_frontload_cheap", r)
+    check("mode is autonomous (Phase 2 front-load cheap sponge energy)",
+          r["mode"] == "autonomous", r)
 
 def test_peak_sponge_solar_improves_to_hold():
     # SoC=75%, 11am, good solar recovering — net_solar now covers remaining gap → hold.
@@ -1178,12 +1196,17 @@ def test_hold_selfcons_high_reserve_drops_to_floor():
 def test_survival_floor_overrides_low_soc_overnight_hold():
     # 2am, peak month, SoC 8% → would be peak_early_morning_hold (ride to 5%). The floor
     # defense overrides it to a gentle self_consumption top-up.
-    ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
+    # Isolate from Rule 38 (overnight insurance) which would override the survival floor.
+    _sv38 = ea.OVERNIGHT_INSURANCE
+    ea.OVERNIGHT_INSURANCE = False
+    try:
+        ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv38
     r = ctx["recommended"]
     check("survival floor overrides low-SoC hold", r["rule_fired"] == "survival_floor_defend", r)
     check("  ...as a charge", r["action"] == "charge", r)
     check("  ...via self_consumption (gentle, Rule 31)", r["mode"] == "self_consumption", r)
-    # And the gentle controller commands SoC+offset, not the target — a ~1.6 kW trickle.
     check("  ...reserve chases SoC+offset",
           ea._gentle_charge_reserve(8, r["target_pct"]) == 8 + ea.SELF_CONS_CHARGE_OFFSET_PTS,
           ea._gentle_charge_reserve(8, r["target_pct"]))
@@ -1210,19 +1233,28 @@ def test_survival_floor_not_active_in_demand_window():
 
 def test_survival_floor_killswitch_reverts_to_ride_low():
     real = ea.SURVIVAL_FLOOR_DEFENSE
+    _sv38 = ea.OVERNIGHT_INSURANCE
     try:
         ea.SURVIVAL_FLOOR_DEFENSE = False
+        ea.OVERNIGHT_INSURANCE = False
         ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
         r = ctx["recommended"]
         check("kill-switch off → low-SoC hold rides low again", r["action"] == "hold", r)
         check("  ...not survival_floor_defend", r["rule_fired"] != "survival_floor_defend", r)
     finally:
         ea.SURVIVAL_FLOOR_DEFENSE = real
+        ea.OVERNIGHT_INSURANCE = _sv38
 
 
 def test_survival_floor_not_triggered_above_floor():
     # SoC 40% overnight → well above the floor, normal hold stands.
-    ctx = ea.compute_decision_context(mk_state(40, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
+    # Isolate from Rule 38 which would fire at nighttime with low projected SoC.
+    _sv38 = ea.OVERNIGHT_INSURANCE
+    ea.OVERNIGHT_INSURANCE = False
+    try:
+        ctx = ea.compute_decision_context(mk_state(40, 2, "na", 0.0, 0.0), flat(13), [], now_at(2))
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv38
     r = ctx["recommended"]
     check("survival floor idle above 12%", r["rule_fired"] != "survival_floor_defend", r)
     check("  ...still a hold", r["action"] == "hold", r)
@@ -1244,8 +1276,13 @@ def test_survival_floor_defers_to_cheaper_slot():
 def test_survival_floor_charges_when_no_cheaper_slot():
     # Rising price, no cheaper slot ahead → the current slot is the cheapest we'll see, so the
     # rule still tops up now (buying later is strictly worse).
-    ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0),
-                                      fc([13, 15, 18, 20, 22, 22, 22, 22]), [], now_at(2))
+    _sv38 = ea.OVERNIGHT_INSURANCE
+    ea.OVERNIGHT_INSURANCE = False
+    try:
+        ctx = ea.compute_decision_context(mk_state(8, 2, "na", 0.0, 0.0),
+                                          fc([13, 15, 18, 20, 22, 22, 22, 22]), [], now_at(2))
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv38
     r = ctx["recommended"]
     check("survival floor charges when nothing cheaper ahead",
           r["rule_fired"] == "survival_floor_defend" and r["action"] == "charge", r)
@@ -1703,11 +1740,121 @@ def test_rule37_opportunistic_topup():
           r["rule_fired"] == "peak_solar_will_cover" and r["action"] == "hold", r)
 
 
+def test_rule37p2_frontload_cheap():
+    """Phase 2: in sponge at cheap price with SoC < 85 → upgrade gentle charge to autonomous."""
+    def run(soc, price, hour, frontload=True):
+        _sv = ea.FRONTLOAD_CHEAP_FLOOR
+        _sv2 = ea.SEASONAL_DEADLINE_TARGET
+        ea.FRONTLOAD_CHEAP_FLOOR = frontload
+        ea.SEASONAL_DEADLINE_TARGET = True
+        st = mk_state(soc, hour, price=price, solar_kw=0.5, accuracy="poor",
+                       remaining_corrected=1.0)
+        st["solar"]["forecast_after_deadline_kwh"] = 0.0
+        try:
+            return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
+        finally:
+            ea.FRONTLOAD_CHEAP_FLOOR = _sv
+            ea.SEASONAL_DEADLINE_TARGET = _sv2
+
+    r = run(40, 8.0, 11)
+    check("rule37p2 sponge+cheap+low-soc: upgrades to autonomous",
+          r["rule_fired"] == "peak_frontload_cheap" and r["mode"] == "autonomous"
+          and r["target_pct"] == 85, r)
+    r = run(86, 8.0, 11)
+    check("rule37p2 soc>=85: no upgrade (Phase 1 territory)",
+          r["rule_fired"] != "peak_frontload_cheap", r)
+    r = run(40, 25.0, 11)
+    check("rule37p2 expensive: no upgrade",
+          r["rule_fired"] != "peak_frontload_cheap", r)
+    r = run(40, 8.0, 11, frontload=False)
+    check("rule37p2 kill-switch off: no upgrade",
+          r["rule_fired"] != "peak_frontload_cheap", r)
+
+
+def test_rule37p2_not_in_demand_window():
+    """Phase 2 never fires in the demand window (3-9pm)."""
+    _sv = ea.FRONTLOAD_CHEAP_FLOOR
+    ea.FRONTLOAD_CHEAP_FLOOR = True
+    st = mk_state(40, 16, price=8.0, solar_kw=0.5, accuracy="poor")
+    try:
+        r = ea.compute_decision_context(st, fc([8.0] * 12), [], now_at(16))["recommended"]
+    finally:
+        ea.FRONTLOAD_CHEAP_FLOOR = _sv
+    check("rule37p2 demand window: never fires",
+          r["rule_fired"] == "demand_window_active", r)
+
+
+def test_rule38_overnight_insurance_fires():
+    """Overnight, peak, SoC projects below margin before sponge → gentle insurance charge."""
+    def run(soc, price, hour, insurance=True):
+        _sv = ea.OVERNIGHT_INSURANCE
+        ea.OVERNIGHT_INSURANCE = insurance
+        st = mk_state(soc, hour, price=price, solar_kw=0.0, accuracy="na",
+                       remaining_corrected=0.0, is_peak=True)
+        try:
+            return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
+        finally:
+            ea.OVERNIGHT_INSURANCE = _sv
+
+    r = run(20, 15.0, 23)
+    check("rule38 overnight+peak+low-projected: insurance fires",
+          r["rule_fired"] == "overnight_insurance" and r["action"] == "charge"
+          and r["mode"] == "self_consumption", r)
+    check("rule38 insurance target is above current SoC",
+          r["target_pct"] > 20, r)
+
+    r = run(70, 15.0, 23)
+    check("rule38 overnight+peak+high-soc: no insurance (will survive to sponge)",
+          r["rule_fired"] != "overnight_insurance", r)
+
+    r = run(20, 30.0, 23)
+    check("rule38 price above ceiling: no insurance",
+          r["rule_fired"] != "overnight_insurance", r)
+
+    r = run(20, 15.0, 23, insurance=False)
+    check("rule38 kill-switch off: no insurance",
+          r["rule_fired"] != "overnight_insurance", r)
+
+
+def test_rule38_not_during_day():
+    """Rule 38 only fires at night (20:00-07:00), not during the day."""
+    _sv = ea.OVERNIGHT_INSURANCE
+    ea.OVERNIGHT_INSURANCE = True
+    st = mk_state(20, 12, price=8.0, solar_kw=0.5, accuracy="poor",
+                   remaining_corrected=1.0, is_peak=True)
+    st["solar"]["forecast_after_deadline_kwh"] = 0.0
+    try:
+        r = ea.compute_decision_context(st, fc([8.0] * 12), [], now_at(12))["recommended"]
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv
+    check("rule38 daytime: never fires",
+          r["rule_fired"] != "overnight_insurance", r)
+
+
+def test_rule38_early_morning():
+    """Rule 38 fires at 5am when SoC is low and projected to drain before sponge."""
+    _sv = ea.OVERNIGHT_INSURANCE
+    ea.OVERNIGHT_INSURANCE = True
+    st = mk_state(15, 5, price=14.0, solar_kw=0.0, accuracy="na",
+                   remaining_corrected=0.0, is_peak=True)
+    try:
+        r = ea.compute_decision_context(st, fc([14.0] * 12), [], now_at(5))["recommended"]
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv
+    check("rule38 5am+low-soc: insurance fires",
+          r["rule_fired"] == "overnight_insurance" and r["action"] == "charge", r)
+
+
 if __name__ == "__main__":
     for fn in [test_manual_override,
                test_rule37_solar_after_hour,
                test_rule37_deadline_target_pct,
                test_rule37_opportunistic_topup,
+               test_rule37p2_frontload_cheap,
+               test_rule37p2_not_in_demand_window,
+               test_rule38_overnight_insurance_fires,
+               test_rule38_not_during_day,
+               test_rule38_early_morning,
                test_gentle_charge_reserve_small_gap,
                test_gentle_charge_reserve_clamps_at_target,
                test_gentle_charge_reserve_none_soc_falls_back_to_target,

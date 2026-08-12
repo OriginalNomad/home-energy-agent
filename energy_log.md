@@ -1,5 +1,37 @@
 # Energy System Control Log
 
+## 2026-08-12 (session — Rule 37 Phase 1+2 live, Rule 38 overnight insurance)
+
+**Rule 37 Phase 1 enabled** (`SEASONAL_DEADLINE_TARGET = True`). First live confirmation at 1:50pm: agent
+fired `peak_opportunistic_topup` at SoC 62%, deadline_target=88% (post-3pm solar ≈ 0.9 kWh → high winter
+target). Control actions correct despite the LLM narrative claiming "well past 85% cost-target" at 62%
+(narrative-only bug, `DETERMINISTIC_AUTHORITATIVE = True` means no control impact).
+
+**Rule 37 Phase 2 built + enabled** (`FRONTLOAD_CHEAP_FLOOR = True`). Post-processing override: when the
+decision tree charges gently toward the 85% demand floor at cheap prices (≤ sponge threshold or in-sponge
+≤ 15¢), upgrades to autonomous (5 kW). Scoped to SoC < 85% — the HA revert automation fires at ~85% and
+works correctly. The 85→seasonal top-up stays gentle (Phase 1). Overridable verdicts: `peak_sponge_selfcons`,
+`peak_deadline_gentle_lead`, `solar_sponge_floor`, `peak_charge_now`, `peak_deadline_selfcons`,
+`peak_solar_cover_survival`. Rule_fired: `peak_frontload_cheap`. 4 tests.
+
+**Rule 38 built + enabled** (`OVERNIGHT_INSURANCE = True`). Overnight insurance for peak-day eves: when
+projected SoC at sponge start (10am) < 15%, gently charges to a survive-to-sponge target. Prevents the
+"5% at dawn → expensive emergency slam" pattern. Price-capped at 22¢. Overrides `wait_for_cheap_go_hard`,
+`peak_early_morning_hold`, and `survival_floor_defend` (upgrades target if Rule 30's 20% isn't enough).
+Rule_fired: `overnight_insurance`. 8 tests.
+
+**Total: 259 tests, 0 failures** (247 existing + 12 new, 0 regressions).
+
+**Export investigation.** User noticed battery exporting during the demand window (19:10–19:46 Aug 11,
+-1.5 kW peak). Cause: Powerwall firmware load-tracking overshoot in self_consumption mode — battery
+discharges ~0.1–0.5 kW more than house load, excess exports. Not agent-caused. Grid services was OFF.
+Impact: ~0.3 kWh/day export, ~2¢ FIT. Harmless, no fix needed.
+
+**HA sensor `battery_grid_charge_target` alignment still open.** The sensor uses `remaining_solar` (total
+remaining) instead of post-3pm solar. Phase 2 is scoped to the 85% floor to avoid the HA revert
+automation cutting short at the old target. Full seasonal front-load to 95% deferred until the sensor is
+aligned.
+
 ## 2026-08-01 (session — Amber/SolarEdge export-script keys moved out of source; .env + gitignore)
 
 Spotted while reviewing secrets: the Mac-side data-export tools in `Amber Electric Data/` **hardcoded
