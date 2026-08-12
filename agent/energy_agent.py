@@ -1058,7 +1058,8 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         soc           = _int(ha_state(ENTITIES["battery_soc"]))
         price         = round(_float(ha_state(ENTITIES["grid_price"])) * 100, 1)
         solar_rem     = round(_float(ha_state(ENTITIES["solar_remaining"])), 1)
-        grid_target   = _int(ha_state(ENTITIES["battery_target"]))
+        _dt_ctx = _cycle_context.get("decision_context", {})
+        grid_target = _dt_ctx.get("deadline_target_pct") or _int(ha_state(ENTITIES["battery_target"]))
 
         # Reserve set: extract from actions list (e.g. "set_reserve(62%)"), else current
         reserve_set = _int(ha_state(ENTITIES["battery_reserve"]))
@@ -1287,12 +1288,12 @@ RULE37_TOPUP_PRICE_CEIL = 15.0   # ¢ — sponge-window cheap ceiling for the op
 # peak_early_morning_hold, peak_survival_wait_for_sponge), which are deliberately deferring.
 _RULE37_TOPUP_OVERRIDABLE = frozenset({"peak_target_met", "peak_solar_will_cover", "peak_on_track"})
 
-# ── Rule 37 (Phase 2) — front-load the demand floor at autonomous rate ──────────────────
-# When the decision tree charges gently toward the 85% demand floor at a cheap price, upgrade
-# to autonomous (~5 kW). The existing HA revert automation (`battery_autonomous_revert_target_
-# reached`) fires at ~85%, so scoping to SoC < DEMAND_FLOOR_PCT is safe and doesn't need an
-# HA sensor change. Phase 1's gentle 85→seasonal top-up is unaffected (target > floor, SoC ≥
-# floor). Kill-switch: FRONTLOAD_CHEAP_FLOOR = False reverts to gentle-only floor charges.
+# ── Rule 37 (Phase 2) — front-load at autonomous rate toward the seasonal target ─────────
+# When the verdict is a gentle self_consumption charge toward the seasonal target and energy
+# is cheap, upgrade to autonomous (~5 kW). The HA revert automation reads the agent's
+# deadline_target (via input_number.battery_decision_grid_target, written each cycle) and
+# reverts at the seasonal ceiling. Also upgrades Phase 1's opportunistic top-up (85→seasonal)
+# from gentle to fast. Kill-switch: FRONTLOAD_CHEAP_FLOOR = False reverts to gentle-only.
 FRONTLOAD_CHEAP_FLOOR = True
 _RULE37P2_UPGRADEABLE = frozenset({
     "peak_sponge_selfcons",        # in sponge, gentle to 85
@@ -1301,6 +1302,7 @@ _RULE37P2_UPGRADEABLE = frozenset({
     "peak_charge_now",             # no cheaper slot, gentle to 85
     "peak_deadline_selfcons",      # tight deadline, gentle
     "peak_solar_cover_survival",   # survival case
+    "peak_opportunistic_topup",    # Phase 1 top-up (85→seasonal, gentle)
 })
 
 # ── Rule 38 — overnight insurance for peak-day eves ─────────────────────────────────────
@@ -2141,17 +2143,17 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             and soc < deadline_target and _rule37_cheap):
         rec = verdict("charge", deadline_target, "self_consumption", "peak_opportunistic_topup")
 
-    # Rule 37 Phase 2 — front-load the demand floor at autonomous rate. When the verdict is a
-    # gentle charge toward the 85% floor and energy is cheap, upgrade to autonomous (5 kW) to
-    # bank the cheap energy faster. The HA revert automation fires at ~85% and switches back to
-    # self_consumption; Phase 1 then handles the 85→seasonal opportunistic top-up gently.
+    # Rule 37 Phase 2 — front-load at autonomous rate toward the seasonal target. When the
+    # verdict is a gentle charge and energy is cheap, upgrade to autonomous (5 kW) to bank the
+    # cheap energy faster. The HA revert automation reads the agent's deadline_target (via
+    # input_number.battery_decision_grid_target) and reverts at the seasonal ceiling.
     if (FRONTLOAD_CHEAP_FLOOR and is_peak and not in_demand
             and rec.get("action") == "charge"
             and rec.get("mode") == "self_consumption"
             and rec.get("rule_fired") in _RULE37P2_UPGRADEABLE
-            and soc < DEMAND_FLOOR_PCT
+            and soc < deadline_target
             and _rule37_cheap):
-        rec = verdict("charge", DEMAND_FLOOR_PCT, "autonomous", "peak_frontload_cheap")
+        rec = verdict("charge", deadline_target, "autonomous", "peak_frontload_cheap")
 
     # Rule 38 — overnight insurance for peak-day eves. On a nighttime peak-day hold (or Rule
     # 30's low survive target), if the battery is projected to drain below the margin before

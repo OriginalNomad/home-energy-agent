@@ -313,7 +313,7 @@
     - trigger: template
       value_template: >
         {{ states('sensor.tessie_powerwall_charge') | int(0) >=
-           states('sensor.battery_grid_charge_target') | int(0) }}
+           states('input_number.battery_decision_grid_target') | int(85) }}
       for: "00:00:30"
   conditions:
     - condition: state
@@ -340,8 +340,8 @@
         title: "✅ Grid Target Reached — Solar Takes Over"
         message: >
           Battery {{ states('sensor.tessie_powerwall_charge') | int(0) }}% —
-          grid target {{ states('sensor.battery_grid_charge_target') | int(0) }}% reached.
-          Reverting to self_consumption, solar covers the rest to 95%.
+          grid target {{ states('input_number.battery_decision_grid_target') | int(85) }}% reached.
+          Reverting to self_consumption, solar covers the rest.
 
 # ─────────────────────────────────────────────────────────────
 # RULE 1: Safety net — revert if battery exports to grid

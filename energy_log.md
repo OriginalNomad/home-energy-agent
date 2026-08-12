@@ -8,11 +8,9 @@ target). Control actions correct despite the LLM narrative claiming "well past 8
 (narrative-only bug, `DETERMINISTIC_AUTHORITATIVE = True` means no control impact).
 
 **Rule 37 Phase 2 built + enabled** (`FRONTLOAD_CHEAP_FLOOR = True`). Post-processing override: when the
-decision tree charges gently toward the 85% demand floor at cheap prices (≤ sponge threshold or in-sponge
-≤ 15¢), upgrades to autonomous (5 kW). Scoped to SoC < 85% — the HA revert automation fires at ~85% and
-works correctly. The 85→seasonal top-up stays gentle (Phase 1). Overridable verdicts: `peak_sponge_selfcons`,
-`peak_deadline_gentle_lead`, `solar_sponge_floor`, `peak_charge_now`, `peak_deadline_selfcons`,
-`peak_solar_cover_survival`. Rule_fired: `peak_frontload_cheap`. 4 tests.
+verdict is a gentle self_consumption charge and energy is cheap, upgrades to autonomous (5 kW) toward the
+seasonal `deadline_target` (95% in winter, 85% in summer). Also upgrades Phase 1's `peak_opportunistic_topup`
+from gentle to fast. 6 tests.
 
 **Rule 38 built + enabled** (`OVERNIGHT_INSURANCE = True`). Overnight insurance for peak-day eves: when
 projected SoC at sponge start (10am) < 15%, gently charges to a survive-to-sponge target. Prevents the
@@ -20,7 +18,14 @@ projected SoC at sponge start (10am) < 15%, gently charges to a survive-to-spong
 `peak_early_morning_hold`, and `survival_floor_defend` (upgrades target if Rule 30's 20% isn't enough).
 Rule_fired: `overnight_insurance`. 8 tests.
 
-**Total: 259 tests, 0 failures** (247 existing + 12 new, 0 regressions).
+**HA sensor alignment done.** The revert automation (`battery_autonomous_revert_target_reached`) now reads
+`input_number.battery_decision_grid_target` (written by the agent each cycle with its computed
+`deadline_target_pct`) instead of the old `sensor.battery_grid_charge_target` template sensor. This means
+Phase 2 front-loads to the full seasonal target (95% in winter) — the automation reverts at 95%, not 85%.
+The old template sensor remains for dashboard reference. The `log_decision` function now writes the agent's
+computed target (from `decision_context["deadline_target_pct"]`) instead of reading the HA sensor's value.
+
+**Total: 262 tests, 0 failures** (247 existing + 15 new, 0 regressions).
 
 **Export investigation.** User noticed battery exporting during the demand window (19:10–19:46 Aug 11,
 -1.5 kW peak). Cause: Powerwall firmware load-tracking overshoot in self_consumption mode — battery

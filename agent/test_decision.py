@@ -221,7 +221,7 @@ def test_peak_charge_now_when_no_cheaper_slot():
     # SoC=50%, 8:30am, all prices flat at 10¢ (at Solar Sponge threshold).
     # Price is at/below threshold so Rule 26 doesn't apply — charge now.
     # No cheaper slot exists (flat forecast, need 1¢ below 10¢ to find one).
-    # Phase 2 upgrades to autonomous because price is cheap and SoC < 85%.
+    # Phase 2 upgrades to autonomous because price is cheap and SoC < deadline_target.
     state = mk_state(50, 8, "na", 0.0, 0.0, price=10.0)
     ctx = ea.compute_decision_context(state, flat(10), [], now_at(8, 30))
     r = ctx["recommended"]
@@ -229,6 +229,8 @@ def test_peak_charge_now_when_no_cheaper_slot():
           r["rule_fired"] == "peak_frontload_cheap", r)
     check("action is charge", r["action"] == "charge", r)
     check("mode is autonomous (Phase 2 front-load)", r["mode"] == "autonomous", r)
+    check("target is seasonal deadline_target (95 in winter)",
+          r["target_pct"] == ctx["deadline_target_pct"], r)
 
 
 def test_peak_early_morning_hold_on_price_spike():
@@ -1711,16 +1713,20 @@ def test_rule37_deadline_target_pct():
 
 def test_rule37_opportunistic_topup():
     """Wired behaviour: winter (0 post-3pm solar → target 95) + cheap → the peak HOLD is overridden
-    to a gentle top-up toward 95; summer / expensive / kill-switch off leave the hold intact."""
+    to a gentle top-up toward 95; summer / expensive / kill-switch off leave the hold intact.
+    Isolate from Phase 2 (which upgrades gentle to autonomous) to test Phase 1 in isolation."""
     def run(soc, price, hour, solar_after, seasonal=True):
         _sv = ea.SEASONAL_DEADLINE_TARGET
+        _sv2 = ea.FRONTLOAD_CHEAP_FLOOR
         ea.SEASONAL_DEADLINE_TARGET = seasonal
+        ea.FRONTLOAD_CHEAP_FLOOR = False
         st = mk_state(soc, hour, price=price, solar_kw=2.0, remaining_corrected=3.0)
         st["solar"]["forecast_after_deadline_kwh"] = solar_after
         try:
             return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
         finally:
             ea.SEASONAL_DEADLINE_TARGET = _sv
+            ea.FRONTLOAD_CHEAP_FLOOR = _sv2
 
     r = run(71, 8.0, 14, 0.0)   # winter, cheap, floor covered by solar
     check("rule37 winter+cheap: opportunistic top-up overrides the hold to charge->95",
@@ -1741,15 +1747,16 @@ def test_rule37_opportunistic_topup():
 
 
 def test_rule37p2_frontload_cheap():
-    """Phase 2: in sponge at cheap price with SoC < 85 → upgrade gentle charge to autonomous."""
-    def run(soc, price, hour, frontload=True):
+    """Phase 2: in sponge at cheap price with SoC < deadline_target → upgrade to autonomous.
+    Target is the seasonal deadline_target (95 in winter with no post-3pm solar)."""
+    def run(soc, price, hour, frontload=True, solar_after=0.0):
         _sv = ea.FRONTLOAD_CHEAP_FLOOR
         _sv2 = ea.SEASONAL_DEADLINE_TARGET
         ea.FRONTLOAD_CHEAP_FLOOR = frontload
         ea.SEASONAL_DEADLINE_TARGET = True
         st = mk_state(soc, hour, price=price, solar_kw=0.5, accuracy="poor",
                        remaining_corrected=1.0)
-        st["solar"]["forecast_after_deadline_kwh"] = 0.0
+        st["solar"]["forecast_after_deadline_kwh"] = solar_after
         try:
             return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
         finally:
@@ -1757,11 +1764,15 @@ def test_rule37p2_frontload_cheap():
             ea.SEASONAL_DEADLINE_TARGET = _sv2
 
     r = run(40, 8.0, 11)
-    check("rule37p2 sponge+cheap+low-soc: upgrades to autonomous",
+    check("rule37p2 sponge+cheap+low-soc: upgrades to autonomous, targets seasonal 95",
           r["rule_fired"] == "peak_frontload_cheap" and r["mode"] == "autonomous"
-          and r["target_pct"] == 85, r)
-    r = run(86, 8.0, 11)
-    check("rule37p2 soc>=85: no upgrade (Phase 1 territory)",
+          and r["target_pct"] == 95, r)
+    r = run(88, 8.0, 11)   # above floor (85) but below seasonal target (95) → Phase 2 still fires
+    check("rule37p2 soc=88 (above floor, below seasonal): still upgrades to autonomous",
+          r["rule_fired"] == "peak_frontload_cheap" and r["mode"] == "autonomous"
+          and r["target_pct"] == 95, r)
+    r = run(96, 8.0, 11)   # above seasonal target → no upgrade
+    check("rule37p2 soc>=deadline_target: no upgrade",
           r["rule_fired"] != "peak_frontload_cheap", r)
     r = run(40, 25.0, 11)
     check("rule37p2 expensive: no upgrade",
@@ -1769,6 +1780,9 @@ def test_rule37p2_frontload_cheap():
     r = run(40, 8.0, 11, frontload=False)
     check("rule37p2 kill-switch off: no upgrade",
           r["rule_fired"] != "peak_frontload_cheap", r)
+    r = run(40, 8.0, 11, solar_after=6.0)  # summer: target == floor 85, Phase 2 still fires below 85
+    check("rule37p2 summer (target=85): still upgrades below floor",
+          r["rule_fired"] == "peak_frontload_cheap" and r["target_pct"] == 85, r)
 
 
 def test_rule37p2_not_in_demand_window():

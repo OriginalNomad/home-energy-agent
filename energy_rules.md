@@ -1236,19 +1236,15 @@ escalation (those are charges), never in the demand window, never at autonomous.
 fires (all today's behaviour). The state plumbing + logging (`forecast_after_deadline_kwh`,
 `deadline_target_pct`) run regardless, so the data is collected live even while disabled.
 
-**Phase 2 — front-load the demand floor at autonomous rate.** Added 2026-08-12. Post-processing override:
-when the decision tree charges gently (self_consumption) toward the 85% demand floor and energy is cheap
-(≤ sponge threshold, or in sponge ≤ 15¢), upgrades to **autonomous** (~5 kW). Scoped to `SoC <
-DEMAND_FLOOR_PCT` (85) — the HA revert automation (`battery_autonomous_revert_target_reached`) fires at ~85%
-and switches back to self_consumption; Phase 1's gentle 85→seasonal top-up is unaffected. Overridable
-verdicts: `peak_sponge_selfcons`, `peak_deadline_gentle_lead`, `solar_sponge_floor`, `peak_charge_now`,
-`peak_deadline_selfcons`, `peak_solar_cover_survival`. **Kill-switch `FRONTLOAD_CHEAP_FLOOR`.** Off → no
-rate upgrade (gentle-only floor charges, original behaviour). Rule_fired: `peak_frontload_cheap`.
-
-**Still open:** align the HA `battery_grid_charge_target` sensor formula to the seasonal `deadline_target`
-so Phase 2 can eventually front-load to the seasonal ceiling (95% in winter) at autonomous rate, not just
-the 85% floor. The current sensor uses `remaining_solar` (total remaining) instead of post-3pm solar. This
-is display/deploy only — control already uses `deadline_target`.
+**Phase 2 — front-load at autonomous rate toward the seasonal target.** Added 2026-08-12, expanded same day.
+Post-processing override: when the verdict is a gentle self_consumption charge and energy is cheap (≤ sponge
+threshold, or in sponge ≤ 15¢), upgrades to **autonomous** (~5 kW) toward the seasonal `deadline_target`.
+The HA revert automation reads the agent's computed target via `input_number.battery_decision_grid_target`
+(written each cycle), so it reverts at the seasonal ceiling (95% in winter, 85% in summer). Also upgrades
+Phase 1's `peak_opportunistic_topup` from gentle to fast. Overridable verdicts: `peak_sponge_selfcons`,
+`peak_deadline_gentle_lead`, `solar_sponge_floor`, `peak_charge_now`, `peak_deadline_selfcons`,
+`peak_solar_cover_survival`, `peak_opportunistic_topup`. **Kill-switch `FRONTLOAD_CHEAP_FLOOR`.** Off → no
+rate upgrade (gentle-only, original behaviour). Rule_fired: `peak_frontload_cheap`.
 
 ---
 
