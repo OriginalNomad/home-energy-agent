@@ -1246,6 +1246,13 @@ Phase 1's `peak_opportunistic_topup` from gentle to fast. Overridable verdicts: 
 `peak_solar_cover_survival`, `peak_opportunistic_topup`. **Kill-switch `FRONTLOAD_CHEAP_FLOOR`.** Off → no
 rate upgrade (gentle-only, original behaviour). Rule_fired: `peak_frontload_cheap`.
 
+**Solar gate (confidence-scaled).** Phase 2 only fires when the grid genuinely needs to contribute ≥1 kWh
+after accounting for expected solar **scaled by `confidence_factor`** (good=1.0, poor=0.5, unreliable=0.0).
+`_confident_solar = raw_net_remaining × confidence_factor`. In summer with good forecast accuracy,
+solar gets full credit → grid gap is tiny → no front-load (solar fills the gap for free). In winter with
+poor/unreliable accuracy, solar gets 50%/0% credit → grid gap is large → front-load fires. This makes
+the transition seasonal and continuous, not binary.
+
 ---
 
 ### Rule 38 — Overnight insurance for peak-day eves ✅ LIVE

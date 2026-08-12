@@ -2147,12 +2147,22 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     # verdict is a gentle charge and energy is cheap, upgrade to autonomous (5 kW) to bank the
     # cheap energy faster. The HA revert automation reads the agent's deadline_target (via
     # input_number.battery_decision_grid_target) and reverts at the seasonal ceiling.
+    # Solar gate: only front-load when the grid genuinely needs to contribute ≥1 kWh after
+    # accounting for expected solar SCALED BY CONFIDENCE. In summer with good accuracy,
+    # confident_solar ≈ raw forecast → full credit → small grid gap → no front-load; in winter
+    # with poor/unreliable accuracy, confident_solar ≈ 0 → large grid gap → front-load. The
+    # confidence_factor (1.0/0.5/0.0) makes this a continuous seasonal transition, not binary.
+    _kwh_to_deadline = max((deadline_target / 100 - soc / 100) * USABLE_KWH, 0.0)
+    _raw_net_solar = max(remaining - home_load_kw * _solar_window_h, 0.0)
+    _confident_solar = _raw_net_solar * confidence_factor
+    _grid_kwh_needed = max(_kwh_to_deadline - _confident_solar, 0.0)
     if (FRONTLOAD_CHEAP_FLOOR and is_peak and not in_demand
             and rec.get("action") == "charge"
             and rec.get("mode") == "self_consumption"
             and rec.get("rule_fired") in _RULE37P2_UPGRADEABLE
             and soc < deadline_target
-            and _rule37_cheap):
+            and _rule37_cheap
+            and _grid_kwh_needed >= 1.0):
         rec = verdict("charge", deadline_target, "autonomous", "peak_frontload_cheap")
 
     # Rule 38 — overnight insurance for peak-day eves. On a nighttime peak-day hold (or Rule

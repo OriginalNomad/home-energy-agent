@@ -2,21 +2,25 @@
 
 ## Energy Agent — Active
 
-### ▶️ RESUME HERE — next session (updated 2026-08-08)
+### ▶️ RESUME HERE — next session (updated 2026-08-12)
 
-**▶️ TOP PRIORITY — ENABLE Rule 37 Phase 1 (do this on a MORNING).** The seasonal solar-after-3pm deadline
-target is built, wired, tested (247/0), and **committed SHIPPED-OFF** (`c2aefb4`, on the Pi, inert). To
-enable: flip **`SEASONAL_DEADLINE_TARGET = False → True`** in `agent/energy_agent.py` and push — the Pi
-pulls on its next 30-min cron. **Do it on a morning** so there's a full day before the 3–9pm window. It has
-been logging `forecast_after_deadline_kwh` + `deadline_target_pct` since 08-08, so by the enable there's
-real post-3pm-solar data to (a) sanity-check the target and (b) run the retrospective replay. On enable,
-also: align `goal_3pm_soc` + the HA `battery_grid_charge_target` sensor to the seasonal target (display
-only), and watch the first day (expect a gentle `peak_opportunistic_topup` toward ~95 during the cheap
-sponge on a low-post-3pm-solar day, and NO change on high-solar/expensive/summer conditions). Then **Phase 2
-— front-load rate** (make the top-up hard/early). Full detail in the "PROPOSAL → Rule 37" item below.
+**✅ Rule 37 Phase 1 + Phase 2 LIVE.** Both enabled 2026-08-12. Phase 1 (`SEASONAL_DEADLINE_TARGET = True`)
+sets the seasonal deadline target (85–95%) based on post-3pm solar. Phase 2 (`FRONTLOAD_CHEAP_FLOOR = True`)
+upgrades gentle charges to autonomous (~5 kW) when energy is cheap and the grid genuinely needs to contribute
+≥1 kWh. Solar gate uses **confidence-scaled** expected solar (good=100%, poor=50%, unreliable=0% credit) for
+a continuous seasonal transition — summer solar gets full credit (no needless grid front-load), winter solar
+gets partial/no credit (front-load fires). HA revert automation reads the agent's seasonal target. 262 tests,
+0 failures.
 
-**Older thread (still open, lower priority now):** ③ agent outage fail-safe (control-logic item from the
-08-05 plan — ①/⑦/② done). Pick up after Rule 37 is proven live.
+**✅ Rule 38 LIVE.** Overnight insurance for peak-day eves (`OVERNIGHT_INSURANCE = True`). Prevents the
+"5% at dawn" pattern. See energy_rules.md Rule 38.
+
+**▶️ NEXT:** ③ agent outage fail-safe (control-logic item from the 08-05 plan — ①/⑦/② done). Pick up
+after Rules 37+38 are proven live over a few days.
+
+**Billing dashboard live.** `billing_data.py` pushes `sensor.billing_monthly_data` to HA. 4 ApexCharts
+cards on the Billing dashboard. **To do:** add Amber API key to Pi's `.env` for live current-month
+estimates. Consider adding a daily cron for `billing_data.py`.
 
 **Naming note for tomorrow:** the two dashboard toggles are now `input_boolean.agent_active` ("Agent
 Control", ON=active) and `input_boolean.agent_narrative` ("Agent Narrative", ON=narrate). The old

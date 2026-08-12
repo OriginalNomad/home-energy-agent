@@ -1749,13 +1749,14 @@ def test_rule37_opportunistic_topup():
 def test_rule37p2_frontload_cheap():
     """Phase 2: in sponge at cheap price with SoC < deadline_target → upgrade to autonomous.
     Target is the seasonal deadline_target (95 in winter with no post-3pm solar)."""
-    def run(soc, price, hour, frontload=True, solar_after=0.0):
+    def run(soc, price, hour, frontload=True, solar_after=0.0,
+            accuracy="poor", remaining_corr=1.0):
         _sv = ea.FRONTLOAD_CHEAP_FLOOR
         _sv2 = ea.SEASONAL_DEADLINE_TARGET
         ea.FRONTLOAD_CHEAP_FLOOR = frontload
         ea.SEASONAL_DEADLINE_TARGET = True
-        st = mk_state(soc, hour, price=price, solar_kw=0.5, accuracy="poor",
-                       remaining_corrected=1.0)
+        st = mk_state(soc, hour, price=price, solar_kw=0.5, accuracy=accuracy,
+                       remaining_corrected=remaining_corr)
         st["solar"]["forecast_after_deadline_kwh"] = solar_after
         try:
             return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
@@ -1767,8 +1768,8 @@ def test_rule37p2_frontload_cheap():
     check("rule37p2 sponge+cheap+low-soc: upgrades to autonomous, targets seasonal 95",
           r["rule_fired"] == "peak_frontload_cheap" and r["mode"] == "autonomous"
           and r["target_pct"] == 95, r)
-    r = run(88, 8.0, 11)   # above floor (85) but below seasonal target (95) → Phase 2 still fires
-    check("rule37p2 soc=88 (above floor, below seasonal): still upgrades to autonomous",
+    r = run(80, 8.0, 11)   # above sponge floor but grid still needs >1 kWh to seasonal 95
+    check("rule37p2 soc=80 (grid needs 2+ kWh to target): upgrades to autonomous",
           r["rule_fired"] == "peak_frontload_cheap" and r["mode"] == "autonomous"
           and r["target_pct"] == 95, r)
     r = run(96, 8.0, 11)   # above seasonal target → no upgrade
@@ -1780,9 +1781,14 @@ def test_rule37p2_frontload_cheap():
     r = run(40, 8.0, 11, frontload=False)
     check("rule37p2 kill-switch off: no upgrade",
           r["rule_fired"] != "peak_frontload_cheap", r)
-    r = run(40, 8.0, 11, solar_after=6.0)  # summer: target == floor 85, Phase 2 still fires below 85
-    check("rule37p2 summer (target=85): still upgrades below floor",
-          r["rule_fired"] == "peak_frontload_cheap" and r["target_pct"] == 85, r)
+    # Summer: good accuracy + 8 kWh remaining + 6 kWh post-3pm → confident solar covers gap
+    r = run(40, 8.0, 11, solar_after=6.0, accuracy="good", remaining_corr=8.0)
+    check("rule37p2 summer (solar covers): no front-load (solar fills it for free)",
+          r["rule_fired"] != "peak_frontload_cheap", r)
+    # Mid-season: poor accuracy (confidence=0.5) + moderate solar → half credit, gap still large
+    r = run(40, 8.0, 11, accuracy="poor", remaining_corr=4.0)
+    check("rule37p2 midseason (poor accuracy, partial solar): still front-loads",
+          r["rule_fired"] == "peak_frontload_cheap", r)
 
 
 def test_rule37p2_not_in_demand_window():

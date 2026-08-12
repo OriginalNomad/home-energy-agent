@@ -298,19 +298,28 @@ Key agent capabilities added 2026-07-22 (session 17):
 - **Charge rate model rebuilt from instantaneous power**: self_consumption 1.67 kW flat 0–70%; autonomous 5.0 kW to 70% then 2.92 at 80%, 1.84 at 90%. The autonomous taper was previously absent (n=2–5 → flat 5.0 kW), making the agent optimistic exactly where the 2:55pm deadline is decided.
 - **118 decision tests + 16 optimizer tests.**
 
-Key agent capabilities added 2026-08-08:
-- **Rule 37 — seasonal, solar-*after-3pm*-aware deadline target (Phase 1). BUILT + WIRED but SHIPPED
-  DEFAULT-OFF** (`SEASONAL_DEADLINE_TARGET = False`, commit `c2aefb4`) — inert on the Pi (behaviour
-  byte-identical to today) until a MORNING enable. Replaces the fixed 85%+headroom target with a two-tier
-  target: `DEMAND_FLOOR_PCT` 85 (inviolable safety floor the escalation stays keyed to) and
-  `PRACTICAL_MAX_PCT` 95 (opportunistic ceiling, filled only via a cheap-window `peak_opportunistic_topup`
-  override, never a forced slam). `deadline_target = clamp(95 − corrected-solar-after-15:00 / 13.5 × 100,
-  85, 95)` — winter (≈0 post-3pm solar, measured 0.18 kWh on 08-08) → ~95; summer → 85; unknown/off → safe
-  85. `get_current_state` logs `solar.forecast_after_deadline_kwh`; `compute_decision_context` logs
-  `deadline_target_pct` — **collecting live even while off**. 16 Rule 37 tests; full suite **247 decision /
-  25 optimizer / 11 build_models, 0 fail**. Deterministic-only (no LLM prompt change). Phase 2 (front-load
-  rate) + `goal_3pm_soc`/HA `battery_grid_charge_target` alignment deferred to the enable session. See
-  energy_rules Rule 37 + energy_log 2026-08-08.
+Key agent capabilities added 2026-08-12:
+- **Rule 37 Phase 1 ENABLED** (`SEASONAL_DEADLINE_TARGET = True`). Seasonal two-tier target live: 85%
+  floor (escalation unchanged) + 95% opportunistic ceiling (cheap-window top-up only). Winter target ~95%,
+  summer ~85%, based on corrected Solcast post-3pm solar.
+- **Rule 37 Phase 2 — front-load at autonomous rate** (`FRONTLOAD_CHEAP_FLOOR = True`). Post-processing
+  override: when the verdict is a gentle self_consumption charge and energy is cheap, upgrades to autonomous
+  (~5 kW) toward the seasonal `deadline_target`. **Solar gate (confidence-scaled):** credits expected solar
+  at `confidence_factor` (good=1.0, poor=0.5, unreliable=0.0) — summer solar gets full credit (no needless
+  front-load), winter solar gets partial/no credit (front-load fires). Continuous seasonal transition.
+- **Rule 38 — overnight insurance** (`OVERNIGHT_INSURANCE = True`). On peak-day nighttime holds, if
+  projected SoC at sponge start < 15%, gently charges to a survive-to-sponge target. Prevents the "5% at
+  dawn" pattern. Price-capped at 22¢.
+- **HA sensor alignment.** Revert automation reads `input_number.battery_decision_grid_target` (agent's
+  computed seasonal target) instead of the old template sensor. Phase 2 front-loads to the full seasonal
+  target; automation reverts correctly at 95% (winter) or 85% (summer).
+- **Billing dashboard.** `agent/billing_data.py` fetches monthly billing data from Amber API (historical
+  bills + current month estimate) and pushes `sensor.billing_monthly_data` to HA. 4 ApexCharts cards:
+  bill total, demand charges, FIT credits, stacked breakdown.
+- Full suite **262 decision / 25 optimizer / 11 build_models, 0 fail**.
+
+Key agent capabilities added 2026-08-08 (built, shipped off, enabled 2026-08-12):
+- **Rule 37 design + Phase 1 wiring** (commit `c2aefb4`). See energy_rules Rule 37 for full design.
 - **LP robustness knob `solar_quantile_k` + offline sweep (shadow-only, default-off, commit `bb4420d`).**
   `optimizer.py` `_build_solar_series` can plan solar against a per-hour conservative quantile
   `max(ratio − k·uncertainty, 0)` (dedicated knob, kept separate from `risk`). `agent/replay_solar_quantile.py`

@@ -32,10 +32,26 @@ computed target (from `decision_context["deadline_target_pct"]`) instead of read
 discharges ~0.1–0.5 kW more than house load, excess exports. Not agent-caused. Grid services was OFF.
 Impact: ~0.3 kWh/day export, ~2¢ FIT. Harmless, no fix needed.
 
-**HA sensor `battery_grid_charge_target` alignment still open.** The sensor uses `remaining_solar` (total
-remaining) instead of post-3pm solar. Phase 2 is scoped to the 85% floor to avoid the HA revert
-automation cutting short at the old target. Full seasonal front-load to 95% deferred until the sensor is
-aligned.
+**Phase 2 solar gate — confidence-scaled.** Phase 2 originally had no solar check, so it would front-load
+5 kW from grid in summer even when afternoon solar would fill the gap for free. Fixed by scaling expected
+solar by `confidence_factor` (good=1.0, poor=0.5, unreliable=0.0) instead of a binary solar_unreliable gate.
+`_confident_solar = raw_net_remaining × confidence_factor`. In summer with reliable forecasts, solar gets
+full credit → grid gap < 1 kWh → no front-load. In winter with poor accuracy, solar gets 50% credit →
+grid gap large → front-load fires. Continuous seasonal transition, not binary. 1 additional test (mid-season
+partial credit). **Total: 262 tests, 0 failures** (after solar gate fix).
+
+**Billing dashboard.** Created `agent/billing_data.py` — fetches monthly usage data from Amber API
+(`/sites/{id}/usage`), aggregates monthly totals (energy cost, export credit, peak demand), and pushes
+`sensor.billing_monthly_data` to HA with per-month attributes. Historical bill data (Jan–Jul 2026)
+extracted from PDF bills and hardcoded as baseline. Current month estimated from API (requires Amber API
+key on the Pi — not yet added; historical data works without it). Created 4 ApexCharts dashboard cards:
+monthly bill total, network demand charges, solar export credits (FIT), and stacked bill breakdown.
+**Demand charge story:** $88.59 (Jan, pre-agent) → $89.35 (Mar) → $31.11 (Jun, agent live but early) →
+$6.49 (Jul, agent mature). The agent crushed demand charges ~92%.
+
+**Live agent observation (2:40pm).** Agent ran at 87% SoC, fired `peak_opportunistic_topup` → reserve 89%
+in self_consumption mode. EV plugged in at 90%, Zappi in Eco mode (15¢ < 18¢ threshold). System in good
+shape 20 minutes before demand window.
 
 ## 2026-08-01 (session — Amber/SolarEdge export-script keys moved out of source; .env + gitignore)
 
