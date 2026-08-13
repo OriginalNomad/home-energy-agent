@@ -1315,6 +1315,7 @@ _RULE37P2_UPGRADEABLE = frozenset({
 OVERNIGHT_INSURANCE            = True
 OVERNIGHT_INSURANCE_MARGIN_PCT = 15     # arrive at sponge (10am) with at least this SoC
 OVERNIGHT_INSURANCE_PRICE_CEIL = 22.0   # ¢ — don't charge above this
+OVERNIGHT_INSURANCE_LOAD_CAP_KW = 0.65  # cap on load used in the overnight projection (kW)
 _RULE38_OVERRIDABLE = frozenset({
     "wait_for_cheap_go_hard",      # peak overnight hold — cheaper slot ahead
     "peak_early_morning_hold",     # peak morning hold — autonomous has time
@@ -2136,11 +2137,15 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     # untouched. Cheap = at/below the sponge threshold, or inside the sponge window up to a ceiling.
     _rule37_cheap = (price <= SOLAR_SPONGE_PRICE_THRESHOLD
                      or (in_sponge and price <= RULE37_TOPUP_PRICE_CEIL))
+    _solar_net_kw = max(solar_now - home_load_kw, 0.0)
+    _solar_projected_gain = _solar_net_kw * hours_to_2_55 / USABLE_KWH * 100.0
+    _solar_will_reach_target = (soc + _solar_projected_gain >= deadline_target)
     if (SEASONAL_DEADLINE_TARGET and is_peak and not in_demand
             and deadline_target > DEMAND_FLOOR_PCT
             and rec.get("action") == "hold"
             and rec.get("rule_fired") in _RULE37_TOPUP_OVERRIDABLE
-            and soc < deadline_target and _rule37_cheap):
+            and soc < deadline_target and _rule37_cheap
+            and not _solar_will_reach_target):
         rec = verdict("charge", deadline_target, "self_consumption", "peak_opportunistic_topup")
 
     # Rule 37 Phase 2 — front-load at autonomous rate toward the seasonal target. When the
@@ -2178,7 +2183,8 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             _hrs_to_sponge = (24.0 - now_h) + 10.0
         else:
             _hrs_to_sponge = 10.0 - now_h
-        _projected_soc = soc - (home_load_kw * _hrs_to_sponge / USABLE_KWH * 100)
+        _insurance_load = min(home_load_kw, OVERNIGHT_INSURANCE_LOAD_CAP_KW)
+        _projected_soc = soc - (_insurance_load * _hrs_to_sponge / USABLE_KWH * 100)
         if _projected_soc < OVERNIGHT_INSURANCE_MARGIN_PCT:
             _survive_target = min(
                 round(soc + (OVERNIGHT_INSURANCE_MARGIN_PCT - _projected_soc)),
@@ -2205,6 +2211,7 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         "solar_after_deadline_kwh": (round(solar_after_deadline, 2)
                                      if solar_after_deadline is not None else None),
         "deadline_target_pct":      deadline_target,
+        "rule37_solar_will_reach":  _solar_will_reach_target,
         # Both figures logged so the correction's effect on decisions is measurable
         # — `solar_remaining_used_kwh` is what the verdict was actually reasoned from.
         "solar_remaining_raw_kwh":       round(remaining_raw, 2),

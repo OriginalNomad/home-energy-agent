@@ -3462,3 +3462,93 @@ after.
 items) with today as its motivating case. **Spec only — no code, no config, no rule shipped.** Rule 37
 Phase 1 remains inert (`SEASONAL_DEADLINE_TARGET=False`); enable it on a morning first (today's runway was
 already gone by brief time), prove it live, *then* build Phase 2 on this seasonal-timing anchor.
+
+---
+
+## 2026-08-14 — Aug 13 incident analysis: Rule 37 + Rule 38 bugs causing over-charge and negative-FIT export
+
+### Incident summary
+
+Two issues from Aug 13 identified from the Amber dashboard:
+
+1. **Rule 38 over-insurance (9pm)** — battery at 65% SoC, insurance fired and charged to 80% at 17–19¢.
+2. **Rule 37 over-topup (11am–1pm)** — battery hit 100% at ~1pm, exported 2.84 kWh at negative FIT (−1¢).
+
+### Root cause analysis — Rule 38 (overnight insurance)
+
+The overnight drain projection used `home_load_kw` (the 30-min rolling average), which at 21:00 was
+**0.92 kW** (evening cooking). Extrapolated over 13 hours to sponge:
+
+```
+projected_soc = 65 - (0.92 × 13 / 13.5 × 100) = 65 - 88.6 = -23.6%
+```
+
+Far below the 15% margin. Target: `min(65 + (15 - (-24)), 85) = 85%`. Charged 65→80% (2.0 kWh at 18¢ =
+~36¢).
+
+**Actual overnight drain** (measured from decisions.jsonl): from 23:00 (SoC=80, after insurance stopped) to
+05:30 (SoC=52) = 28% in 6.5h = **0.54 kW** average. The 0.92 kW evening load was a transient cooking spike,
+not a sustained overnight rate.
+
+Load trace from Aug 13 evening:
+| Time  | home_load_kw | SoC |
+|-------|-------------|-----|
+| 21:00 | 0.92        | 65  |
+| 21:30 | 0.82        | 68  |
+| 22:00 | 2.08        | 74  |
+| 22:30 | 1.44        | 77  |
+| 23:00 | 0.69        | 80  |
+| 23:30 | 0.58        | 78  |
+
+**Realistic projection from 65%** (using measured 0.635 kW full-overnight average): would arrive at ~4% by
+10am — insurance IS justified, but the target should be ~78%, not 85%.
+
+### Root cause analysis — Rule 37 (opportunistic topup)
+
+`_RULE37_TOPUP_OVERRIDABLE` includes `peak_solar_will_cover`, so the opportunistic topup overrides the
+solar-coverage hold. The topup checks only `soc < deadline_target` without accounting for concurrent solar
+production.
+
+Aug 13 timeline:
+- 10:30: SoC=41%, solar=~1.5kW, `peak_solar_will_cover` hold. Topup overrides → grid charges at 1.67 kW.
+- 11:00: SoC=60%, solar=~2.5kW. Both grid (1.67 kW) and solar (2.5 kW) charging simultaneously = ~4+ kW
+  into battery.
+- 12:30: SoC=81%, solar still producing. Agent keeps charging — `soc < 86` (deadline_target).
+- 13:00: SoC=88%. Agent fires `peak_target_met` and stops grid. But battery already above 85%.
+- 13:30–14:00: Solar alone pushes 88→100%.
+- 14:00–15:00: Battery full, solar exports 2.84 kWh at **negative FIT** (−1¢). Paid to give energy away.
+
+The Phase 2 front-load had a solar gate (`_grid_kwh_needed >= 1.0`, forecast-based), but Phase 1 lacked
+one entirely — it trusted `soc < deadline_target` without considering that solar was actively filling the
+gap.
+
+### Fixes applied
+
+**Rule 38 — load cap.** Added `OVERNIGHT_INSURANCE_LOAD_CAP_KW = 0.65` (measured overnight average).
+Projection now uses `min(home_load_kw, 0.65)`. Effect on Aug 13:
+- Projected SoC: 65 − (0.65 × 13 / 13.5 × 100) = **12.1%** (vs −23.6% before)
+- Target: round(65 + (15 − 12.1)) = **68%** (vs 85% before)
+- Would charge 65→68% (0.4 kWh at 18¢ = 7¢) instead of 65→80% (2.0 kWh = 36¢)
+
+**Rule 37 — solar gate.** Added a live-solar-production gate to Phase 1. Computes whether current solar
+output (net of home load), projected over remaining hours to the demand deadline, would reach the deadline
+target: `soc + max(solar_now − home_load_kw, 0) × hours_to_deadline / 13.5 × 100 ≥ deadline_target`. If
+so, the topup is suppressed. Uses actual inverter output (not forecast) — self-correcting per cycle.
+
+Effect on Aug 13: at 11:00, `60 + (1.9 × 3.9 / 13.5 × 100) = 115%` ≥ 86% → topup suppressed. Solar alone
+would have reached ~86% by 2pm without overshooting to 100%. Export reduced from 2.84 kWh to near zero.
+
+### Files changed
+- `agent/energy_agent.py` — both fixes in `compute_decision_context()`
+- `energy_rules.md` — Rule 37 solar gate and Rule 38 load cap documented
+
+### Observations for future write-up
+- The overnight insurance concept is sound but the implementation assumed the instantaneous load was
+  representative of the overnight period. The 30-min rolling average amplifies transient events (cooking,
+  oven, EV) that don't persist overnight.
+- The opportunistic topup treated the demand floor as a gap to fill without considering that solar was
+  already closing the gap. The solar gate adds "awareness" of concurrent production — a step toward the
+  battery understanding that two sources are filling the same bucket.
+- Both bugs share a pattern: **rules that project over hours using instantaneous measurements**. The load
+  cap is a simple fix; a proper solution would use a time-of-day load model (evening/overnight/morning
+  segments with learned rates). The solar gate is simpler — it checks actual production, not a projection.

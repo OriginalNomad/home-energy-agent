@@ -1232,6 +1232,16 @@ winter. **Summer-guard:** gated on `deadline_target > DEMAND_FLOOR_PCT`, so in s
 never fires and solar is left to cover. Never overrides a "wait for a cheaper slot" hold, never the
 escalation (those are charges), never in the demand window, never at autonomous.
 
+**Solar gate (Phase 1, added 2026-08-14).** The opportunistic topup now checks whether live solar production
+(net of home load), projected over the remaining hours to the demand deadline, would reach the seasonal
+target without grid help: `soc + max(solar_now − home_load_kw, 0) × hours_to_deadline / 13.5 × 100 ≥
+deadline_target`. If so, the topup is suppressed — solar alone will fill the gap, and adding grid on top
+overshoots the target and causes unwanted export. Uses **actual inverter output** (not forecast), so it only
+backs off when solar is genuinely producing. Self-correcting: if clouds cut solar mid-day, the next 30-min
+cycle re-evaluates and allows grid assist. Logged as `rule37_solar_will_reach` in the decision context.
+**Aug 13 incident:** without this gate, the topup grid-charged at 11:00–12:30 while solar was producing
+2.5 kW, pushing SoC to 100% and causing 2.84 kWh export at negative FIT.
+
 **Kill-switch `SEASONAL_DEADLINE_TARGET`.** Off → `deadline_target == 85`, gate `soc < 85`, override never
 fires (all today's behaviour). The state plumbing + logging (`forecast_after_deadline_kwh`,
 `deadline_target_pct`) run regardless, so the data is collected live even while disabled.
@@ -1270,8 +1280,17 @@ with ≥15% SoC, avoiding the emergency path and starting the morning charge fro
 
 **Survive-to-sponge target.**
 `survive_target = min(soc + (MARGIN − projected_soc_at_sponge), DEMAND_FLOOR_PCT)`. Clamped at `soc + 1`
-(minimum progress) and `DEMAND_FLOOR_PCT` (85, upper cap — sponge handles the rest). Uses actual
-`home_load_kw` for drain projection.
+(minimum progress) and `DEMAND_FLOOR_PCT` (85, upper cap — sponge handles the rest).
+
+**Load cap (added 2026-08-14).** The overnight drain projection uses `min(home_load_kw,
+OVERNIGHT_INSURANCE_LOAD_CAP_KW)` where the cap = **0.65 kW** (measured overnight average). Previously
+used the raw 30-min rolling `home_load_kw`, which at 9pm typically reflects evening cooking/heating loads
+(0.9–2.0 kW) — extrapolating these over 13 hours wildly overstates overnight drain and triggers insurance
+with targets up to 85%. With the cap: the projection uses a realistic overnight rate, targets are
+proportionate (e.g. 68% instead of 85% from 65%), and the insurance costs ~7¢ instead of ~36¢.
+**Aug 13 incident:** `home_load_kw` was 0.92 kW at 21:00 (cooking). Projected SoC: −24%. Target: 85%.
+Charged 65→80% at 18¢ (2.7 kWh = 49¢). With cap: projected SoC: 12%. Target: 68%. Would charge
+65→68% (0.4 kWh = 7¢).
 
 **Guards.** Peak month only. Nighttime only (20:00–07:00). Price ≤ `OVERNIGHT_INSURANCE_PRICE_CEIL` (22¢).
 Never in the demand window. Fires AFTER Rule 30 (survival floor) so it can upgrade Rule 30's 20% target if
