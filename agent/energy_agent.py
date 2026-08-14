@@ -946,7 +946,8 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
         record["computed_context"]  = {k: ctx[k] for k in (
             "zero_solar_day", "deferral_detected", "sliding_forecast", "solar_unreliable",
             "cost_target_pct", "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85",
-            "spread_c", "forward_min_c", "price_used_c", "price_spot_c", "go_hard_slot")}
+            "spread_c", "forward_min_c", "price_used_c", "price_spot_c", "go_hard_slot",
+            "deadline_target_pct", "rule37_solar_will_reach")}
         soc_now      = record.get("soc")
         actual_charge = ((reserve_set is not None and soc_now is not None and reserve_set > soc_now)
                          or mode_set == "autonomous")
