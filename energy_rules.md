@@ -1292,12 +1292,20 @@ proportionate (e.g. 68% instead of 85% from 65%), and the insurance costs ~7¢ i
 Charged 65→80% at 18¢ (2.7 kWh = 49¢). With cap: projected SoC: 12%. Target: 68%. Would charge
 65→68% (0.4 kWh = 7¢).
 
+**Price-aware deferral (added 2026-08-15).** Before charging, checks `forward_min < price −
+SURVIVAL_DEFER_MARGIN_C` (same margin as Rule 30). If a cheaper slot exists ahead, **defers the insurance**
+— keeps the hold, lets SoC ride toward the 5% physical reserve, and buys the insurance at the cheaper slot.
+Only charges now when the current slot is already the cheapest we'll see. This closes the recurring
+divergence where the LP correctly held at 19–20¢ for a 10¢ morning sponge while the old Rule 38 charged
+immediately.
+
 **Guards.** Peak month only. Nighttime only (20:00–07:00). Price ≤ `OVERNIGHT_INSURANCE_PRICE_CEIL` (22¢).
 Never in the demand window. Fires AFTER Rule 30 (survival floor) so it can upgrade Rule 30's 20% target if
 20% isn't enough to survive to sponge.
 
-**Kill-switch `OVERNIGHT_INSURANCE`.** Off → old ride-to-floor-and-hope behaviour. Rule_fired:
-`overnight_insurance`.
+**Kill-switches.** `OVERNIGHT_INSURANCE` = False → old ride-to-floor-and-hope behaviour.
+`OVERNIGHT_INSURANCE_PRICE_AWARE` = False → reverts just the price-awareness (charges at any price ≤ ceiling,
+the pre-2026-08-15 behaviour) while keeping the insurance itself. Rule_fired: `overnight_insurance`.
 
 ---
 

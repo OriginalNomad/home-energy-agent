@@ -1317,6 +1317,7 @@ OVERNIGHT_INSURANCE            = True
 OVERNIGHT_INSURANCE_MARGIN_PCT = 15     # arrive at sponge (10am) with at least this SoC
 OVERNIGHT_INSURANCE_PRICE_CEIL = 22.0   # ¢ — don't charge above this
 OVERNIGHT_INSURANCE_LOAD_CAP_KW = 0.65  # cap on load used in the overnight projection (kW)
+OVERNIGHT_INSURANCE_PRICE_AWARE = True  # defer insurance to cheaper slot when one exists ahead
 _RULE38_OVERRIDABLE = frozenset({
     "wait_for_cheap_go_hard",      # peak overnight hold — cheaper slot ahead
     "peak_early_morning_hold",     # peak morning hold — autonomous has time
@@ -2175,6 +2176,8 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     # 30's low survive target), if the battery is projected to drain below the margin before
     # Solar Sponge (10am), gently charge to a survive-to-sponge target. This prevents the
     # recurring "5% at dawn → emergency 5 kW slam at expensive morning price" pattern.
+    # Price-aware (2026-08-15): if a cheaper slot exists ahead, defer the insurance to that
+    # slot — the 5% physical reserve is the backstop, so riding down is safe.
     _insurance_night = now_h >= 20 or now_h < 7
     if (OVERNIGHT_INSURANCE and is_peak and not in_demand
             and _insurance_night
@@ -2187,13 +2190,15 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
         _insurance_load = min(home_load_kw, OVERNIGHT_INSURANCE_LOAD_CAP_KW)
         _projected_soc = soc - (_insurance_load * _hrs_to_sponge / USABLE_KWH * 100)
         if _projected_soc < OVERNIGHT_INSURANCE_MARGIN_PCT:
-            _survive_target = min(
-                round(soc + (OVERNIGHT_INSURANCE_MARGIN_PCT - _projected_soc)),
-                DEMAND_FLOOR_PCT,
-            )
-            _survive_target = max(_survive_target, round(soc) + 1)
-            rec = verdict("charge", _survive_target, "self_consumption",
-                          "overnight_insurance")
+            _cheaper_ahead = forward_min < price - SURVIVAL_DEFER_MARGIN_C
+            if not (OVERNIGHT_INSURANCE_PRICE_AWARE and _cheaper_ahead):
+                _survive_target = min(
+                    round(soc + (OVERNIGHT_INSURANCE_MARGIN_PCT - _projected_soc)),
+                    DEMAND_FLOOR_PCT,
+                )
+                _survive_target = max(_survive_target, round(soc) + 1)
+                rec = verdict("charge", _survive_target, "self_consumption",
+                              "overnight_insurance")
 
     return {
         "now_h":               round(now_h, 2),

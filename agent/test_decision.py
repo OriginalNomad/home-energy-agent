@@ -1865,6 +1865,40 @@ def test_rule38_early_morning():
           r["rule_fired"] == "overnight_insurance" and r["action"] == "charge", r)
 
 
+def test_rule38_price_aware():
+    """Rule 38 defers insurance when a cheaper slot exists ahead."""
+    _sv_ins = ea.OVERNIGHT_INSURANCE
+    _sv_pa = ea.OVERNIGHT_INSURANCE_PRICE_AWARE
+    ea.OVERNIGHT_INSURANCE = True
+    ea.OVERNIGHT_INSURANCE_PRICE_AWARE = True
+    try:
+        # Cheaper slot ahead (forward_min 10¢ vs current 19¢): defer
+        st = mk_state(20, 23, price=19.0, solar_kw=0.0, accuracy="na",
+                       remaining_corrected=0.0, is_peak=True)
+        prices = [19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 12.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+        r = ea.compute_decision_context(st, fc(prices), [], now_at(23))["recommended"]
+        check("rule38 cheaper slot ahead: defers (no insurance)",
+              r["rule_fired"] != "overnight_insurance", r)
+
+        # Current slot is already the cheapest (flat 12¢): fires
+        st2 = mk_state(20, 23, price=12.0, solar_kw=0.0, accuracy="na",
+                        remaining_corrected=0.0, is_peak=True)
+        r2 = ea.compute_decision_context(st2, fc([12.0] * 12), [], now_at(23))["recommended"]
+        check("rule38 already cheapest: insurance fires",
+              r2["rule_fired"] == "overnight_insurance" and r2["action"] == "charge", r2)
+
+        # Kill-switch off: charges even with cheaper slot ahead
+        ea.OVERNIGHT_INSURANCE_PRICE_AWARE = False
+        st3 = mk_state(20, 23, price=19.0, solar_kw=0.0, accuracy="na",
+                        remaining_corrected=0.0, is_peak=True)
+        r3 = ea.compute_decision_context(st3, fc(prices), [], now_at(23))["recommended"]
+        check("rule38 price-aware off: insurance fires regardless",
+              r3["rule_fired"] == "overnight_insurance" and r3["action"] == "charge", r3)
+    finally:
+        ea.OVERNIGHT_INSURANCE = _sv_ins
+        ea.OVERNIGHT_INSURANCE_PRICE_AWARE = _sv_pa
+
+
 if __name__ == "__main__":
     for fn in [test_manual_override,
                test_rule37_solar_after_hour,
@@ -1875,6 +1909,7 @@ if __name__ == "__main__":
                test_rule38_overnight_insurance_fires,
                test_rule38_not_during_day,
                test_rule38_early_morning,
+               test_rule38_price_aware,
                test_gentle_charge_reserve_small_gap,
                test_gentle_charge_reserve_clamps_at_target,
                test_gentle_charge_reserve_none_soc_falls_back_to_target,

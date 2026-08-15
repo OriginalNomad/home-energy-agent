@@ -1,5 +1,31 @@
 # Energy System Control Log
 
+## 2026-08-15 (session — Rule 38 price-aware deferral)
+
+**Morning brief.** Last 3 demand windows passed (Aug 12–14). Solar consistently 49% of Solcast forecast
+(winter pattern). LP sweep fidelity 100% on 682 cycles; `solar_quantile_k` still inert (mid-winter);
+`exec_charge_derate=0.3` still the winter lever but not worth enabling (gains land on easy days).
+
+**Rule 38 made price-aware.** User reported a "weird blip" — overnight insurance charged at 22:30 on Aug 14
+with SoC 62% at 19–20¢, when the morning sponge was 9–10¢. The insurance projection was correct (SoC would
+have reached ~7% at sponge start), but the rule was price-blind — it charged at the current price regardless
+of whether cheaper energy was coming.
+
+Fix mirrors Rule 30's approach: before charging, check `forward_min < price − SURVIVAL_DEFER_MARGIN_C`. If a
+cheaper slot exists ahead, defer the insurance (keep the hold) and buy at the cheaper slot. The 5% physical
+reserve is the backstop. Kill-switch: `OVERNIGHT_INSURANCE_PRICE_AWARE`.
+
+This closes the most frequent divergence class in the last 48h — all 10 DET↔LP disagreements were Rules 37/38
+charging at evening prices while the LP correctly held for the morning sponge. The overnight insurance
+instances (6 of 10) will now defer to the cheaper morning slot.
+
+**Impact estimate.** Aug 14's two insurance cycles (22:30–23:00, 62→68% at 19.5¢ avg) cost ~0.8 kWh × 19.5¢ =
+16¢. With the fix, the insurance would have deferred to the ~10¢ sponge: same 0.8 kWh × 10¢ = 8¢. Saving ~8¢
+per night, or ~$2.40/month.
+
+3 tests added → **265 decision + 25 optimizer + 11 build_models, 1 pre-existing failure** (the
+`rule37 winter+cheap above floor` test — separate from this change).
+
 ## 2026-08-12 (session — Rule 37 Phase 1+2 live, Rule 38 overnight insurance)
 
 **Rule 37 Phase 1 enabled** (`SEASONAL_DEADLINE_TARGET = True`). First live confirmation at 1:50pm: agent
