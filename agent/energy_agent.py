@@ -2169,7 +2169,8 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             and rec.get("rule_fired") in _RULE37P2_UPGRADEABLE
             and soc < deadline_target
             and _rule37_cheap
-            and _grid_kwh_needed >= 1.0):
+            and _grid_kwh_needed >= 1.0
+            and not _solar_will_reach_target):
         rec = verdict("charge", deadline_target, "autonomous", "peak_frontload_cheap")
 
     # Rule 38 — overnight insurance for peak-day eves. On a nighttime peak-day hold (or Rule

@@ -33,6 +33,34 @@
     - action: shell_command.push_virtual_sensors
 
 # ─────────────────────────────────────────────────────────────
+# Manual override: revert battery to safe defaults when agent paused
+# When agent_active is turned OFF, immediately revert to
+# self_consumption + reserve=5% so any in-progress autonomous
+# grid charge stops. Without this, pausing the agent leaves
+# whatever mode/reserve the agent last set in place.
+# ─────────────────────────────────────────────────────────────
+- id: agent_pause_revert_battery
+  alias: "Agent: Revert battery on manual override"
+  description: "Revert to self_consumption + reserve=5% when agent_active is turned off"
+  triggers:
+    - trigger: state
+      entity_id: input_boolean.agent_active
+      to: "off"
+  actions:
+    - action: rest_command.powerwall_set_mode
+      data:
+        mode: self_consumption
+    - action: rest_command.powerwall_set_backup_reserve
+      data:
+        percent: 5
+    - action: persistent_notification.create
+      data:
+        title: "Agent paused — battery reverted"
+        message: >
+          Agent Control turned OFF. Battery reverted to self_consumption, reserve=5%.
+          The agent will not send commands until turned back ON.
+
+# ─────────────────────────────────────────────────────────────
 # RULE 6: Set minimum backup reserve floor on startup
 # Ensures baseline 20% reserve is set after HA restarts
 # ─────────────────────────────────────────────────────────────
