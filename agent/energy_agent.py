@@ -947,7 +947,8 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
             "zero_solar_day", "deferral_detected", "sliding_forecast", "solar_unreliable",
             "cost_target_pct", "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85",
             "spread_c", "forward_min_c", "price_used_c", "price_spot_c", "go_hard_slot",
-            "deadline_target_pct", "rule37_solar_will_reach")}
+            "deadline_target_pct", "rule37_solar_will_reach",
+            "rule37_defer_cheaper")}
         soc_now      = record.get("soc")
         actual_charge = ((reserve_set is not None and soc_now is not None and reserve_set > soc_now)
                          or mode_set == "autonomous")
@@ -1284,6 +1285,7 @@ SEASONAL_DEADLINE_TARGET = True
 DEMAND_FLOOR_PCT   = 85    # inviolable peak-month safety floor (escalation keyed here)
 PRACTICAL_MAX_PCT  = 95    # opportunistic ceiling (5% longevity / forecast-error margin)
 RULE37_TOPUP_PRICE_CEIL = 15.0   # ¢ — sponge-window cheap ceiling for the opportunistic top-up
+RULE37_DEFER_MARGIN_C   = 2.0   # ¢ — defer front-load when forward_min is this much cheaper
 # The peak HOLD verdicts the opportunistic top-up may override — only "floor met / covered / on
 # track" holds, NEVER the "wait for a cheaper slot" holds (wait_for_cheap_go_hard,
 # peak_early_morning_hold, peak_survival_wait_for_sponge), which are deliberately deferring.
@@ -2163,6 +2165,9 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
     _raw_net_solar = max(remaining - home_load_kw * _solar_window_h, 0.0)
     _confident_solar = _raw_net_solar * confidence_factor
     _grid_kwh_needed = max(_kwh_to_deadline - _confident_solar, 0.0)
+    _cheaper_ahead = forward_min < price - RULE37_DEFER_MARGIN_C
+    _charging_slack_h = hours_to_2_55 - fill_fast_85
+    _rule37_defer = _cheaper_ahead and _charging_slack_h > 1.0
     if (FRONTLOAD_CHEAP_FLOOR and is_peak and not in_demand
             and rec.get("action") == "charge"
             and rec.get("mode") == "self_consumption"
@@ -2170,7 +2175,8 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             and soc < deadline_target
             and _rule37_cheap
             and _grid_kwh_needed >= 1.0
-            and not _solar_will_reach_target):
+            and not _solar_will_reach_target
+            and not _rule37_defer):
         rec = verdict("charge", deadline_target, "autonomous", "peak_frontload_cheap")
 
     # Rule 38 — overnight insurance for peak-day eves. On a nighttime peak-day hold (or Rule
@@ -2219,6 +2225,7 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                                      if solar_after_deadline is not None else None),
         "deadline_target_pct":      deadline_target,
         "rule37_solar_will_reach":  _solar_will_reach_target,
+        "rule37_defer_cheaper":     _rule37_defer,
         # Both figures logged so the correction's effect on decisions is measurable
         # — `solar_remaining_used_kwh` is what the verdict was actually reasoned from.
         "solar_remaining_raw_kwh":       round(remaining_raw, 2),
