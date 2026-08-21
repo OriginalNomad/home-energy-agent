@@ -280,17 +280,13 @@ Key agent capabilities added 2026-08-12:
 - **Rule 37 Phase 1 ENABLED** (`SEASONAL_DEADLINE_TARGET = True`). Seasonal two-tier target live: 85%
   floor (escalation unchanged) + 95% opportunistic ceiling (cheap-window top-up only). Winter target ~95%,
   summer ~85%, based on corrected Solcast post-3pm solar.
-- **Rule 37 Phase 2 — front-load at autonomous rate** (`FRONTLOAD_CHEAP_FLOOR = True`). Post-processing
-  override: when the verdict is a gentle self_consumption charge and energy is cheap, upgrades to autonomous
-  (~5 kW) toward the seasonal `deadline_target`. **Solar gate (confidence-scaled):** credits expected solar
-  at `confidence_factor` (good=1.0, poor=0.5, unreliable=0.0) — summer solar gets full credit (no needless
-  front-load), winter solar gets partial/no credit (front-load fires). Continuous seasonal transition.
+- **Rule 37 Phase 2 — REMOVED 2026-08-21.** Was upgrading gentle charges to autonomous 5 kW when energy
+  was cheap, but displaced free solar. Removed entirely — Rule 33's gentle-lead is the correct approach.
 - **Rule 38 — overnight insurance** (`OVERNIGHT_INSURANCE = True`). On peak-day nighttime holds, if
   projected SoC at sponge start < 15%, gently charges to a survive-to-sponge target. Prevents the "5% at
   dawn" pattern. Price-capped at 22¢.
 - **HA sensor alignment.** Revert automation reads `input_number.battery_decision_grid_target` (agent's
-  computed seasonal target) instead of the old template sensor. Phase 2 front-loads to the full seasonal
-  target; automation reverts correctly at 95% (winter) or 85% (summer).
+  computed seasonal target) instead of the old template sensor. Automation reverts correctly at 95% (winter) or 85% (summer).
 - **Billing dashboard.** `agent/billing_data.py` fetches monthly billing data from Amber API (historical
   bills + current month estimate) and pushes `sensor.billing_monthly_data` to HA. 4 ApexCharts cards:
   bill total, demand charges, FIT credits, stacked breakdown.

@@ -1202,7 +1202,7 @@ export safety-net `battery_autonomous_export_safety_net` (rare + diagnostic).
 ### Rule 37 — Seasonal, solar-*after-3pm*-aware deadline target ✅ LIVE
 
 **Added 2026-08-08 (commit `c2aefb4`). Phase 1 enabled 2026-08-12 (`SEASONAL_DEADLINE_TARGET = True`).
-Phase 2 (front-load rate) added 2026-08-12 (`FRONTLOAD_CHEAP_FLOOR = True`).** Both live on the Pi.
+Phase 2 (front-load rate) was added 2026-08-12 and REMOVED 2026-08-21 — see below.** Phase 1 live on the Pi.
 
 **Problem.** The peak fill target was a fixed **85% + "leave the top 15% for solar"**. That reserved
 headroom only pays off if solar is still coming to fill it — but in **winter** solar peaks ~1pm and is
@@ -1248,22 +1248,14 @@ cycle re-evaluates and allows grid assist. Logged as `rule37_solar_will_reach` i
 fires (all today's behaviour). The state plumbing + logging (`forecast_after_deadline_kwh`,
 `deadline_target_pct`) run regardless, so the data is collected live even while disabled.
 
-**Phase 2 — front-load at autonomous rate toward the seasonal target.** Added 2026-08-12, expanded same day.
-Post-processing override: when the verdict is a gentle self_consumption charge and energy is cheap (≤ sponge
-threshold, or in sponge ≤ 15¢), upgrades to **autonomous** (~5 kW) toward the seasonal `deadline_target`.
-The HA revert automation reads the agent's computed target via `input_number.battery_decision_grid_target`
-(written each cycle), so it reverts at the seasonal ceiling (95% in winter, 85% in summer). Also upgrades
-Phase 1's `peak_opportunistic_topup` from gentle to fast. Overridable verdicts: `peak_sponge_selfcons`,
-`peak_deadline_gentle_lead`, `solar_sponge_floor`, `peak_charge_now`, `peak_deadline_selfcons`,
-`peak_solar_cover_survival`, `peak_opportunistic_topup`. **Kill-switch `FRONTLOAD_CHEAP_FLOOR`.** Off → no
-rate upgrade (gentle-only, original behaviour). Rule_fired: `peak_frontload_cheap`.
-
-**Solar gate (confidence-scaled).** Phase 2 only fires when the grid genuinely needs to contribute ≥1 kWh
-after accounting for expected solar **scaled by `confidence_factor`** (good=1.0, poor=0.5, unreliable=0.0).
-`_confident_solar = raw_net_remaining × confidence_factor`. In summer with good forecast accuracy,
-solar gets full credit → grid gap is tiny → no front-load (solar fills the gap for free). In winter with
-poor/unreliable accuracy, solar gets 50%/0% credit → grid gap is large → front-load fires. This makes
-the transition seasonal and continuous, not binary.
+**Phase 2 — REMOVED 2026-08-21.** Was a post-processing override that upgraded gentle self_consumption
+charges to autonomous (~5 kW) when energy was cheap. Removed entirely because it compared grid price
+(~10¢) against evening peak (~20¢) but ignored the real alternative: free solar arriving in 1–2 hours.
+On 2026-08-21 it charged hard at 5 kW from 11% to 86% by 10:30am, displacing an entire afternoon of
+solar and leaving almost no headroom. The LP shadow optimiser correctly said `mpc_hold` on every cycle
+where Phase 2 charged. Rule 33's gentle-lead approach (start at ~1.7 kW, only escalate at the
+point-of-no-return) is the correct strategy. Constants removed: `FRONTLOAD_CHEAP_FLOOR`,
+`RULE37_DEFER_MARGIN_C`, `_RULE37P2_UPGRADEABLE`. Rule_fired `peak_frontload_cheap` no longer exists.
 
 ---
 
