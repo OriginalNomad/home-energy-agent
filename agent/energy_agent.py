@@ -947,8 +947,7 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
             "zero_solar_day", "deferral_detected", "sliding_forecast", "solar_unreliable",
             "cost_target_pct", "hours_to_cheap_end", "hours_to_deadline", "kwh_needed_85",
             "spread_c", "forward_min_c", "price_used_c", "price_spot_c", "go_hard_slot",
-            "deadline_target_pct", "rule37_solar_will_reach",
-            "rule37_defer_cheaper")}
+            "deadline_target_pct", "rule37_solar_will_reach")}
         soc_now      = record.get("soc")
         actual_charge = ((reserve_set is not None and soc_now is not None and reserve_set > soc_now)
                          or mode_set == "autonomous")
@@ -1036,16 +1035,17 @@ def log_decision(summary: str, actions_taken: list[str], ev_summary: str = "") -
             "message": f"{summary}\n\n**Actions:** {battery_actions_str}",
         })
 
-    # EV notification — always sent (unless quiet); ev_summary carries EV SoC from sensor.polestar_7853_battery_charge_level
+    # EV notification — only when EV is plugged in (ev_summary non-empty).
     ev_actions = [a for a in actions_taken if a.startswith("set_zappi")]
-    ev_msg = ev_summary if ev_summary else summary
     ev_actions_str = ", ".join(ev_actions) if ev_actions else "hold"
-    if not _quiet:
+    if not _quiet and ev_summary:
         ha_service("persistent_notification", "create", {
             "notification_id": "energy_agent_ev",
             "title": f"🚗 EV — {now.strftime('%H:%M')}",
-            "message": f"{ev_msg}\n\n**Actions:** {ev_actions_str}",
+            "message": f"{ev_summary}\n\n**Actions:** {ev_actions_str}",
         })
+    elif not _quiet:
+        ha_service("persistent_notification", "dismiss", {"notification_id": "energy_agent_ev"})
 
     # Write a logbook entry — sequential history in HA History panel
     ha_service("logbook", "log", {
@@ -1246,6 +1246,13 @@ PRICE_USE_30MIN_SLOT = True
 # = False reverts to the old straight-to-autonomous behaviour.
 DEADLINE_GENTLE_LEAD   = True
 FAST_ESCALATE_BUFFER_H = 1.5   # go autonomous when hours_to_2_55 <= fill_fast_85 + this
+GENTLE_LEAD_MARGIN_H   = 1.0   # start gentle_lead when fill_slow_85 is within this of hours_to_2_55
+
+# Structured notifications (2026-08-17). When True + DETERMINISTIC_AUTHORITATIVE, skip the LLM
+# on ALL cycles and template the notification from computed_context fields. Eliminates LLM API
+# cost and hallucinated-number risk. Kill-switch: False reverts to LLM narrative on interesting
+# cycles (actions taken, rule changed).
+STRUCTURED_NOTIFICATIONS = True
 
 # Rule 35 — peak-eve run-up. The peak-deadline block (Rule 13) is gated `now_h < DEMAND_DEADLINE`,
 # so on a peak-month day the 9pm–midnight window (after the demand window closes at 9pm, before the
@@ -1285,28 +1292,7 @@ SEASONAL_DEADLINE_TARGET = True
 DEMAND_FLOOR_PCT   = 85    # inviolable peak-month safety floor (escalation keyed here)
 PRACTICAL_MAX_PCT  = 95    # opportunistic ceiling (5% longevity / forecast-error margin)
 RULE37_TOPUP_PRICE_CEIL = 15.0   # ¢ — sponge-window cheap ceiling for the opportunistic top-up
-RULE37_DEFER_MARGIN_C   = 2.0   # ¢ — defer front-load when forward_min is this much cheaper
-# The peak HOLD verdicts the opportunistic top-up may override — only "floor met / covered / on
-# track" holds, NEVER the "wait for a cheaper slot" holds (wait_for_cheap_go_hard,
-# peak_early_morning_hold, peak_survival_wait_for_sponge), which are deliberately deferring.
 _RULE37_TOPUP_OVERRIDABLE = frozenset({"peak_target_met", "peak_solar_will_cover", "peak_on_track"})
-
-# ── Rule 37 (Phase 2) — front-load at autonomous rate toward the seasonal target ─────────
-# When the verdict is a gentle self_consumption charge toward the seasonal target and energy
-# is cheap, upgrade to autonomous (~5 kW). The HA revert automation reads the agent's
-# deadline_target (via input_number.battery_decision_grid_target, written each cycle) and
-# reverts at the seasonal ceiling. Also upgrades Phase 1's opportunistic top-up (85→seasonal)
-# from gentle to fast. Kill-switch: FRONTLOAD_CHEAP_FLOOR = False reverts to gentle-only.
-FRONTLOAD_CHEAP_FLOOR = True
-_RULE37P2_UPGRADEABLE = frozenset({
-    "peak_sponge_selfcons",        # in sponge, gentle to 85
-    "peak_deadline_gentle_lead",   # gentle lead before deadline
-    "solar_sponge_floor",          # early sponge, gentle to 50
-    "peak_charge_now",             # no cheaper slot, gentle to 85
-    "peak_deadline_selfcons",      # tight deadline, gentle
-    "peak_solar_cover_survival",   # survival case
-    "peak_opportunistic_topup",    # Phase 1 top-up (85→seasonal, gentle)
-})
 
 # ── Rule 38 — overnight insurance for peak-day eves ─────────────────────────────────────
 # On a peak-day overnight hold, if the battery is projected to drain below a threshold before
@@ -2021,13 +2007,11 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             # buffer of the deadline. Price arbitrage is irrelevant here — the demand charge
             # penalty (~$100/month) dwarfs any charging cost differential. Go autonomous.
             rec = verdict("charge", 100, "autonomous", "peak_deadline_autonomous")
-        elif DEADLINE_GENTLE_LEAD and fill_slow_85 >= hours_to_2_55:
-            # Gentle self_consumption alone can't fill the whole remaining gap in time, but a
-            # 5 kW charge still has margin (fill_fast_85 < hours_to_2_55 - buffer). Rather than
-            # slamming 5 kW now (Rule 33), lead with a gentle charge that makes progress and holds
-            # the fast option in reserve; a later cycle escalates to peak_deadline_autonomous at
-            # the point-of-no-return if gentle + solar fall behind. The FAST_ESCALATE_BUFFER_H
-            # margin keeps the demand-window target guaranteed.
+        elif DEADLINE_GENTLE_LEAD and fill_slow_85 >= hours_to_2_55 - GENTLE_LEAD_MARGIN_H:
+            # Slow fill is within GENTLE_LEAD_MARGIN_H of the deadline — close enough that
+            # holding for a cheaper slot (wait_for_cheap_go_hard) risks missing the target.
+            # Start a gentle self_consumption charge now; a later cycle escalates to
+            # peak_deadline_autonomous at the point-of-no-return if gentle + solar fall behind.
             rec = verdict("charge", 85, "self_consumption", "peak_deadline_gentle_lead")
         elif not DEADLINE_GENTLE_LEAD and (fill_fast_85 >= hours_to_2_55 or fill_slow_85 >= hours_to_2_55):
             # Kill-switch path: old straight-to-autonomous behaviour (escalate the instant
@@ -2152,33 +2136,6 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
             and not _solar_will_reach_target):
         rec = verdict("charge", deadline_target, "self_consumption", "peak_opportunistic_topup")
 
-    # Rule 37 Phase 2 — front-load at autonomous rate toward the seasonal target. When the
-    # verdict is a gentle charge and energy is cheap, upgrade to autonomous (5 kW) to bank the
-    # cheap energy faster. The HA revert automation reads the agent's deadline_target (via
-    # input_number.battery_decision_grid_target) and reverts at the seasonal ceiling.
-    # Solar gate: only front-load when the grid genuinely needs to contribute ≥1 kWh after
-    # accounting for expected solar SCALED BY CONFIDENCE. In summer with good accuracy,
-    # confident_solar ≈ raw forecast → full credit → small grid gap → no front-load; in winter
-    # with poor/unreliable accuracy, confident_solar ≈ 0 → large grid gap → front-load. The
-    # confidence_factor (1.0/0.5/0.0) makes this a continuous seasonal transition, not binary.
-    _kwh_to_deadline = max((deadline_target / 100 - soc / 100) * USABLE_KWH, 0.0)
-    _raw_net_solar = max(remaining - home_load_kw * _solar_window_h, 0.0)
-    _confident_solar = _raw_net_solar * confidence_factor
-    _grid_kwh_needed = max(_kwh_to_deadline - _confident_solar, 0.0)
-    _cheaper_ahead = forward_min < price - RULE37_DEFER_MARGIN_C
-    _charging_slack_h = hours_to_2_55 - fill_fast_85
-    _rule37_defer = _cheaper_ahead and _charging_slack_h > 1.0
-    if (FRONTLOAD_CHEAP_FLOOR and is_peak and not in_demand
-            and rec.get("action") == "charge"
-            and rec.get("mode") == "self_consumption"
-            and rec.get("rule_fired") in _RULE37P2_UPGRADEABLE
-            and soc < deadline_target
-            and _rule37_cheap
-            and _grid_kwh_needed >= 1.0
-            and not _solar_will_reach_target
-            and not _rule37_defer):
-        rec = verdict("charge", deadline_target, "autonomous", "peak_frontload_cheap")
-
     # Rule 38 — overnight insurance for peak-day eves. On a nighttime peak-day hold (or Rule
     # 30's low survive target), if the battery is projected to drain below the margin before
     # Solar Sponge (10am), gently charge to a survive-to-sponge target. This prevents the
@@ -2225,7 +2182,6 @@ def compute_decision_context(state: dict, price_forecast: list[dict],
                                      if solar_after_deadline is not None else None),
         "deadline_target_pct":      deadline_target,
         "rule37_solar_will_reach":  _solar_will_reach_target,
-        "rule37_defer_cheaper":     _rule37_defer,
         # Both figures logged so the correction's effect on decisions is measurable
         # — `solar_remaining_used_kwh` is what the verdict was actually reasoned from.
         "solar_remaining_raw_kwh":       round(remaining_raw, 2),
@@ -2868,26 +2824,108 @@ def _is_interesting_cycle(ctx: dict, actions: list[str], records: list[dict],
     return False
 
 
+_RULE_SYNTHESIS = {
+    "peak_deadline_gentle_lead":    "Slow fill margin tight — gentle charge, fast in reserve",
+    "peak_deadline_autonomous":     "Point-of-no-return — fast charge to hit deadline",
+    "peak_deadline_quickcheck":     "Afternoon backstop — SoC too low for time of day",
+    "peak_deadline_selfcons":       "No cheaper slot, margin tight — charging now",
+    "wait_for_cheap_go_hard":       "Cheaper slot ahead — holding",
+    "peak_early_morning_hold":      "Ample fast-fill margin at above-threshold price — holding",
+    "peak_charge_now":              "No cheaper slot — charging at current price",
+    "peak_on_track":                "On track — target reachable in time",
+    "peak_target_met":              "Peak target met — holding",
+    "peak_solar_will_cover":        "Solar alone covers remaining gap",
+    "peak_solar_cover_survival":    "Solar covers gap but drain risk — gentle insurance",
+    "peak_survival_wait_for_sponge": "At floor, cheap sponge slot worth waiting for",
+    "peak_sponge_go_hard":          "In sponge, margin tight — fast charge",
+    "peak_sponge_selfcons":         "In sponge — gentle charge, on track",
+    "peak_opportunistic_topup":     "Opportunistic top-up toward seasonal ceiling",
+    "solar_sponge_floor":           "In sponge, SoC low — raising floor",
+    "nonpeak_deadline_autonomous":  "Non-peak deadline tight — fast charge",
+    "nonpeak_deadline_selfcons":    "Non-peak deadline — gentle charge, on track",
+    "nonpeak_solar_unreliable_autonomous": "Solar unreliable + deadline pressure — fast charge",
+    "overnight_hold_wait_for_sponge": "Overnight hold — waiting for morning sponge",
+    "solar_will_cover":             "Solar will cover remaining needs — holding",
+    "spread_arbitrage":             "Price spread profitable — charging at 5 kW",
+    "spread_selfcons":              "Moderate spread — gentle charge worthwhile",
+    "spread_too_small":             "Spread too small — holding",
+    "target_met":                   "Target met — holding",
+    "demand_window_active":         "In demand window — no grid import (Rule 2)",
+    "overnight_insurance":          "Overnight drain projected — insurance charge",
+    "survival_floor_defend":        "At survival floor — defending with gentle charge",
+}
+
+
 def _build_auto_summary(ctx: dict) -> tuple[str, str]:
-    """One-line summaries for routine cycles where LLM is skipped.
+    """Structured notification built from computed_context fields.
 
     Returns (battery_summary, ev_summary). ev_summary is empty string when EV
     not plugged in so log_decision() can suppress the EV notification entirely.
     """
-    rec    = ctx.get("recommended") or {}
-    rule   = rec.get("rule_fired", "unknown")
-    action = rec.get("action", "hold")   # was hardcoded "hold" — wrong when narration
-                                         # is paused on a cycle that actually charged
-    soc   = ctx.get("soc", "?")
-    state = _cycle_context.get("state", {})
-    price = (state.get("grid") or {}).get("price_cents_kwh", "?")
-    solar = (state.get("solar") or {}).get("current_kw", "?")
-    ev    = state.get("ev") or {}
-    battery_summary = f"[auto] {rule} | battery {soc}% | {price}¢/kWh | solar {solar}kW | {action}"
+    rec     = ctx.get("recommended") or {}
+    rule    = rec.get("rule_fired", "unknown")
+    action  = rec.get("action", "hold")
+    target  = rec.get("target_pct")
+    mode    = rec.get("mode")
+    soc     = ctx.get("soc", "?")
+
+    state    = _cycle_context.get("state", {})
+    solar_kw = (state.get("solar") or {}).get("current_kw", 0)
+    ev       = state.get("ev") or {}
+
+    if action == "charge" and target:
+        soc_str = f"SoC {soc}→{target}%"
+    else:
+        soc_str = f"SoC {soc}%"
+    kwh = ctx.get("kwh_needed_85", 0)
+    if kwh and kwh > 0:
+        soc_str += f" ({kwh} kWh)"
+
+    h255 = ctx.get("hours_to_2_55pm")
+    deadline_h = ctx.get("hours_to_deadline")
+    if ctx.get("is_peak_month") and h255 is not None:
+        soc_str += f" | {h255}h to 14:55"
+    elif deadline_h is not None:
+        soc_str += f" | {deadline_h}h to deadline"
+
+    price_str = (f"Price {ctx.get('price_used_c', '?')}¢ | "
+                 f"fwd min {ctx.get('forward_min_c', '?')}¢ | "
+                 f"spread {ctx.get('spread_c', '?')}¢")
+
+    fill_str = (f"Fill: slow {ctx.get('fill_slow_85_h', '?')}h / "
+                f"fast {ctx.get('fill_fast_85_h', '?')}h")
+
+    solar_rem = ctx.get("solar_remaining_used_kwh", 0)
+    corr_tag = " (corrected)" if ctx.get("solar_remaining_corrected_kwh") is not None else ""
+    solar_str = f"Solar: {solar_kw} kW now | {solar_rem} kWh left{corr_tag}"
+
+    go_hard = ctx.get("go_hard_slot")
+    synthesis = _RULE_SYNTHESIS.get(rule, rule.replace("_", " "))
+    if go_hard and rule == "wait_for_cheap_go_hard":
+        synthesis = f"Cheaper slot at {go_hard['price_c']}¢ in {go_hard['hours_until']}h — holding"
+
+    if action == "charge":
+        action_str = f"Action: charge to {target}% via {mode}"
+    else:
+        action_str = f"Action: hold"
+
+    parts = [f"Rule: {rule}", soc_str, price_str, fill_str, solar_str]
+    if go_hard:
+        parts.append(f"Go-hard: {go_hard['price_c']}¢ in {go_hard['hours_until']}h")
+    parts.append(action_str)
+    parts.append(f"-> {synthesis}")
+    battery_summary = "\n".join(parts)
+
+    ev_rec = ctx.get("ev_recommended") or {}
     ev_soc = ev.get("ev_soc_pct", "?")
-    plug   = "plugged in" if ev.get("plugged_in") else "not plugged in"
-    mode   = ev.get("zappi_mode", "?")
-    ev_summary = f"[auto] EV {ev_soc}% ({plug}) | mode {mode} | {action}"
+    if ev.get("plugged_in"):
+        plug = "plugged in"
+        ev_zappi = ev_rec.get("zappi_mode", "?")
+        ev_rule = ev_rec.get("rule_fired", "?")
+        ev_summary = f"EV {ev_soc}% ({plug}) | zappi→{ev_zappi} | {ev_rule}"
+    else:
+        ev_summary = ""
+
     return battery_summary, ev_summary
 
 
@@ -3011,34 +3049,33 @@ def run_agent(dry_run: bool = False):
         except Exception as exc:
             print(f"  Warning: optimizer shadow failed: {exc}", file=sys.stderr)
 
-    # LLM narration gate. Two independent reasons to skip the paid LLM call, both
-    # of which still log the cycle via the deterministic auto-summary (so
+    # LLM narration gate. Three independent reasons to skip the paid LLM call, all
+    # of which still log the cycle via the structured/auto-summary (so
     # decisions.jsonl / dashboard helpers / notifications / heartbeat and the
     # shadow+optimizer divergence fields keep getting written — Phase-4 data
     # collection is uninterrupted):
-    #   (1) Phase 7 — routine (uninteresting) hold cycle. Always active.
-    #   (2) User turned narration off (quiet mode) via input_boolean.agent_narrative to
-    #       save API cost. Forces the skip even on an "interesting" cycle.
+    #   (1) STRUCTURED_NOTIFICATIONS — template from computed_context, always skip LLM.
+    #   (2) Phase 7 — routine (uninteresting) hold cycle.
+    #   (3) User turned narration off (quiet mode) via input_boolean.agent_narrative.
     # Only when DETERMINISTIC_AUTHORITATIVE=True (control path is deterministic).
     if DETERMINISTIC_AUTHORITATIVE and not dry_run:
         try:
             _narr_off, _narr_msg = _narrative_disabled()
-            # Let log_decision() see the toggle without a second HA round-trip, so it
-            # can also MUTE the per-cycle battery/EV notifications when paused (the user
-            # wants quiet, not just cheap). False on the LLM path → notifications fire.
             _cycle_context["narrative_disabled"] = _narr_off
             _interesting = _is_interesting_cycle(
                 _ctx, _det_executed_actions, _records, _demand_reserve_guard_fired)
-            if _narr_off or not _interesting:
+            if STRUCTURED_NOTIFICATIONS or _narr_off or not _interesting:
                 _auto_bat, _auto_ev = _build_auto_summary(_ctx)
-                # Routine holds record "hold"; a narration-paused cycle that the rule
-                # layer actually acted on records what it executed, not a false "hold".
                 _skip_actions = (_det_executed_actions
-                                 if (_narr_off and _interesting and _det_executed_actions)
+                                 if _det_executed_actions
                                  else ["hold — no change needed"])
                 log_decision(_auto_bat, _skip_actions, _auto_ev)
-                _why = _narr_msg if _narr_off else (
-                    f"routine, rule: {(_ctx.get('recommended') or {}).get('rule_fired', '?')}")
+                if _narr_off:
+                    _why = _narr_msg
+                elif STRUCTURED_NOTIFICATIONS:
+                    _why = f"structured, rule: {(_ctx.get('recommended') or {}).get('rule_fired', '?')}"
+                else:
+                    _why = f"routine, rule: {(_ctx.get('recommended') or {}).get('rule_fired', '?')}"
                 print(f"Cycle complete (LLM skipped — {_why}).")
                 return
         except Exception as _exc:

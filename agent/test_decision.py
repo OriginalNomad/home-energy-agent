@@ -221,16 +221,14 @@ def test_peak_charge_now_when_no_cheaper_slot():
     # SoC=50%, 8:30am, all prices flat at 10¢ (at Solar Sponge threshold).
     # Price is at/below threshold so Rule 26 doesn't apply — charge now.
     # No cheaper slot exists (flat forecast, need 1¢ below 10¢ to find one).
-    # Phase 2 upgrades to autonomous because price is cheap and SoC < deadline_target.
+    # Without Phase 2, this stays as peak_charge_now (gentle self_consumption).
     state = mk_state(50, 8, "na", 0.0, 0.0, price=10.0)
     ctx = ea.compute_decision_context(state, flat(10), [], now_at(8, 30))
     r = ctx["recommended"]
-    check("peak_charge_now at threshold → Phase 2 front-loads",
-          r["rule_fired"] == "peak_frontload_cheap", r)
+    check("peak_charge_now at threshold → gentle charge",
+          r["rule_fired"] == "peak_charge_now", r)
     check("action is charge", r["action"] == "charge", r)
-    check("mode is autonomous (Phase 2 front-load)", r["mode"] == "autonomous", r)
-    check("target is seasonal deadline_target (95 in winter)",
-          r["target_pct"] == ctx["deadline_target_pct"], r)
+    check("mode is self_consumption (gentle)", r["mode"] == "self_consumption", r)
 
 
 def test_peak_early_morning_hold_on_price_spike():
@@ -247,12 +245,12 @@ def test_peak_early_morning_hold_on_price_spike():
 def test_peak_early_morning_hold_not_fired_when_cheap():
     # SoC=35%, 5am, price=8¢ — genuinely cheap, below Solar Sponge threshold.
     # overnight_hold requires price > 10¢, so the early-morning guard doesn't apply.
-    # → charge now, then Phase 2 upgrades to autonomous (front-load cheap).
+    # → charge now (gentle self_consumption).
     state = mk_state(35, 5, "na", 0.0, 0.0, price=8.0)
     ctx = ea.compute_decision_context(state, flat(8), [], now_at(5, 0))
     r = ctx["recommended"]
     check("peak_charge_now when price genuinely cheap at 5am",
-          r["rule_fired"] == "peak_frontload_cheap", r)
+          r["rule_fired"] == "peak_charge_now", r)
     check("action is charge", r["action"] == "charge", r)
 
 
@@ -334,15 +332,14 @@ def test_peak_sponge_go_hard():
 
 def test_peak_sponge_selfcons_then_escalates():
     # SoC=65%, 10:30am, poor solar, kwh_needed_85=(0.85-0.65)*13.5=2.7, fill_slow=1.6h, deadline=4.4h.
-    # In Solar Sponge, grid charge needed, fill_slow comfortably fits → peak_sponge_selfcons.
-    # Phase 2 upgrades to autonomous because in sponge (price=11 ≤ 15¢ ceiling) and SoC < 85.
+    # In Solar Sponge, grid charge needed, fill_slow comfortably fits → peak_sponge_selfcons (gentle).
     state = mk_state(65, 10, "poor", 0.3, 2.0, price=11.0)
     ctx = ea.compute_decision_context(state, flat(11), [], now_at(10, 30))
     r = ctx["recommended"]
-    check("peak_sponge_selfcons → Phase 2 front-loads at autonomous",
-          r["rule_fired"] == "peak_frontload_cheap", r)
-    check("mode is autonomous (Phase 2 front-load cheap sponge energy)",
-          r["mode"] == "autonomous", r)
+    check("peak_sponge_selfcons stays gentle",
+          r["rule_fired"] == "peak_sponge_selfcons", r)
+    check("mode is self_consumption (gentle — let solar contribute)",
+          r["mode"] == "self_consumption", r)
 
 def test_peak_sponge_solar_improves_to_hold():
     # SoC=75%, 11am, good solar recovering — net_solar now covers remaining gap → hold.
@@ -1713,20 +1710,16 @@ def test_rule37_deadline_target_pct():
 
 def test_rule37_opportunistic_topup():
     """Wired behaviour: winter (0 post-3pm solar → target 95) + cheap → the peak HOLD is overridden
-    to a gentle top-up toward 95; summer / expensive / kill-switch off leave the hold intact.
-    Isolate from Phase 2 (which upgrades gentle to autonomous) to test Phase 1 in isolation."""
+    to a gentle top-up toward 95; summer / expensive / kill-switch off leave the hold intact."""
     def run(soc, price, hour, solar_after, seasonal=True):
         _sv = ea.SEASONAL_DEADLINE_TARGET
-        _sv2 = ea.FRONTLOAD_CHEAP_FLOOR
         ea.SEASONAL_DEADLINE_TARGET = seasonal
-        ea.FRONTLOAD_CHEAP_FLOOR = False
         st = mk_state(soc, hour, price=price, solar_kw=2.0, remaining_corrected=3.0)
         st["solar"]["forecast_after_deadline_kwh"] = solar_after
         try:
             return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
         finally:
             ea.SEASONAL_DEADLINE_TARGET = _sv
-            ea.FRONTLOAD_CHEAP_FLOOR = _sv2
 
     r = run(71, 8.0, 14, 0.0)   # winter, cheap, floor covered by solar
     check("rule37 winter+cheap: opportunistic top-up overrides the hold to charge->95",
@@ -1744,64 +1737,6 @@ def test_rule37_opportunistic_topup():
     r = run(71, 8.0, 14, 0.0, seasonal=False)  # kill-switch off
     check("rule37 kill-switch off: no top-up, hold preserved",
           r["rule_fired"] == "peak_solar_will_cover" and r["action"] == "hold", r)
-
-
-def test_rule37p2_frontload_cheap():
-    """Phase 2: in sponge at cheap price with SoC < deadline_target → upgrade to autonomous.
-    Target is the seasonal deadline_target (95 in winter with no post-3pm solar)."""
-    def run(soc, price, hour, frontload=True, solar_after=0.0,
-            accuracy="poor", remaining_corr=1.0):
-        _sv = ea.FRONTLOAD_CHEAP_FLOOR
-        _sv2 = ea.SEASONAL_DEADLINE_TARGET
-        ea.FRONTLOAD_CHEAP_FLOOR = frontload
-        ea.SEASONAL_DEADLINE_TARGET = True
-        st = mk_state(soc, hour, price=price, solar_kw=0.5, accuracy=accuracy,
-                       remaining_corrected=remaining_corr)
-        st["solar"]["forecast_after_deadline_kwh"] = solar_after
-        try:
-            return ea.compute_decision_context(st, fc([price] * 12), [], now_at(hour))["recommended"]
-        finally:
-            ea.FRONTLOAD_CHEAP_FLOOR = _sv
-            ea.SEASONAL_DEADLINE_TARGET = _sv2
-
-    r = run(40, 8.0, 11)
-    check("rule37p2 sponge+cheap+low-soc: upgrades to autonomous, targets seasonal 95",
-          r["rule_fired"] == "peak_frontload_cheap" and r["mode"] == "autonomous"
-          and r["target_pct"] == 95, r)
-    r = run(80, 8.0, 11)   # above sponge floor but grid still needs >1 kWh to seasonal 95
-    check("rule37p2 soc=80 (grid needs 2+ kWh to target): upgrades to autonomous",
-          r["rule_fired"] == "peak_frontload_cheap" and r["mode"] == "autonomous"
-          and r["target_pct"] == 95, r)
-    r = run(96, 8.0, 11)   # above seasonal target → no upgrade
-    check("rule37p2 soc>=deadline_target: no upgrade",
-          r["rule_fired"] != "peak_frontload_cheap", r)
-    r = run(40, 25.0, 11)
-    check("rule37p2 expensive: no upgrade",
-          r["rule_fired"] != "peak_frontload_cheap", r)
-    r = run(40, 8.0, 11, frontload=False)
-    check("rule37p2 kill-switch off: no upgrade",
-          r["rule_fired"] != "peak_frontload_cheap", r)
-    # Summer: good accuracy + 8 kWh remaining + 6 kWh post-3pm → confident solar covers gap
-    r = run(40, 8.0, 11, solar_after=6.0, accuracy="good", remaining_corr=8.0)
-    check("rule37p2 summer (solar covers): no front-load (solar fills it for free)",
-          r["rule_fired"] != "peak_frontload_cheap", r)
-    # Mid-season: poor accuracy (confidence=0.5) + moderate solar → half credit, gap still large
-    r = run(40, 8.0, 11, accuracy="poor", remaining_corr=4.0)
-    check("rule37p2 midseason (poor accuracy, partial solar): still front-loads",
-          r["rule_fired"] == "peak_frontload_cheap", r)
-
-
-def test_rule37p2_not_in_demand_window():
-    """Phase 2 never fires in the demand window (3-9pm)."""
-    _sv = ea.FRONTLOAD_CHEAP_FLOOR
-    ea.FRONTLOAD_CHEAP_FLOOR = True
-    st = mk_state(40, 16, price=8.0, solar_kw=0.5, accuracy="poor")
-    try:
-        r = ea.compute_decision_context(st, fc([8.0] * 12), [], now_at(16))["recommended"]
-    finally:
-        ea.FRONTLOAD_CHEAP_FLOOR = _sv
-    check("rule37p2 demand window: never fires",
-          r["rule_fired"] == "demand_window_active", r)
 
 
 def test_rule38_overnight_insurance_fires():
