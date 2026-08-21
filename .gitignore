@@ -70,6 +70,9 @@ agent/energy_log.db
 agent/energy_log.db-shm
 agent/energy_log.db-wal
 
+# Screenshots (stale HA dashboard captures)
+Screen Shots/
+
 # Private operational files — PII, IPs, MACs, domain names
 NETWORK.md
 PI_MIGRATION.md
