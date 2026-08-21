@@ -2,7 +2,7 @@
 # Loads default set of integrations. Do not remove.
 default_config:
 
-# Allow Cloudflare Tunnel reverse proxy (required for agent.sol.io)
+# Allow Cloudflare Tunnel reverse proxy
 http:
   use_x_forwarded_for: true
   trusted_proxies:
@@ -95,11 +95,50 @@ input_boolean:
     initial: on
     icon: mdi:message-text
 
+input_select:
+  billing_period:
+    name: "Billing Period"
+    options:
+      - "Last 12 Months"
+      - "2023"
+      - "2024"
+      - "2025"
+      - "2026"
+      - "All Time"
+      - "Custom"
+    initial: "Last 12 Months"
+    icon: mdi:calendar-range
+  billing_month:
+    name: "Compare Month"
+    options:
+      - "January"
+      - "February"
+      - "March"
+      - "April"
+      - "May"
+      - "June"
+      - "July"
+      - "August"
+      - "September"
+      - "October"
+      - "November"
+      - "December"
+    initial: "January"
+    icon: mdi:calendar-month
+
 input_datetime:
   ev_departure_time:
     name: "EV — Departure time"
     has_date: true
     has_time: true
+  billing_start_date:
+    name: "Billing — Start date"
+    has_date: true
+    has_time: false
+  billing_end_date:
+    name: "Billing — End date"
+    has_date: true
+    has_time: false
 
 input_number:
   battery_decision_soc:
@@ -439,5 +478,5 @@ rest_command:
 shell_command:
   push_virtual_sensors: >
     /usr/bin/python3
-    "/Users/simonmonk/Simon Projects/Home Energy Console/agent/push_virtual_sensors.py"
+    "agent/push_virtual_sensors.py"
     >> /tmp/push_virtual_sensors.log 2>&1

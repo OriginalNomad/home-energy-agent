@@ -62,10 +62,10 @@ def push_weather():
     r = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
-            "latitude":  -33.88,
-            "longitude": 151.19,
+            "latitude":  float(os.environ.get("SITE_LATITUDE",  "-33.88")),
+            "longitude": float(os.environ.get("SITE_LONGITUDE", "151.19")),
             "hourly":    "cloud_cover,shortwave_radiation,precipitation_probability,precipitation",
-            "timezone":  "Australia/Sydney",
+            "timezone":  os.environ.get("SITE_TIMEZONE", "Australia/Sydney"),
             "forecast_days": 2,
         },
         timeout=10,

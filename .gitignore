@@ -69,3 +69,9 @@ app/next-env.d.ts
 agent/energy_log.db
 agent/energy_log.db-shm
 agent/energy_log.db-wal
+
+# Private operational files — PII, IPs, MACs, domain names
+NETWORK.md
+PI_MIGRATION.md
+energy_log.md
+todo.md

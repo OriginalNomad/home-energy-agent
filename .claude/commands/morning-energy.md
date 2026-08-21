@@ -5,15 +5,15 @@ description: Morning (Energy Agent)
 ## ⚠️ Data source — the agent runs on the Pi, not this Mac
 
 This command is normally run from the local desktop, but **the live agent data lives on the
-Raspberry Pi (`energypi.local`), not in the local checkout.** The local copies of the agent's
+Raspberry Pi (`$PI_HOST`), not in the local checkout.** The local copies of the agent's
 data files are stale dev snapshots (the Mac's `decisions.jsonl` / `daily_energy.jsonl` stop in
 early June; `energy_log.db` and `model_params.json` are gitignored and machine-local). **Always
 read these four from the Pi over SSH — never from the local repo:**
 
-- `agent/decisions.jsonl`  → `ssh energypi.local "cat ~/home-energy-agent/agent/decisions.jsonl"` (large — filter/parse remotely, e.g. pipe into `python3 -` over SSH)
-- `agent/daily_energy.jsonl` → `ssh energypi.local "tail -n 3 ~/home-energy-agent/agent/daily_energy.jsonl"`
-- `agent/energy_log.db` (data-logger health) → `ssh energypi.local "cd ~/home-energy-agent/agent && python3 data_logger.py"`
-- `agent/model_params.json` (live calibration) → `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"`
+- `agent/decisions.jsonl`  → `ssh $PI_HOST "cat ~/home-energy-agent/agent/decisions.jsonl"` (large — filter/parse remotely, e.g. pipe into `python3 -` over SSH)
+- `agent/daily_energy.jsonl` → `ssh $PI_HOST "tail -n 3 ~/home-energy-agent/agent/daily_energy.jsonl"`
+- `agent/energy_log.db` (data-logger health) → `ssh $PI_HOST "cd ~/home-energy-agent/agent && python3 data_logger.py"`
+- `agent/model_params.json` (live calibration) → `ssh $PI_HOST "cat ~/home-energy-agent/agent/model_params.json"`
 
 The **doc files** below (CLAUDE.md, CONTEXT.md, todo.md, energy_log.md, ARCHITECTURE.md,
 energy_rules.md) are git-tracked and synced, so reading them from the **local** checkout is fine.
@@ -87,7 +87,7 @@ grid of the two robustness knobs (`solar_quantile_k`, `exec_charge_derate`) and 
 the deterministic layer. **Run it on the Pi** (needs the venv + the committed `optimizer.py`):
 
 ```
-ssh energypi.local "cd ~/home-energy-agent && source agent/venv/bin/activate && python3 agent/replay_solar_quantile.py --jsonl agent/decisions.jsonl --model agent/model_params.json"
+ssh $PI_HOST "cd ~/home-energy-agent && source agent/venv/bin/activate && python3 agent/replay_solar_quantile.py --jsonl agent/decisions.jsonl --model agent/model_params.json"
 ```
 
 Report from its output:

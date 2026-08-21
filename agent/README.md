@@ -19,7 +19,7 @@ These need millisecond-reliable triggers — not a 30-min agent cycle.
 ## Setup
 
 ```bash
-cd /Users/simonmonk/homeassistant/agent
+cd agent
 python3 -m venv venv
 source venv/bin/activate
 pip install anthropic requests pytz
@@ -49,7 +49,7 @@ python energy_agent.py
 
 ```cron
 # crontab -e
-*/30 * * * * /Users/simonmonk/homeassistant/agent/venv/bin/python /Users/simonmonk/homeassistant/agent/energy_agent.py >> /tmp/energy_agent.log 2>&1
+*/30 * * * * ~/home-energy-agent/agent/venv/bin/python ~/home-energy-agent/agent/energy_agent.py >> /tmp/energy_agent.log 2>&1
 ```
 
 Or trigger from HA via a shell_command + automation if you want HA to control timing.

@@ -16,7 +16,7 @@
 #
 # The live instance is the one on the Pi (Docker `homeassistant`, config mounted
 # from ~/homeassistant/config). It is both what the agent talks to and what the
-# browser dashboard at http://energypi.local:8123 shows. A second, vestigial HA
+# browser dashboard shows. A second, vestigial HA
 # container on the Mac Studio is NOT used — see energy_log 2026-07-22.
 #
 # Config is applied with targeted reloads (automation/template/input_*),
@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-PI="${PI_HOST:-energypi.local}"
+PI="${PI_HOST:?Set PI_HOST to your Pi hostname (e.g. mypi.local)}"
 REPO_CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config"
 REMOTE_CONFIG="\$HOME/homeassistant/config"
 REMOTE_BACKUPS="\$HOME/homeassistant/config-backups"

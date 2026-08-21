@@ -16,8 +16,8 @@ validated control action), the two directional divergence counts:
 A good knob setting drives A down sharply while keeping B ~flat.
 
 Run on the Pi (needs the venv + the EDITED optimizer.py in the same dir):
-  scp optimizer.py replay_solar_quantile.py energypi.local:/tmp/lp_test/
-  ssh energypi.local 'cd /tmp/lp_test && source ~/home-energy-agent/agent/venv/bin/activate \
+  scp optimizer.py replay_solar_quantile.py $PI_HOST:/tmp/lp_test/
+  ssh $PI_HOST 'cd /tmp/lp_test && source ~/home-energy-agent/agent/venv/bin/activate \
       && python3 replay_solar_quantile.py \
            --jsonl ~/home-energy-agent/agent/decisions.jsonl \
            --model ~/home-energy-agent/agent/model_params.json'

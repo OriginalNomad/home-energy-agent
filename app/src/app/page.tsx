@@ -82,7 +82,7 @@ export default function Home() {
         <div className="grid grid-cols-12 gap-4 px-6 py-8">
           <div className="col-span-12 flex items-center justify-between">
             <span style={{ color: 'var(--color-ink-mute)', fontSize: '14px', fontVariationSettings: '"wght" 460' }}>
-              sol.io · Glebe, Sydney · 2026
+              sol.io · 2026
             </span>
             <span style={{ color: 'var(--color-ink-faint)', fontSize: '14px', fontVariationSettings: '"wght" 460' }}>
               Energy optimisation

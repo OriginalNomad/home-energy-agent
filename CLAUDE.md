@@ -65,7 +65,7 @@ If the session was read-only (no changes made), still add a brief log entry if a
 `config/` in this repo is **not** read by Home Assistant. The live instance is the
 Docker `homeassistant` container **on the Pi**, config mounted from
 `~/homeassistant/config` — that is both what the agent talks to (`localhost:8123`)
-and what the dashboard at `http://energypi.local:8123` shows.
+and what the HA dashboard shows.
 
 Editing `config/` changes nothing until deployed:
 

@@ -6,7 +6,7 @@ These rules are implemented by three Python layers in `agent/energy_agent.py`, r
 
 **Layer A — Deterministic rule layer (IN CONTROL)**: `compute_decision_context()` + `_execute_deterministic_verdict()`. A pure Python `if/elif` rule tree that reads current state and executes all set_* API calls. This is the control path. Kill-switch: `DETERMINISTIC_AUTHORITATIVE = False`.
 
-**Layer B — LLM narrative logger (selective, cosmetic only)**: Claude runs after the deterministic layer and writes a plain-English log entry. Its `set_*` calls are no-ops. System prompt is ~65 lines (slimmed 2026-06-09). **Phase 7 (2026-06-23):** on routine hold cycles (`overnight_hold_wait_for_sponge`, `peak_early_morning_hold`, `demand_window_active`, `peak_target_met`, `peak_solar_will_cover`, `target_met`, `peak_on_track`, `nonpeak_on_track`) where no action was taken and the rule hasn't changed from the previous cycle, the LLM call is skipped entirely — `_build_auto_summary()` writes a one-line `[auto]` entry directly to JSONL and HA notifications. LLM runs on any action, unusual rule, or rule change.
+**Layer B — Structured notifications (2026-08-17, replacing LLM narrative)**: `_build_auto_summary()` templates the notification directly from `computed_context` / `computed_verdict` fields. Format: `Rule · SoC→target · deadline · price/fwd/spread · fill times · solar · action · one-line synthesis`. Every fact is the exact value the rule tree used — no LLM interpretation, no hallucinated numbers. The LLM narrative call is skipped on ALL cycles when `STRUCTURED_NOTIFICATIONS = True`. Kill-switch: `STRUCTURED_NOTIFICATIONS = False` reverts to Phase 7 behaviour (LLM on interesting cycles, one-liner on routine holds). **Phase 7 (2026-06-23, now subsumed):** routine holds were already LLM-free; structured notifications extends this to ALL cycles.
 
 **Layer C — LP optimiser / MPC (shadow, not in control)**: `agent/optimizer.py`, a receding-horizon linear program. Runs every cycle, logs its verdict to `decisions.jsonl` alongside the deterministic verdict for comparison. Not yet in the control path.
 
@@ -410,7 +410,7 @@ In non-peak months this override doesn't apply — let economics decide.
 **2. Daytime temporary-vs-all-day cloud disambiguation:**
 If Solcast shows `unreliable` accuracy but Open-Meteo `radiation_wm2` for the next 2–3 hours is > 250 W/m², the cloud is likely passing — wait 30 min before charging from grid. If radiation is also < 150 W/m², it is a genuine all-day cloudy day — act on it immediately.
 
-**Radiation thresholds for this site (6.12 kWp flat roof, Glebe):**
+**Radiation thresholds for this site (6.12 kWp flat roof):**
 - > 300 W/m²: good (likely > 1.5 kW panel output)
 - 150–300 W/m²: poor (0.5–1.5 kW)
 - < 150 W/m²: overcast (< 0.5 kW, effectively no solar contribution)
@@ -452,12 +452,14 @@ If `kWh_needed ≤ 0`: fire `peak_solar_will_cover` (hold — net solar covers t
 | Condition | Action |
 |-----------|--------|
 | `hours_to_fill_fast ≥ hours_remaining − FAST_ESCALATE_BUFFER_H` (1.5h) | **Autonomous NOW** (`peak_deadline_autonomous`) — the 5 kW rate's point-of-no-return |
-| else if `hours_to_fill_slow ≥ hours_remaining` | **Gentle self_consumption lead** (`peak_deadline_gentle_lead`) — start charging now at ~1.7 kW, hold the 5 kW option for a later cycle |
+| else if `hours_to_fill_slow ≥ hours_remaining − GENTLE_LEAD_MARGIN_H` (1.0h) | **Gentle self_consumption lead** (`peak_deadline_gentle_lead`) — start charging now at ~1.7 kW, hold the 5 kW option for a later cycle |
 | `hours_to_fill_slow ≥ hours_remaining − 1.0h` (in-sponge branch) | Self_consumption NOW — stop deferring |
 
 Price spread is irrelevant. Demand charge ≈ $100/month ($3.30/day). Paying 5¢/kWh extra on 10 kWh costs 50¢. Always charge — the maths is obvious.
 
 **Rule 33 — receding-horizon deadline escalation (2026-07-26).** The escalation used to jump straight to `autonomous` (5 kW) the instant `fill_slow ≥ hours_remaining` — i.e. the moment gentle self_consumption could no longer fill the *whole* remaining gap in one shot. On 2026-07-26 that slammed 5 kW at 10:00 with SoC 16% and ~4.9h to the deadline, even though a 5 kW charge fills in <2h (≈3h of slack), and at the worst-informed moment of the day (winter-morning solar credit is ~0 because Solcast over-forecasts mornings ~7×). Fix: escalate to `autonomous` only at the **fast rate's** point-of-no-return — `hours_remaining ≤ fill_fast + FAST_ESCALATE_BUFFER_H`. Below that, lead with a gentle self_consumption charge (`peak_deadline_gentle_lead`) that makes progress while holding the 5 kW option in reserve; every cycle re-evaluates with fresher solar/price/SoC. `FAST_ESCALATE_BUFFER_H` (default **1.5h**) *is* the demand-charge safety margin — it guarantees there is always time to finish at 5 kW even if solar craters. Bigger buffer = escalate earlier (safer, more premature 5 kW); smaller = leaner. Kill-switch `DEADLINE_GENTLE_LEAD = False` reverts to the old straight-to-autonomous behaviour. (Supersedes the 2026-06-24 note below, which made deadline urgency *always* autonomous.)
+
+**GENTLE_LEAD_MARGIN_H fix (2026-08-17).** The gentle_lead condition was `fill_slow_85 ≥ hours_to_2_55` (exactly at the line). On 2026-08-17 08:00, SoC=5% on a peak day, `fill_slow_85` was 6.8h and `hours_to_2_55` was 6.9h — a 0.1h margin — so the tree fell through to `wait_for_cheap_go_hard` and held for a 9¢ Solar Sponge slot, gaining nothing (gentle_lead fired 30 min later anyway). Fix: widen the gentle_lead trigger to `fill_slow_85 ≥ hours_to_2_55 − GENTLE_LEAD_MARGIN_H` (default **1.0h**). When the slow fill is within 1h of the deadline, start gentle charging immediately instead of holding for a marginally cheaper slot.
 
 **Implementation note (fixed 2026-06-24, since superseded by Rule 33):** when `fill_slow ≥ hours_remaining` (self_consumption too slow), the code previously checked `price ≤ forward_min` and used `self_consumption` if prices were flat — but self_consumption physically cannot reach 85% in the available time regardless of price. That fix made deadline urgency always go `autonomous`; Rule 33 refines it to gentle-lead-until-the-fast-point-of-no-return.
 

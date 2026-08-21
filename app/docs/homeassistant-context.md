@@ -6,9 +6,9 @@
 
 ## What this project is
 
-A Home Assistant-based battery optimisation system for a single residential site in Glebe, Sydney. It controls a Tesla Powerwall 2 using price forecasts (Amber Electric dynamic tariff) and solar forecasts (Solcast) to minimise electricity bills and avoid network demand charges.
+A Home Assistant-based battery optimisation system for a single residential site. It controls a Tesla Powerwall 2 using price forecasts (Amber Electric dynamic tariff) and solar forecasts (Solcast) to minimise electricity bills and avoid network demand charges.
 
-This is also the personal testbed for **Sol** — a multi-tenant battery optimisation product being built at `/Users/simonmonk/Simon Projects/Home Energy Console/`. The rules and architecture here will eventually be replaced by Sol's MPC solver.
+This is also the personal testbed for **Sol** — a multi-tenant battery optimisation product. The rules and architecture here will eventually be replaced by Sol's MPC solver.
 
 ---
 
@@ -21,7 +21,7 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 | **EV** | Polestar 4 (~100 kWh), charged via Zappi 2 |
 | **AC** | Daikin, 3 zones, ~3.5 kW max load |
 | **Tariff** | Amber Electric, Ausgrid EA116 |
-| **Location** | Glebe, Sydney (grid: Ausgrid) |
+| **Location** | Sydney (grid: Ausgrid) |
 
 **Key tariff facts (EA116):**
 - Demand charge applies **Nov, Dec, Jan, Feb, Mar, Jun, Jul, Aug** — 3–9pm daily
@@ -41,13 +41,13 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 **Known limitation**: Cannot command a specific charge rate. Tesla's firmware decides how aggressively to pull from grid in `self_consumption` mode — typically conservative. This is why the battery sometimes doesn't reach 100% by 3pm even when grid is cheap. Full solution requires Tesla Fleet API or MPC with rate commands.
 
 **Tessie API credentials:**
-- Energy site ID: `2252120180790091`
+- Energy site ID: in `.env` (`TESSIE_SITE_ID`)
 - Token: in `config/secrets.yaml`
 - Endpoints: `POST /api/1/energy_sites/{id}/backup` with `{"backup_reserve_percent": N}`
 
 **Solcast credentials:**
 - API Key: stored in the HA Solcast integration config (not in this repo)
-- Resource ID: `fd2e-343e-680f-b27e`
+- Resource ID: in Solcast integration config
 - Integration: HACS "HA Solcast PV Solar Forecast Integration" by BJReplay
 
 ---
@@ -109,6 +109,6 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 
 This HA system is intentionally a **rule-based approximation** of what an MPC solver would do. The rules are explicit and debuggable, but brittle — each goal is tangled into multiple rules, there's no look-ahead beyond simple forecast checks, and tradeoffs can't be expressed as weights.
 
-The Sol product (`/Users/simonmonk/Simon Projects/Home Energy Console/`) is being built to replace this with a proper goal-driven MPC architecture. This site is the first use case.
+The Sol product is being built to replace this with a proper goal-driven MPC architecture. This site is the first use case.
 
 When something behaves unexpectedly here, the answer is almost always in `energy_rules.md` — read that first.

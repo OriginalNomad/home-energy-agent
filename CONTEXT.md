@@ -6,7 +6,7 @@
 
 ## What this project is
 
-A Home Assistant-based battery optimisation system for a single residential site in Glebe, Sydney. It controls a Tesla Powerwall 2 using price forecasts (Amber Electric dynamic tariff) and solar forecasts (Solcast) to minimise electricity bills and avoid network demand charges.
+A Home Assistant-based battery optimisation system for a single residential site. It controls a Tesla Powerwall 2 using price forecasts (Amber Electric dynamic tariff) and solar forecasts (Solcast) to minimise electricity bills and avoid network demand charges.
 
 This is also the personal testbed for **Sol** — a multi-tenant battery optimisation product being built in `app/`. The rules and architecture here will eventually be replaced by Sol's MPC solver.
 
@@ -21,7 +21,7 @@ This is also the personal testbed for **Sol** — a multi-tenant battery optimis
 | **EV** | Polestar 4 (~100 kWh), charged via Zappi 2 |
 | **AC** | Daikin, 3 zones, ~3.5 kW max load |
 | **Tariff** | Amber Electric, Ausgrid EA116 |
-| **Location** | Glebe, Sydney (grid: Ausgrid) |
+| **Location** | Sydney (grid: Ausgrid) |
 
 **Key tariff facts (EA116):**
 - Demand charge applies **Nov, Dec, Jan, Feb, Mar, Jun, Jul, Aug** — 3–9pm daily
@@ -44,33 +44,12 @@ Powerwall sensors alone; they see the house branch only (`load_power` excludes t
 
 ## Network topology (matters for any non-energy integration)
 
-The Pi is **dual-homed** on two separate networks:
+See `NETWORK.md` (gitignored) for IPs, MACs, and device-specific details. Key architectural facts:
 
-| Interface | IP | Network | Role |
-|-----------|-----|---------|------|
-| `eth0` (wired) | 192.168.0.67/24 | 192.168.0.x | **Default route.** Energy-side segment (Powerwall/inverter system side). |
-| `wlan0` (WiFi) | 192.168.68.80/22 | 192.168.68.x | Home LAN — **the Tesla/Powerwall Gateway (`192.168.68.51`)**, Sonos speakers, Meross plugs, general devices |
-
-HA runs in the `homeassistant` Docker container in **`host`** network mode. Because the
-**default route is eth0**, any integration relying on multicast/SSDP/mDNS discovery (Sonos,
-Meross, etc.) broadcasts out eth0 and never finds devices on the 192.168.68.x WiFi side — and
-advertises the unreachable eth0 IP for callbacks. **Fix pattern: seed device IPs manually and
-force the callback/advertise address to `192.168.68.80`.** Sonos does this via the `sonos:`
-block in `configuration.yaml` (`hosts:` + `advertise_addr`). Speakers/plugs on 68.x should have
-**reserved DHCP leases** or the hardcoded IPs go stale (Hallway already drifted once — see
-energy_log 2026-07-24). None of this touches the battery agent, which talks to HA at
-`localhost:8123`.
-
-**The Powerwall's HA-facing gateway is on the WiFi LAN, not the energy segment (corrected 2026-07-29).**
-HA's `tesla_powerwall` integration reaches the Tesla Backup Gateway 2 at **`192.168.68.51`** on the WiFi
-(68.x) side — *not* `192.168.0.x`. Assuming otherwise cost real diagnosis time on 2026-07-29. Like every
-68.x device it needs a **reserved DHCP lease**: after a full Powerwall+gateway power-down that day it
-drifted `.65 → .51`, and HA (hardcoded to `.65`) lost all `sensor.tesla_powerwall_2_*` — which *also*
-crashed the 2:55 demand-window reset (a bare `| int` on the now-`unavailable` sensor). Now DHCP-reserved
-on the Deco (gateway MAC `28:0f:eb:91:6d:f0` → `.51`), and the demand-window automations were hardened
-(every `| int`/`| float` defaulted; SoC refs switched to the cloud `sensor.tessie_powerwall_charge`). The
-gateway's local API (`https://192.168.68.51`, login user `customer`) is healthy on fw 26.18.3. The battery
-**agent** was never affected — it uses the Tessie cloud API + HA at `localhost`, not the local gateway.
+- The Pi is **dual-homed** — wired to the energy segment (default route), WiFi to the home LAN where the Powerwall gateway lives.
+- HA runs in Docker **`host`** network mode. Because the default route is `eth0`, multicast/SSDP/mDNS integrations (Sonos, Meross) need manual IP seeding and `advertise_addr` overrides. All LAN devices HA depends on need **reserved DHCP leases**.
+- The Powerwall gateway is on the **WiFi LAN** side, not the energy segment. It needs a DHCP reservation; IP drift after a power-down previously broke all `sensor.tesla_powerwall_2_*` and crashed the demand-window reset.
+- The battery **agent** is unaffected by LAN topology — it uses the Tessie cloud API + HA at `localhost`.
 
 ---
 
@@ -109,8 +88,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 **Secrets — single source of truth is the Pi (established 2026-07-28):**
 - The agent runs on the Pi, so **production secrets live in exactly one place:**
-  `energypi.local:~/home-energy-agent/agent/.env`. Rotate/update keys there
-  (`ssh -t energypi.local nano ~/home-energy-agent/agent/.env`). The **Mac's `agent/.env` is
+  `$PI_HOST:~/home-energy-agent/agent/.env`. Rotate/update keys there. The **Mac's `agent/.env` is
   DEV-ONLY** (only `ANTHROPIC_API_KEY`, for local script runs) and now carries a banner saying so —
   editing it does **not** change what the running agent uses. That Mac/Pi mismatch is exactly what
   caused the 2026-07-26 key-expiry outage. `.env` is gitignored; `agent/.env.example` documents the
@@ -119,7 +97,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 **Tessie API credentials:**
 - Regenerate the token at **tessie.com → Settings → Developer** (regenerating kills the old token
   immediately — see the two-file update + `!secret` deploy in `todo.md`).
-- Energy site ID: `2252120180790091` (an identifier, not a secret)
+- Energy site ID: in `.env` (`TESSIE_SITE_ID`)
 - Token lives in **two** files on the Pi (both need the new value on rotation): the agent reads
   `TESSIE_TOKEN` from `agent/.env`; HA reads `tessie_bearer` from the **root-owned**
   `~/homeassistant/config/secrets.yaml` (`tessie_bearer: "Bearer <token>"`, edit with `sudo nano`).
@@ -132,7 +110,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 **Solcast credentials:**
 - API Key: stored in the HA Solcast integration config (not in this repo)
-- Resource ID: `fd2e-343e-680f-b27e`
+- Resource ID: in Solcast integration config
 - DC capacity: 6.12 kWp, AC: ~5 kW, Tilt: 0° (flat roof)
 - Integration: HACS "HA Solcast PV Solar Forecast Integration" by BJReplay
 
@@ -142,7 +120,7 @@ The agent compares `forecast_this_hour` (hourly aggregate, more stable) against 
 
 `config/` in this repo is **not** read by Home Assistant. The live instance is the
 Docker `homeassistant` container **on the Pi** (`~/homeassistant/config`) — both what
-the agent talks to and what `http://energypi.local:8123` shows. There is exactly one HA —
+the agent talks to and what the HA dashboard shows. There is exactly one HA —
 the Mac's second instance was retired 2026-07-22.
 
 ```bash
@@ -161,9 +139,9 @@ sync; `--check` reports zero drift.
 
 | Host | Role |
 |------|------|
-| **Raspberry Pi 5** (`energypi.local`, `192.168.0.67`) | **Runs everything live**: Home Assistant (Docker, `~/homeassistant/config` → `/config`), energy agent cron, cloudflared tunnel |
-| **Mac Studio** (`192.168.68.70`) | Development machine only. **HA container retired 2026-07-22** (stopped, `--restart=no`). InfluxDB container still running but nothing feeds it |
-| **GitHub** (`OriginalNomad/home-energy-agent`) | Single repo, auto-deployed to Pi on each cron run |
+| **Raspberry Pi 5** | **Runs everything live**: Home Assistant (Docker, `~/homeassistant/config` → `/config`), energy agent cron, cloudflared tunnel |
+| **Mac** | Development machine only. **HA container retired 2026-07-22** (stopped, `--restart=no`). InfluxDB container still running but nothing feeds it |
+| **GitHub** | Single repo, auto-deployed to Pi on each cron run |
 
 **There is one Home Assistant, and it is on the Pi.** Until 2026-07-22 a second instance
 ran on the Mac with a Jun 4 config; nothing pointed at it, and its existence is how the
@@ -176,12 +154,12 @@ agent. Code deploy = `git push` from Mac. **The pull is decoupled from the run (
 failed or conflicted `git pull` can no longer stop the agent; it runs on whatever code is checked
 out. **Nightly at 02:00** a second cron runs `build_models.py` to retrain the models.
 **`agent/model_params.json` is gitignored/machine-local (2026-07-24)** — rebuilt on the Pi nightly,
-never tracked; read the live model with `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"`
+never tracked; read the live model with `ssh $PI_HOST "cat ~/home-energy-agent/agent/model_params.json"`
 (the Mac's copy is a stale snapshot). This pairing defuses the deploy hazard where a tracked,
 locally-modified `model_params.json` made `git pull` abort and silently stopped the agent.
 **HA config deploy**: `./deploy_ha_config.sh` (see the warning block above) — *not* git.
-**Cloudflare Tunnel**: `https://agent.sol.io` → Pi cloudflared → `http://localhost:8123` (the Pi's own HA). Systemd service, Sydney edge. Verified still 200 after the Mac HA was stopped.
-**HA external URL**: `https://agent.sol.io`. Trusted proxies cover localhost + Pi/Mac subnets + Docker bridge.
+**Cloudflare Tunnel**: external URL → Pi cloudflared → `http://localhost:8123` (the Pi's own HA). Verified still 200 after the Mac HA was stopped.
+**HA external URL**: set via Cloudflare Tunnel. Trusted proxies cover localhost + local subnets + Docker bridge.
 
 ## System architecture (as of 2026-06-23)
 
@@ -678,10 +656,10 @@ Counts below were read from the live HA, not from the file. To re-verify:
 | `agent/daily_energy.jsonl` | Durable per-day energy record (survives HA recorder rolloff) — source of truth for dashboard cards and future learning agent. `demand_window` now carries `status`+`cost_est_dollars` (plus legacy `passed`) |
 | `agent/demand_window_summary.py` | Pushes `sensor.demand_window_monitor` into HA via REST API (month peak kW + est $/mo + rolling per-day history, re-scored from `peak_kw` under current bands). Reads daily_energy.jsonl. Crons: 21:05 + hourly. Feeds two Markdown dashboard cards |
 | `agent/data_logger.py` | Closed-loop SQLite logger — one row per cycle in `energy_log.db`. Foundation for self-calibrating models (Phase 2.5-A+). Wired in 2026-06-06. |
-| `agent/energy_log.db` | SQLite DB on Pi only (gitignored). Accumulates state + price forecasts + decisions each cycle. Inspect: `ssh energypi.local "agent/venv/bin/python home-energy-agent/agent/data_logger.py"` |
+| `agent/energy_log.db` | SQLite DB on Pi only (gitignored). Accumulates state + price forecasts + decisions each cycle. Inspect: `ssh $PI_HOST "agent/venv/bin/python home-energy-agent/agent/data_logger.py"` |
 | `deploy_ha_config.sh` | Deploys `config/` to the live HA on the Pi. `--check` diffs without changing anything. **HA does not read `config/` directly** |
 | `agent/build_models.py` | Calibration model builder — run on Pi after 2+ weeks of `energy_log.db` data. Builds solar_correction (per-hour Solcast bias ratio) and charge_rate_kw (autonomous rates by SoC bucket) and writes to `model_params.json`. Run: `cd ~/home-energy-agent && agent/venv/bin/python agent/build_models.py` |
-| `agent/model_params.json` | Calibration parameters loaded at agent startup. Contains `solar_correction` (per-hour Solcast ratio), `charge_rate_kw.self_consumption` and `.autonomous`. **Gitignored / machine-local since 2026-07-24** — rebuilt on the Pi nightly (02:00 `build_models.py` cron), *not* tracked in git. The Mac's copy is a stale snapshot; **read the live model with** `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"`. Charge-rate window is asymmetric (`kw = min(10-day, 2-day median)`; rises on sustained evidence, falls in ~1 day). Agent loads it with a graceful `{}` fallback, so absence degrades to hardcoded rates + raw Solcast. |
+| `agent/model_params.json` | Calibration parameters loaded at agent startup. Contains `solar_correction` (per-hour Solcast ratio), `charge_rate_kw.self_consumption` and `.autonomous`. **Gitignored / machine-local since 2026-07-24** — rebuilt on the Pi nightly (02:00 `build_models.py` cron), *not* tracked in git. The Mac's copy is a stale snapshot; **read the live model with** `ssh $PI_HOST "cat ~/home-energy-agent/agent/model_params.json"`. Charge-rate window is asymmetric (`kw = min(10-day, 2-day median)`; rises on sustained evidence, falls in ~1 day). Agent loads it with a graceful `{}` fallback, so absence degrades to hardcoded rates + raw Solcast. |
 
 ---
 
@@ -788,7 +766,7 @@ Counts below were read from the live HA, not from the file. To re-verify:
   (Rule: `kw = min(10-day median, 2-day median)` — rises only on sustained evidence, falls within
   ~1 day). As of the 07-24 rebuild most `self_consumption` buckets are still held at 1.67 (intended);
   note SoC=20% already reads 4.96 due to sparse old-regime samples in that bucket. Check the flip
-  via `ssh energypi.local "cat ~/home-energy-agent/agent/model_params.json"` — no manual rebuild needed.
+  via `ssh $PI_HOST "cat ~/home-energy-agent/agent/model_params.json"` — no manual rebuild needed.
 - **Rule 15's insurance floor does nothing until April** (gated `not is_peak`). The 30% set on
   2026-07-23 is parked, not active.
 
@@ -817,4 +795,4 @@ This is a working prototype of what Sol will productise. The agent replaces the 
 - Check `energy_rules.md` for the underlying business logic
 - The safety automations (export guard, demand window reset) fire independently — check HA automations if the agent seems to be overridden
 
-The Sol product (`/Users/simonmonk/Simon Projects/Home Energy Console/`) will eventually replace the agent with a proper MPC solver, but the three-layer architecture (intent → optimiser → safety rules) remains the design.
+The Sol product will eventually replace the agent with a proper MPC solver, but the three-layer architecture (intent → optimiser → safety rules) remains the design.

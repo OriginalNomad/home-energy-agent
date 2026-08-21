@@ -10,7 +10,7 @@ Sol is a web prototype for a goal-driven home battery optimisation product. The 
 
 This prototype demonstrates the onboarding flow: the conversational goal elicitation, site configuration, and profile saving. It is **not yet** connected to a live battery or solver — it's a UX/product prototype for testing the conversation design and saving user data for research.
 
-The companion home automation system (the real Powerwall being controlled today) lives at `/Users/simonmonk/Simon Projects/Home Energy Console/`. Read that project's `CONTEXT.md` for that side of the work.
+The companion home automation system (the real Powerwall being controlled today) lives in the sibling `Home Energy Optimiser` project. Read that project's `CONTEXT.md` for that side of the work.
 
 ---
 
@@ -142,6 +142,6 @@ Full details in `DESIGN.md`.
 
 ## Product context
 
-Sol is the product version of the home automation rules in `/Users/simonmonk/Simon Projects/Home Energy Console/`. The HA system is a hand-crafted rule-based approximation; Sol will eventually replace it with a proper MPC solver. The goal elicitation conversation is the differentiator — competitors hardcode their own goals into the optimiser; Sol asks users what they actually want.
+Sol is the product version of the home automation rules in the sibling `Home Energy Optimiser` project. The HA system is a hand-crafted rule-based approximation; Sol will eventually replace it with a proper MPC solver. The goal elicitation conversation is the differentiator — competitors hardcode their own goals into the optimiser; Sol asks users what they actually want.
 
-The first real user is Simon Monk (simon@sol.io) — the person building it. His site: Powerwall 2 + SolarEdge 5kW + Polestar 4 + Zappi + Daikin AC, Amber Electric EA116 tariff, Glebe Sydney.
+The reference site: Powerwall 2 + SolarEdge 5kW + EV + EVSE + heat pump AC, Amber Electric tariff.

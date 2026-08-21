@@ -38,7 +38,7 @@ HA_HEADERS = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "applicatio
 AMBER_API_KEY = os.environ.get("AMBER_API_KEY", "")
 AMBER_BASE    = "https://api.amber.com.au/v1"
 AMBER_HEADERS = {"accept": "application/json", "Authorization": f"Bearer {AMBER_API_KEY}"}
-SITE_ID       = "01E8RD8PYWENHX1CKR9MX38K69"
+SITE_ID       = os.environ.get("AMBER_SITE_ID", "")
 
 TZ = pytz.timezone("Australia/Sydney")
 
@@ -50,10 +50,122 @@ DAILY_SUPPLY_RATE = 1.0994       # $/day (Jul 2026 rate)
 AMBER_MEMBERSHIP  = 23.16        # $/month (Jul 2026)
 GST_RATE          = 0.10
 
-# Historical bill data from PDFs (months before API coverage).
+# Historical bill data from PDFs + bill_comparison_36months.csv.
 # Format: {month: {bill_total, usage_cost, supply_cost, demand_cost, amber_fee,
 #                   gst, export_credit, usage_kwh, export_kwh}}
+# Covers Jan 2023 – Jul 2026. Demand tariff started ~Jul 2024.
+# Months marked [R] include a $75 NSW Energy Bill Relief rebate in bill_total
+# not reflected in export_credit (solar export only).
+# export_kwh sourced from PDF bills for all months.
 HISTORICAL_BILLS = {
+    "2023-01": {"bill_total": -77.35,  "usage_cost": 61.12, "supply_cost": 31.74,
+                "demand_cost": 0,      "amber_fee": 13.90, "gst": 10.67,
+                "export_credit": 182.29, "usage_kwh": 379.0, "export_kwh": 462.0},
+    "2023-02": {"bill_total": -98.54,  "usage_cost": 49.04, "supply_cost": 28.67,
+                "demand_cost": 0,      "amber_fee": 12.55, "gst": 9.04,
+                "export_credit": 170.87, "usage_kwh": 284.0, "export_kwh": 442.0},
+    "2023-03": {"bill_total": -106.55, "usage_cost": 67.69, "supply_cost": 31.74,
+                "demand_cost": 0,      "amber_fee": 13.90, "gst": 11.34,
+                "export_credit": 216.23, "usage_kwh": 397.5, "export_kwh": 395.0},
+    "2023-04": {"bill_total": -3.91,   "usage_cost": 76.83, "supply_cost": 30.72,
+                "demand_cost": 0,      "amber_fee": 13.45, "gst": 12.09,
+                "export_credit": 137.00, "usage_kwh": 456.0, "export_kwh": 287.0},
+    "2023-05": {"bill_total": -69.42,  "usage_cost": 109.82, "supply_cost": 31.74,
+                "demand_cost": 0,      "amber_fee": 13.90, "gst": 15.56,
+                "export_credit": 240.44, "usage_kwh": 543.5, "export_kwh": 272.0},
+    "2023-06": {"bill_total": 13.12,   "usage_cost": 73.54, "supply_cost": 30.72,
+                "demand_cost": 0,      "amber_fee": 13.45, "gst": 11.75,
+                "export_credit": 116.34, "usage_kwh": 468.5, "export_kwh": 218.0},
+    "2023-07": {"bill_total": 11.43,   "usage_cost": 61.92, "supply_cost": 27.71,
+                "demand_cost": 0,      "amber_fee": 17.60, "gst": 10.72,
+                "export_credit": 102.52, "usage_kwh": 447.2, "export_kwh": 244.0},
+    "2023-08": {"bill_total": -27.16,  "usage_cost": 60.66, "supply_cost": 27.71,
+                "demand_cost": 0,      "amber_fee": 17.60, "gst": 10.58,
+                "export_credit": 139.71, "usage_kwh": 408.3, "export_kwh": 266.0},
+    "2023-09": {"bill_total": -71.34,  "usage_cost": 22.54, "supply_cost": 26.81,
+                "demand_cost": 0,      "amber_fee": 17.04, "gst": 6.64,
+                "export_credit": 140.37, "usage_kwh": 184.3, "export_kwh": 317.0},
+    "2023-10": {"bill_total": -55.17,  "usage_cost": 20.40, "supply_cost": 27.71,
+                "demand_cost": 0,      "amber_fee": 17.60, "gst": 6.56,
+                "export_credit": 127.44, "usage_kwh": 178.2, "export_kwh": 386.0},
+    "2023-11": {"bill_total": -77.29,  "usage_cost": 27.30, "supply_cost": 26.81,
+                "demand_cost": 0,      "amber_fee": 17.04, "gst": 7.10,
+                "export_credit": 136.54, "usage_kwh": 165.7, "export_kwh": 321.0},
+    "2023-12": {"bill_total": -64.05,  "usage_cost": 36.30, "supply_cost": 27.71,
+                "demand_cost": 0,      "amber_fee": 17.60, "gst": 8.13,
+                "export_credit": 153.79, "usage_kwh": 227.1, "export_kwh": 401.0},
+    "2024-01": {"bill_total": -76.32,  "usage_cost": 40.66, "supply_cost": 27.71,
+                "demand_cost": 0,      "amber_fee": 17.60, "gst": 8.58,
+                "export_credit": 170.87, "usage_kwh": 237.8, "export_kwh": 432.0},
+    "2024-02": {"bill_total": -93.87,  "usage_cost": 45.90, "supply_cost": 25.91,
+                "demand_cost": 0,      "amber_fee": 16.47, "gst": 8.85,
+                "export_credit": 191.00, "usage_kwh": 270.3, "export_kwh": 346.0},
+    "2024-03": {"bill_total": -19.72,  "usage_cost": 37.56, "supply_cost": 27.71,
+                "demand_cost": 0,      "amber_fee": 17.60, "gst": 8.27,
+                "export_credit": 110.86, "usage_kwh": 278.1, "export_kwh": 300.0},
+    "2024-04": {"bill_total": -20.32,  "usage_cost": 38.09, "supply_cost": 26.81,
+                "demand_cost": 0,      "amber_fee": 17.04, "gst": 8.18,
+                "export_credit": 110.44, "usage_kwh": 275.8, "export_kwh": 253.0},
+    "2024-05": {"bill_total": -221.60, "usage_cost": 90.20, "supply_cost": 27.71,
+                "demand_cost": 0,      "amber_fee": 17.60, "gst": 13.57,
+                "export_credit": 370.68, "usage_kwh": 483.9, "export_kwh": 217.0},
+    "2024-06": {"bill_total": 35.07,   "usage_cost": 90.72, "supply_cost": 26.81,
+                "demand_cost": 0,      "amber_fee": 17.04, "gst": 13.45,
+                "export_credit": 112.95, "usage_kwh": 461.8, "export_kwh": 204.0},
+    "2024-07": {"bill_total": 54.71,   "usage_cost": 50.97, "supply_cost": 28.72,
+                "demand_cost": 20.13,  "amber_fee": 17.60, "gst": 11.75,
+                "export_credit": 74.46, "usage_kwh": 374.1, "export_kwh": 180.0},
+    "2024-08": {"bill_total": -115.94, "usage_cost": 59.07, "supply_cost": 28.72,  # [R]
+                "demand_cost": 19.47,  "amber_fee": 20.38, "gst": 12.79,
+                "export_credit": 181.37, "usage_kwh": 357.5, "export_kwh": 123.0},
+    "2024-09": {"bill_total": 40.74,   "usage_cost": 15.54, "supply_cost": 27.79,
+                "demand_cost": 0,      "amber_fee": 19.73, "gst": 6.31,
+                "export_credit": 28.63, "usage_kwh": 139.2, "export_kwh": 94.0},
+    "2024-10": {"bill_total": -55.53,  "usage_cost": 10.50, "supply_cost": 28.72,  # [R]
+                "demand_cost": 0,      "amber_fee": 20.38, "gst": 5.98,
+                "export_credit": 46.11, "usage_kwh": 77.1,  "export_kwh": 214.0},
+    "2024-11": {"bill_total": -133.86, "usage_cost": 16.75, "supply_cost": 27.79,
+                "demand_cost": 15.24,  "amber_fee": 19.73, "gst": 7.95,
+                "export_credit": 221.32, "usage_kwh": 97.3, "export_kwh": 326.0},
+    "2024-12": {"bill_total": -109.90, "usage_cost": 11.46, "supply_cost": 28.72,
+                "demand_cost": 5.06,   "amber_fee": 20.38, "gst": 6.59,
+                "export_credit": 182.11, "usage_kwh": 57.3, "export_kwh": 341.0},
+    "2025-01": {"bill_total": 9.41,    "usage_cost": 18.04, "supply_cost": 28.72,  # [R]
+                "demand_cost": 57.26,  "amber_fee": 20.38, "gst": 12.45,
+                "export_credit": 52.44, "usage_kwh": 135.9, "export_kwh": 184.0},
+    "2025-02": {"bill_total": 15.80,   "usage_cost": 11.06, "supply_cost": 25.94,
+                "demand_cost": 11.34,  "amber_fee": 18.41, "gst": 6.67,
+                "export_credit": 57.62, "usage_kwh": 82.0,  "export_kwh": 225.0},
+    "2025-03": {"bill_total": 44.24,   "usage_cost": 21.52, "supply_cost": 28.72,
+                "demand_cost": 23.49,  "amber_fee": 20.38, "gst": 9.43,
+                "export_credit": 59.30, "usage_kwh": 150.7, "export_kwh": 120.0},
+    "2025-04": {"bill_total": -63.72,  "usage_cost": 25.14, "supply_cost": 27.79,  # [R]
+                "demand_cost": 0,      "amber_fee": 19.73, "gst": 7.27,
+                "export_credit": 68.65, "usage_kwh": 195.1, "export_kwh": 153.0},
+    "2025-05": {"bill_total": -27.15,  "usage_cost": 40.01, "supply_cost": 28.73,
+                "demand_cost": 0,      "amber_fee": 20.38, "gst": 9.30,
+                "export_credit": 125.57, "usage_kwh": 333.8, "export_kwh": 161.2},
+    "2025-06": {"bill_total": -98.17,  "usage_cost": 49.64, "supply_cost": 27.79,
+                "demand_cost": 24.79,  "amber_fee": 19.73, "gst": 12.50,
+                "export_credit": 232.62, "usage_kwh": 335.8, "export_kwh": 143.1},
+    "2025-07": {"bill_total": 111.50,  "usage_cost": 58.48, "supply_cost": 29.74,
+                "demand_cost": 32.27,  "amber_fee": 20.38, "gst": 14.09,
+                "export_credit": 43.46, "usage_kwh": 452.3, "export_kwh": 174.1},
+    "2025-08": {"bill_total": 146.35,  "usage_cost": 64.69, "supply_cost": 29.74,
+                "demand_cost": 51.72,  "amber_fee": 23.16, "gst": 16.93,
+                "export_credit": 39.89, "usage_kwh": 522.6, "export_kwh": 152.3},
+    "2025-09": {"bill_total": -42.74,  "usage_cost": 15.94, "supply_cost": 28.77,  # [R]
+                "demand_cost": 0,      "amber_fee": 22.42, "gst": 6.71,
+                "export_credit": 41.58, "usage_kwh": 119.2, "export_kwh": 190.0},
+    "2025-10": {"bill_total": -59.23,  "usage_cost": 16.04, "supply_cost": 29.74,  # [R]
+                "demand_cost": 0,      "amber_fee": 23.16, "gst": 6.89,
+                "export_credit": 60.06, "usage_kwh": 132.1, "export_kwh": 228.9},
+    "2025-11": {"bill_total": -33.86,  "usage_cost": 7.99,  "supply_cost": 28.77,
+                "demand_cost": 1.06,   "amber_fee": 22.42, "gst": 6.02,
+                "export_credit": 100.12, "usage_kwh": 82.4, "export_kwh": 244.0},
+    "2025-12": {"bill_total": 143.60,  "usage_cost": 37.22, "supply_cost": 29.74,
+                "demand_cost": 88.14,  "amber_fee": 23.16, "gst": 17.83,
+                "export_credit": 52.49, "usage_kwh": 489.2, "export_kwh": 148.1},
     "2026-01": {"bill_total": 128.46, "usage_cost": 23.89, "supply_cost": 29.74,
                 "demand_cost": 88.59,  "amber_fee": 23.16, "gst": 16.53,
                 "export_credit": 53.45, "usage_kwh": 283.9, "export_kwh": 219.7},
@@ -204,8 +316,8 @@ def main():
         except Exception as e:
             print(f"  Error fetching current month: {e}", file=sys.stderr)
 
-    # Push to HA: one sensor with all months as attributes
-    sorted_months = sorted(months.keys())
+    # Push to HA: one sensor with completed months only (exclude current month estimate)
+    sorted_months = [m for m in sorted(months.keys()) if not months[m].get("is_estimate")]
     latest = sorted_months[-1] if sorted_months else "unknown"
     latest_total = months.get(latest, {}).get("bill_total", 0)
 

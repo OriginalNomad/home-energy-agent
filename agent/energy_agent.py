@@ -62,7 +62,7 @@ HA_URL   = os.environ.get("HA_URL",   "http://localhost:8123")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
 TESSIE_TOKEN   = os.environ.get("TESSIE_TOKEN",   "")
-TESSIE_SITE_ID = os.environ.get("TESSIE_SITE_ID", "2252120180790091")
+TESSIE_SITE_ID = os.environ.get("TESSIE_SITE_ID", "")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # set via agent/.env
 
@@ -594,10 +594,10 @@ def get_weather_forecast() -> dict:
     r = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
-            "latitude":  -33.88,
-            "longitude": 151.19,
+            "latitude":  float(os.environ.get("SITE_LATITUDE",  "-33.88")),
+            "longitude": float(os.environ.get("SITE_LONGITUDE", "151.19")),
             "hourly":    "cloud_cover,shortwave_radiation,precipitation_probability,precipitation",
-            "timezone":  "Australia/Sydney",
+            "timezone":  os.environ.get("SITE_TIMEZONE", "Australia/Sydney"),
             "forecast_days": 2,
         },
         timeout=10,
@@ -2372,7 +2372,7 @@ TOOLS = [
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """
-You are the narrative logger for a residential battery optimisation system in Glebe, Sydney.
+You are the narrative logger for a residential battery optimisation system.
 The deterministic rule layer has already executed all control actions this cycle.
 Your job is NARRATIVE ONLY — read the state, understand what was done and why, and log it clearly.
 Do NOT call set_powerwall_reserve, set_powerwall_mode, or set_zappi_mode — those are no-ops.
